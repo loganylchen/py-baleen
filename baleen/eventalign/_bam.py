@@ -14,6 +14,7 @@ import importlib
 import logging
 from pathlib import Path
 import tempfile
+import time
 from typing import Optional, Protocol, Union, cast
 
 import numpy as np
@@ -218,11 +219,14 @@ def get_contig_stats(
     validate_bam(bam_path)
 
     stats: dict[str, ContigStats] = {}
+    t0 = time.perf_counter()
 
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         index_stats = {item.contig: item for item in bam.get_index_statistics()}
+        n_refs = len(bam.references)
+        logger.debug("  Scanning %d reference contigs in %s", n_refs, bam_path)
 
-        for contig in bam.references:
+        for ref_idx, contig in enumerate(bam.references, 1):
             contig_len = bam.get_reference_length(contig)
             if contig_len <= 0:
                 continue
@@ -267,7 +271,10 @@ def get_contig_stats(
                 mean_depth=mean_depth,
             )
 
-    logger.info("Computed contig stats for %d contigs in %s", len(stats), bam_path)
+    logger.info(
+        "Computed contig stats for %d contigs in %s (%.1fs)",
+        len(stats), bam_path, time.perf_counter() - t0,
+    )
     return stats
 
 
@@ -421,6 +428,7 @@ def split_bam_contig(
     out_bam = output_dir / f"{contig}.bam"
 
     n_written = 0
+    t0 = time.perf_counter()
     with pysam.AlignmentFile(str(bam_path), "rb") as in_bam:
         if contig not in in_bam.references:
             raise ValueError(f"Contig '{contig}' not found in BAM: {bam_path}")
@@ -439,7 +447,10 @@ def split_bam_contig(
     if unsorted_bam.exists():
         unsorted_bam.unlink()
 
-    logger.info("Extracted %d reads for contig %s into %s", n_written, contig, out_bam)
+    logger.info(
+        "Extracted %d reads for contig %s into %s (%.1fs)",
+        n_written, contig, out_bam, time.perf_counter() - t0,
+    )
     return out_bam
 
 

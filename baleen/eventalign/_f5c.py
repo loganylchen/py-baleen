@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, Union, cast
 
@@ -143,12 +144,14 @@ def index_fastq_blow5(fastq: PathLike, blow5: PathLike) -> None:
     cmd = ["f5c", "index", "--slow5", str(blow5_path), str(fastq_path)]
     logger.debug("Running command: %s", " ".join(cmd))
 
+    t0 = time.perf_counter()
     try:
         _ = subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         stderr = cast(Optional[str], exc.stderr)
         stderr_text = (stderr or "").strip()
         raise RuntimeError(f"f5c index failed: {stderr_text}") from exc
+    logger.debug("f5c index completed in %.1fs: %s", time.perf_counter() - t0, fastq_path)
 
 
 def index_blow5(blow5: PathLike) -> None:
@@ -173,12 +176,14 @@ def index_blow5(blow5: PathLike) -> None:
     cmd = ["slow5tools", "index", str(blow5_path)]
     logger.debug("Running command: %s", " ".join(cmd))
 
+    t0 = time.perf_counter()
     try:
         _ = subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         stderr = cast(Optional[str], exc.stderr)
         stderr_text = (stderr or "").strip()
         raise RuntimeError(f"slow5tools index failed: {stderr_text}") from exc
+    logger.debug("slow5tools index completed in %.1fs: %s", time.perf_counter() - t0, blow5_path)
 
 
 def run_eventalign(
@@ -255,6 +260,7 @@ def run_eventalign(
 
     logger.debug("Running command: %s", " ".join(cmd))
 
+    t0 = time.perf_counter()
     try:
         with output_path.open("w", encoding="utf-8") as output_file:
             _ = subprocess.run(
@@ -269,4 +275,7 @@ def run_eventalign(
         stderr_text = (stderr or "").strip()
         raise RuntimeError(f"f5c eventalign failed: {stderr_text}") from exc
 
+    elapsed = time.perf_counter() - t0
+    size_kb = output_path.stat().st_size / 1024
+    logger.debug("f5c eventalign completed in %.1fs (output: %.1f KB): %s", elapsed, size_kb, output_path)
     return output_path

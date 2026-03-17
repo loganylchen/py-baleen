@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import time
 import typing
 from collections import defaultdict
 from collections.abc import Generator
@@ -100,7 +101,10 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
         lambda: defaultdict(list)
     )
 
+    t0 = time.perf_counter()
+    n_rows = 0
     for event in parse_eventalign(tsv_path):
+        n_rows += 1
         if event.position not in grouped:
             grouped[event.position] = PositionSignals(
                 contig=event.contig,
@@ -125,11 +129,10 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
             grouped[position].read_signals[read_name] = np.concatenate(chunks).astype(np.float32, copy=False)
 
     total_pairs = sum(len(ps.read_names) for ps in grouped.values())
+    elapsed = time.perf_counter() - t0
     logger.info(
-        "Parsed %d positions with %d total read-position pairs from %s",
-        len(grouped),
-        total_pairs,
-        tsv_path,
+        "Parsed %d rows → %d positions, %d read-position pairs from %s (%.1fs)",
+        n_rows, len(grouped), total_pairs, tsv_path, elapsed,
     )
     return grouped
 
