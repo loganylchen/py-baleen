@@ -137,7 +137,55 @@ class TestPipelineMetadata:
 
 
 class TestComputePairwiseDistances:
-    def test_variable_length_uses_dtw_distance_loop(self) -> None:
+    def test_standard_dtw_uses_batch_cdist(self) -> None:
+        """Standard DTW (no open boundaries, CPU) should use batch cdist_dtw, not loop."""
+        signals = [
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([1.5, 2.5, 3.5], dtype=np.float32),
+            np.array([2.0, 3.0, 4.0], dtype=np.float32),
+        ]
+        with patch("baleen.eventalign._pipeline._dtw_distance") as mock_dtw:
+            matrix = _compute_pairwise_distances(
+                signals,
+                use_cuda=False,
+                use_open_start=False,
+                use_open_end=False,
+            )
+        assert matrix.shape == (3, 3)
+        assert np.allclose(np.diag(matrix), 0.0)
+        assert np.allclose(matrix, matrix.T)
+        mock_dtw.assert_not_called()
+
+    def test_standard_dtw_variable_length_matches_pairwise_loop(self) -> None:
+        """Batch cdist_dtw with variable-length signals matches individual DTW calls."""
+        signals = [
+            np.array([1.0, 2.0], dtype=np.float32),
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([2.0], dtype=np.float32),
+        ]
+        matrix = _compute_pairwise_distances(
+            signals,
+            use_cuda=False,
+            use_open_start=False,
+            use_open_end=False,
+        )
+        assert matrix.shape == (3, 3)
+        assert np.allclose(np.diag(matrix), 0.0)
+        assert np.allclose(matrix, matrix.T)
+        from tslearn.metrics import dtw as tslearn_dtw
+        for i in range(3):
+            for j in range(i + 1, 3):
+                expected = tslearn_dtw(
+                    signals[i].reshape(-1, 1),
+                    signals[j].reshape(-1, 1),
+                )
+                np.testing.assert_allclose(
+                    matrix[i, j], expected, rtol=1e-5,
+                    err_msg=f"Mismatch at ({i},{j})",
+                )
+
+    def test_open_end_uses_loop_path(self) -> None:
+        """Open-boundary DTW must use per-pair loop (no batch shortcut)."""
         signals = [
             np.array([1.0, 2.0], dtype=np.float32),
             np.array([1.0, 2.0, 3.0], dtype=np.float32),
@@ -152,7 +200,7 @@ class TestComputePairwiseDistances:
                 signals,
                 use_cuda=None,
                 use_open_start=False,
-                use_open_end=False,
+                use_open_end=True,
             )
 
         assert matrix.shape == (3, 3)
@@ -161,6 +209,87 @@ class TestComputePairwiseDistances:
         assert matrix[1, 2] == 2.0
         assert np.allclose(matrix, matrix.T)
         assert mock_dtw.call_count == 3
+
+    def test_open_start_uses_loop_path(self) -> None:
+        """Open-start DTW must use per-pair loop."""
+        signals = [
+            np.array([1.0, 2.0], dtype=np.float32),
+            np.array([3.0, 4.0, 5.0], dtype=np.float32),
+        ]
+
+        def fake_dtw(a: NDArray[np.float32], b: NDArray[np.float32], **_: object) -> float:
+            return 42.0
+
+        with patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw) as mock_dtw:
+            matrix = _compute_pairwise_distances(
+                signals,
+                use_cuda=None,
+                use_open_start=True,
+                use_open_end=False,
+            )
+
+        assert matrix.shape == (2, 2)
+        assert matrix[0, 1] == 42.0
+        assert mock_dtw.call_count == 1
+
+    def test_cuda_uses_loop_path(self) -> None:
+        """CUDA backend must use per-pair loop (CUDA expects equal-length)."""
+        signals = [
+            np.array([1.0, 2.0], dtype=np.float32),
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        ]
+
+        def fake_dtw(a: NDArray[np.float32], b: NDArray[np.float32], **_: object) -> float:
+            return 99.0
+
+        with patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw) as mock_dtw:
+            matrix = _compute_pairwise_distances(
+                signals,
+                use_cuda=True,
+                use_open_start=False,
+                use_open_end=False,
+            )
+
+        assert matrix.shape == (2, 2)
+        assert matrix[0, 1] == 99.0
+        assert mock_dtw.call_count == 1
+
+    def test_two_signals_batch_path(self) -> None:
+        """Batch path works correctly with minimum 2 signals."""
+        signals = [
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([4.0, 5.0], dtype=np.float32),
+        ]
+        matrix = _compute_pairwise_distances(
+            signals,
+            use_cuda=False,
+            use_open_start=False,
+            use_open_end=False,
+        )
+        assert matrix.shape == (2, 2)
+        assert matrix[0, 0] == 0.0
+        assert matrix[1, 1] == 0.0
+        assert matrix[0, 1] > 0.0
+        assert matrix[0, 1] == matrix[1, 0]
+
+    def test_many_signals_batch_correctness(self) -> None:
+        """Batch path is correct for a larger number of variable-length signals."""
+        rng = np.random.RandomState(42)
+        signals = [
+            rng.randn(rng.randint(5, 30)).astype(np.float32)
+            for _ in range(20)
+        ]
+        matrix = _compute_pairwise_distances(
+            signals,
+            use_cuda=False,
+            use_open_start=False,
+            use_open_end=False,
+        )
+        assert matrix.shape == (20, 20)
+        assert np.allclose(np.diag(matrix), 0.0)
+        assert np.allclose(matrix, matrix.T)
+        off_diag = matrix[np.triu_indices(20, k=1)]
+        assert np.all(off_diag > 0.0)
 
 
 class TestRunPipeline:

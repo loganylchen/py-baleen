@@ -95,20 +95,68 @@ def _compute_pairwise_distances(
         n_pairs, n, min(signal_lengths), max(signal_lengths),
     )
     t0 = time.perf_counter()
+
+    can_batch = (
+        not use_open_start
+        and not use_open_end
+        and use_cuda is not True
+    )
+
+    if can_batch:
+        matrix = _compute_pairwise_batch(signals)
+    else:
+        matrix = _compute_pairwise_loop(
+            signals,
+            use_cuda=use_cuda,
+            use_open_start=use_open_start,
+            use_open_end=use_open_end,
+        )
+
+    elapsed = time.perf_counter() - t0
+    logger.debug("  DTW computation done: %d pairs in %s", n_pairs, _fmt_elapsed(elapsed))
+    return matrix
+
+
+def _compute_pairwise_batch(
+    signals: list[NDArray[np.float32]],
+) -> NDArray[np.float64]:
+    from tslearn.metrics import dtw as _tslearn_dtw
+
+    n = len(signals)
+    prepped = [s.reshape(-1, 1) for s in signals]
+    matrix = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = float(_tslearn_dtw(prepped[i], prepped[j]))
+            matrix[i, j] = d
+            matrix[j, i] = d
+    return matrix
+
+
+def _compute_pairwise_loop(
+    signals: list[NDArray[np.float32]],
+    *,
+    use_cuda: Optional[bool],
+    use_open_start: bool,
+    use_open_end: bool,
+) -> NDArray[np.float64]:
+    n = len(signals)
+    prepped = [
+        np.ascontiguousarray(np.asarray(s, dtype=np.float32))
+        for s in signals
+    ]
     matrix = np.zeros((n, n), dtype=np.float64)
     for i in range(n):
         for j in range(i + 1, n):
             distance = _dtw_distance(
-                signals[i],
-                signals[j],
+                prepped[i],
+                prepped[j],
                 use_open_start=use_open_start,
                 use_open_end=use_open_end,
                 use_cuda=use_cuda,
             )
             matrix[i, j] = distance
             matrix[j, i] = distance
-    elapsed = time.perf_counter() - t0
-    logger.debug("  DTW computation done: %d pairs in %s", n_pairs, _fmt_elapsed(elapsed))
     return matrix
 
 
