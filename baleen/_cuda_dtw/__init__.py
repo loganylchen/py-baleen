@@ -4,12 +4,10 @@ CUDA-accelerated Dynamic Time Warping (DTW) module
 This module provides GPU-accelerated DTW distance calculation with
 automatic CPU fallback when CUDA is not available.
 
-Backend priority:
-  1. CUDA (GPU) — if the compiled extension is available
-  2. CPU — pure-numpy DTW with full open-boundary support
-
-The CPU backend supports open_start / open_end boundary conditions
-with semantics matching the CUDA kernel exactly.
+CPU backend strategy:
+  - Standard DTW (no open boundaries): delegates to tslearn for performance
+  - Open-boundary DTW: pure-numpy DP implementation matching CUDA kernel
+    semantics, since tslearn does not support open_start / open_end
 """
 
 import numpy as np
@@ -19,7 +17,6 @@ from typing import Union, Optional
 # Backend detection
 # ---------------------------------------------------------------------------
 
-# 1) Try CUDA extension
 try:
     from ._cuda_dtw import dtw_distance as _dtw_distance_cuda
     from ._cuda_dtw import dtw_pairwise as _dtw_pairwise_cuda
@@ -29,14 +26,20 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-# Determine active backend
+try:
+    from tslearn.metrics import dtw as _tslearn_dtw
+    from tslearn.metrics import cdist_dtw as _tslearn_cdist_dtw
+
+    TSLEARN_AVAILABLE = True
+except ImportError:
+    TSLEARN_AVAILABLE = False
+
 _BACKEND = "cuda" if CUDA_AVAILABLE else "cpu"
 
-# Log backend on import
 if _BACKEND == "cuda":
     print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
 else:
-    print("💻 DTW: CPU implementation (numpy)")
+    print("💻 DTW: CPU implementation (tslearn + numpy open-boundary fallback)")
 
 
 def backend() -> str:
@@ -63,35 +66,37 @@ def _dtw_distance_cpu(
     use_open_end: bool = False,
 ) -> float:
     """
-    Compute DTW distance using pure numpy dynamic programming.
+    Compute DTW distance on CPU.
 
-    Matches the CUDA kernel semantics exactly:
+    When no open boundaries are requested, delegates to tslearn for
+    performance.  When open_start or open_end is True, uses a pure-numpy
+    DP that matches the CUDA kernel semantics exactly:
       - Cost function: squared Euclidean (a - b)^2
-      - open_start: first row (i=0) of cost matrix has zero cost contributions,
-        allowing the alignment to start at any position along seq2 for free.
-      - open_end: last row (i=len1-1) rightward moves have no additional cost,
-        allowing the alignment to end at any position along seq2 for free.
-      - Normalization: when exactly one of open_start/open_end is set,
-        distance is normalized by len(seq1): sqrt(cost) / len1.
-        Otherwise: sqrt(cost).
-
-    Parameters
-    ----------
-    seq1 : np.ndarray
-        First sequence, 1D float32. This is the "first" (Y-axis) sequence
-        in the DTW cost matrix.
-    seq2 : np.ndarray
-        Second sequence, 1D float32. This is the "second" (X-axis) sequence.
-    use_open_start : bool
-        Enable open start boundary condition.
-    use_open_end : bool
-        Enable open end boundary condition.
-
-    Returns
-    -------
-    float
-        DTW distance.
+      - open_start: first row (i=0) costs are zero
+      - open_end: last row (i=len1-1) rightward/diagonal moves are free
+      - Normalization: sqrt(cost) / len1 when exactly one boundary is open,
+        sqrt(cost) otherwise
     """
+    if not use_open_start and not use_open_end:
+        if not TSLEARN_AVAILABLE:
+            raise RuntimeError(
+                "tslearn is required for CPU DTW.\n"
+                "Install it with: pip install tslearn"
+            )
+        s1_2d = seq1.reshape(-1, 1)
+        s2_2d = seq2.reshape(-1, 1)
+        return float(_tslearn_dtw(s1_2d, s2_2d))
+
+    return _dtw_distance_open_boundary(seq1, seq2, use_open_start, use_open_end)
+
+
+def _dtw_distance_open_boundary(
+    seq1: np.ndarray,
+    seq2: np.ndarray,
+    use_open_start: bool,
+    use_open_end: bool,
+) -> float:
+    """Pure-numpy DTW DP with open-boundary support (CUDA-compatible semantics)."""
     len1 = len(seq1)
     len2 = len(seq2)
 
@@ -165,22 +170,21 @@ def _dtw_pairwise_cpu(
     use_open_end: bool = False,
 ) -> np.ndarray:
     """
-    Compute pairwise DTW distances on CPU via loop over _dtw_distance_cpu.
+    Compute pairwise DTW distances on CPU.
 
-    Parameters
-    ----------
-    sequences : np.ndarray
-        2D array (num_sequences, seq_length), float32.
-    use_open_start : bool
-        Enable open start boundary condition.
-    use_open_end : bool
-        Enable open end boundary condition.
-
-    Returns
-    -------
-    np.ndarray
-        Symmetric distance matrix of shape (n, n), float64.
+    Standard DTW delegates to tslearn's cdist_dtw.  When open boundaries
+    are requested, falls back to a loop over _dtw_distance_cpu.
     """
+    if not use_open_start and not use_open_end:
+        if not TSLEARN_AVAILABLE:
+            raise RuntimeError(
+                "tslearn is required for CPU DTW.\n"
+                "Install it with: pip install tslearn"
+            )
+        dataset_3d = sequences[:, :, np.newaxis]
+        result = _tslearn_cdist_dtw(dataset_3d)
+        return np.asarray(result, dtype=np.float64)
+
     n = len(sequences)
     result = np.zeros((n, n), dtype=np.float64)
     for i in range(n):
