@@ -60,7 +60,7 @@ def dtw_distance(
     Examples
     --------
     >>> import numpy as np
-    >>> from fin._dtw import dtw_distance
+    >>> from baleen._cuda_dtw import dtw_distance
     >>> seq1 = np.random.randn(100).astype(np.float32)
     >>> seq2 = np.random.randn(100).astype(np.float32)
     >>> distance = dtw_distance(seq1, seq2)
@@ -77,8 +77,8 @@ def dtw_distance(
             f"To build with CUDA support:\n"
             f"  1. Install CUDA Toolkit from NVIDIA\n"
             f"  2. Ensure nvcc is in PATH\n"
-            f"  3. Reinstall: pip uninstall py-fin && pip install -e .\n\n"
-            f"Check availability with: fin._dtw.is_available()"
+            f"  3. Reinstall: pip uninstall baleen && pip install -e .\n\n"
+            f"Check availability with: baleen._cuda_dtw.is_available()"
         )
 
     # Convert inputs to numpy arrays if needed
@@ -152,7 +152,7 @@ def dtw_pairwise(
     Examples
     --------
     >>> import numpy as np
-    >>> from fin._dtw import dtw_pairwise
+    >>> from baleen._cuda_dtw import dtw_pairwise
     >>> # Generate 10 sequences of length 100
     >>> sequences = np.random.randn(10, 100).astype(np.float32)
     >>> distance_matrix = dtw_pairwise(sequences)
@@ -163,7 +163,7 @@ def dtw_pairwise(
         raise RuntimeError(
             f"CUDA DTW extension is not available.\n"
             f"Import error: {_import_error}\n\n"
-            f"Check availability with: fin._dtw.is_available()"
+            f"Check availability with: baleen._cuda_dtw.is_available()"
         )
 
     # Convert to numpy array if needed
@@ -197,7 +197,7 @@ def cleanup():
 
     Examples
     --------
-    >>> from fin._dtw import cleanup
+    >>> from baleen._cuda_dtw import cleanup
     >>> # After computing many DTW distances...
     >>> cleanup()
     """
