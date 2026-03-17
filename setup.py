@@ -248,6 +248,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "numpy",
+        "tslearn",
     ],
     ext_modules=[_make_cuda_extension()],
     cmdclass={"build_ext": CUDABuildExt},

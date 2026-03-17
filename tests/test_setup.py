@@ -65,25 +65,31 @@ class TestCUDAGracefulFallback:
         if sys.platform == "darwin":
             assert CUDA_AVAILABLE is False
 
-    def test_dtw_distance_raises_without_cuda(self):
-        """dtw_distance() must raise RuntimeError when CUDA is not available."""
+    def test_dtw_distance_works_without_cuda(self):
+        """dtw_distance() must work via tslearn when CUDA is not available."""
         import numpy as np
 
         from baleen._cuda_dtw import CUDA_AVAILABLE, dtw_distance
 
         if not CUDA_AVAILABLE:
-            with pytest.raises(RuntimeError, match="CUDA"):
-                dtw_distance(np.array([1.0, 2.0], dtype=np.float32), np.array([1.0, 2.0], dtype=np.float32))
+            # Should NOT raise — tslearn CPU fallback handles it
+            seq1 = np.array([1.0, 2.0], dtype=np.float32)
+            seq2 = np.array([1.0, 2.0], dtype=np.float32)
+            dist = dtw_distance(seq1, seq2)
+            assert isinstance(dist, float)
+            assert dist >= 0.0
 
-    def test_dtw_pairwise_raises_without_cuda(self):
-        """dtw_pairwise() must raise RuntimeError when CUDA is not available."""
+    def test_dtw_pairwise_works_without_cuda(self):
+        """dtw_pairwise() must work via tslearn when CUDA is not available."""
         import numpy as np
 
         from baleen._cuda_dtw import CUDA_AVAILABLE, dtw_pairwise
 
         if not CUDA_AVAILABLE:
-            with pytest.raises(RuntimeError, match="CUDA"):
-                dtw_pairwise(np.random.randn(3, 10).astype(np.float32))
+            # Should NOT raise — tslearn CPU fallback handles it
+            sequences = np.random.randn(3, 10).astype(np.float32)
+            result = dtw_pairwise(sequences)
+            assert result.shape == (3, 3)
 
     def test_cleanup_noop_without_cuda(self):
         """cleanup() must be a no-op (not raise) when CUDA is not available."""
@@ -117,6 +123,20 @@ class TestPackageMetadata:
         for line in result.stdout.splitlines():
             if line.startswith("Requires:"):
                 assert "numpy" in line, f"numpy not in Requires: {line}"
+                break
+        else:
+            pytest.fail("No 'Requires:' line found in pip show output")
+
+    def test_tslearn_is_dependency(self):
+        """tslearn must be listed as a dependency."""
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", "baleen"],
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Requires:"):
+                assert "tslearn" in line, f"tslearn not in Requires: {line}"
                 break
         else:
             pytest.fail("No 'Requires:' line found in pip show output")
