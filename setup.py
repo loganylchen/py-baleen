@@ -242,13 +242,14 @@ def _make_cuda_extension():
 setup(
     name="baleen",
     version="0.1.0",
-    description="CUDA-accelerated Dynamic Time Warping (DTW) for time series analysis",
+    description="CUDA-accelerated DTW and nanopore signal analysis pipeline",
     author="Logan",
     python_requires=">=3.9",
     packages=find_packages(),
     install_requires=[
         "numpy",
         "tslearn",
+        "pysam",
     ],
     ext_modules=[_make_cuda_extension()],
     cmdclass={"build_ext": CUDABuildExt},

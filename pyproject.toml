@@ -5,6 +5,6 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "baleen"
 version = "0.1.0"
-description = "CUDA-accelerated Dynamic Time Warping (DTW) for time series analysis"
+description = "CUDA-accelerated DTW and nanopore signal analysis pipeline"
 requires-python = ">=3.9"
-dependencies = ["numpy", "tslearn"]
+dependencies = ["numpy", "tslearn", "pysam"]
