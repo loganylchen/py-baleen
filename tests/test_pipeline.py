@@ -232,17 +232,16 @@ class TestComputePairwiseDistances:
         assert matrix[0, 1] == 42.0
         assert mock_dtw.call_count == 1
 
-    def test_cuda_uses_loop_path(self) -> None:
-        """CUDA backend must use per-pair loop (CUDA expects equal-length)."""
+    def test_cuda_uses_varlen_batch_path(self) -> None:
+        """CUDA backend must use dtw_pairwise_varlen (single batch kernel)."""
         signals = [
             np.array([1.0, 2.0], dtype=np.float32),
             np.array([1.0, 2.0, 3.0], dtype=np.float32),
         ]
 
-        def fake_dtw(a: NDArray[np.float32], b: NDArray[np.float32], **_: object) -> float:
-            return 99.0
+        fake_matrix = np.array([[0.0, 99.0], [99.0, 0.0]], dtype=np.float64)
 
-        with patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw) as mock_dtw:
+        with patch("baleen.eventalign._pipeline._dtw_pairwise_varlen", return_value=fake_matrix) as mock_varlen:
             matrix = _compute_pairwise_distances(
                 signals,
                 use_cuda=True,
@@ -252,7 +251,7 @@ class TestComputePairwiseDistances:
 
         assert matrix.shape == (2, 2)
         assert matrix[0, 1] == 99.0
-        assert mock_dtw.call_count == 1
+        mock_varlen.assert_called_once()
 
     def test_two_signals_batch_path(self) -> None:
         """Batch path works correctly with minimum 2 signals."""

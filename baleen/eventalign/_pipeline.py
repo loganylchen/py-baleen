@@ -78,6 +78,7 @@ class _SerializedPayload(TypedDict):
 
 
 _dtw_distance = cast(_DtwDistanceFn, _cuda_dtw.dtw_distance)
+_dtw_pairwise_varlen = _cuda_dtw.dtw_pairwise_varlen
 
 
 def _compute_pairwise_distances(
@@ -96,18 +97,21 @@ def _compute_pairwise_distances(
     )
     t0 = time.perf_counter()
 
-    can_batch = (
-        not use_open_start
-        and not use_open_end
-        and use_cuda is not True
-    )
+    want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
 
-    if can_batch:
+    if want_cuda:
+        matrix = _dtw_pairwise_varlen(
+            signals,
+            use_open_start=use_open_start,
+            use_open_end=use_open_end,
+            use_cuda=True,
+        )
+    elif not use_open_start and not use_open_end:
         matrix = _compute_pairwise_batch(signals)
     else:
         matrix = _compute_pairwise_loop(
             signals,
-            use_cuda=use_cuda,
+            use_cuda=False,
             use_open_start=use_open_start,
             use_open_end=use_open_end,
         )

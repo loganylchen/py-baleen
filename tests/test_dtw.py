@@ -417,3 +417,117 @@ class TestOpenBoundaryPairwiseCPU:
         sequences = np.random.default_rng(42).standard_normal((4, 8)).astype(np.float32)
         result = dtw_pairwise(sequences, use_open_end=True, use_cuda=False)
         np.testing.assert_allclose(np.diag(result), 0.0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# dtw_pairwise_varlen on CPU
+# ---------------------------------------------------------------------------
+
+class TestDTWPairwiseVarlenCPU:
+
+    def test_basic_variable_lengths(self):
+        from baleen._cuda_dtw import dtw_pairwise_varlen
+
+        signals = [
+            np.array([1.0, 2.0], dtype=np.float32),
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([2.0], dtype=np.float32),
+        ]
+        result = dtw_pairwise_varlen(signals, use_cuda=False)
+        assert result.shape == (3, 3)
+        np.testing.assert_allclose(np.diag(result), 0.0, atol=1e-6)
+        assert np.allclose(result, result.T)
+
+    def test_consistent_with_dtw_distance(self):
+        from baleen._cuda_dtw import dtw_distance, dtw_pairwise_varlen
+
+        signals = [
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([4.0, 5.0], dtype=np.float32),
+            np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+        ]
+        matrix = dtw_pairwise_varlen(signals, use_cuda=False)
+        for i in range(3):
+            for j in range(i + 1, 3):
+                expected = dtw_distance(signals[i], signals[j], use_cuda=False)
+                np.testing.assert_allclose(
+                    matrix[i, j], expected, rtol=1e-5,
+                    err_msg=f"Mismatch at ({i},{j})",
+                )
+
+    def test_open_end_consistent_with_dtw_distance(self):
+        from baleen._cuda_dtw import dtw_distance, dtw_pairwise_varlen
+
+        signals = [
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([1.0, 2.0, 3.0, 99.0, 99.0], dtype=np.float32),
+            np.array([5.0, 6.0], dtype=np.float32),
+        ]
+        matrix = dtw_pairwise_varlen(signals, use_open_end=True, use_cuda=False)
+        for i in range(3):
+            for j in range(i + 1, 3):
+                expected = dtw_distance(
+                    signals[i], signals[j],
+                    use_open_end=True, use_cuda=False,
+                )
+                np.testing.assert_allclose(
+                    matrix[i, j], expected, rtol=1e-5,
+                    err_msg=f"Mismatch at ({i},{j})",
+                )
+
+    def test_many_variable_length_signals(self):
+        from baleen._cuda_dtw import dtw_pairwise_varlen
+
+        rng = np.random.RandomState(42)
+        signals = [
+            rng.randn(rng.randint(5, 30)).astype(np.float32)
+            for _ in range(15)
+        ]
+        matrix = dtw_pairwise_varlen(signals, use_cuda=False)
+        assert matrix.shape == (15, 15)
+        np.testing.assert_allclose(np.diag(matrix), 0.0, atol=1e-6)
+        assert np.allclose(matrix, matrix.T)
+        off_diag = matrix[np.triu_indices(15, k=1)]
+        assert np.all(off_diag > 0.0)
+
+    def test_single_signal_raises(self):
+        from baleen._cuda_dtw import dtw_pairwise_varlen
+
+        with pytest.raises(ValueError, match="at least 2"):
+            dtw_pairwise_varlen(
+                [np.array([1.0, 2.0], dtype=np.float32)],
+                use_cuda=False,
+            )
+
+    def test_empty_signal_raises(self):
+        from baleen._cuda_dtw import dtw_pairwise_varlen
+
+        with pytest.raises(ValueError, match="non-empty"):
+            dtw_pairwise_varlen(
+                [
+                    np.array([], dtype=np.float32),
+                    np.array([1.0], dtype=np.float32),
+                ],
+                use_cuda=False,
+            )
+
+    def test_use_cuda_true_raises_without_gpu(self):
+        from baleen._cuda_dtw import CUDA_AVAILABLE, dtw_pairwise_varlen
+
+        if not CUDA_AVAILABLE:
+            with pytest.raises(RuntimeError, match="CUDA"):
+                dtw_pairwise_varlen(
+                    [
+                        np.array([1.0, 2.0], dtype=np.float32),
+                        np.array([3.0, 4.0], dtype=np.float32),
+                    ],
+                    use_cuda=True,
+                )
+
+    def test_identical_signals_zero_distance(self):
+        from baleen._cuda_dtw import dtw_pairwise_varlen
+
+        sig = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+        result = dtw_pairwise_varlen([sig, sig.copy()], use_cuda=False)
+        assert result.shape == (2, 2)
+        np.testing.assert_allclose(result, 0.0, atol=1e-6)

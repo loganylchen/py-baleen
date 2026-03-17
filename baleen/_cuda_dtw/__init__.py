@@ -20,6 +20,7 @@ from typing import Union, Optional
 try:
     from ._cuda_dtw import dtw_distance as _dtw_distance_cuda
     from ._cuda_dtw import dtw_pairwise as _dtw_pairwise_cuda
+    from ._cuda_dtw import dtw_pairwise_varlen as _dtw_pairwise_varlen_cuda
     from ._cuda_dtw import cleanup as _cuda_cleanup
 
     CUDA_AVAILABLE = True
@@ -381,6 +382,77 @@ def dtw_pairwise(
     return _dtw_pairwise_cpu(sequences, use_open_start, use_open_end)
 
 
+def dtw_pairwise_varlen(
+    signals: list[np.ndarray],
+    use_open_start: bool = False,
+    use_open_end: bool = False,
+    use_cuda: Optional[bool] = None,
+) -> np.ndarray:
+    """
+    Compute pairwise DTW distances for variable-length sequences.
+
+    On CUDA: pads signals to max_length and uses a single batch kernel launch.
+    On CPU: falls back to pairwise loop (tslearn or numpy DP).
+
+    Parameters
+    ----------
+    signals : list of np.ndarray
+        List of 1D float32 arrays (variable lengths allowed).
+    use_open_start : bool
+        Enable open start boundary condition.
+    use_open_end : bool
+        Enable open end boundary condition.
+    use_cuda : bool or None
+        Backend selection (None=auto, True=force CUDA, False=force CPU).
+
+    Returns
+    -------
+    np.ndarray
+        Symmetric distance matrix of shape (N, N).
+    """
+    if len(signals) < 2:
+        raise ValueError(f"Need at least 2 signals, got {len(signals)}")
+
+    prepped = [np.ascontiguousarray(np.asarray(s, dtype=np.float32)) for s in signals]
+    lengths = np.array([len(s) for s in prepped], dtype=np.int64)
+
+    if any(l == 0 for l in lengths):
+        raise ValueError("All signals must be non-empty")
+
+    want_cuda = use_cuda is True or (use_cuda is None and CUDA_AVAILABLE)
+
+    if want_cuda:
+        if not CUDA_AVAILABLE:
+            raise RuntimeError(
+                "CUDA backend requested but not available. "
+                "Install with CUDA support or use use_cuda=False."
+            )
+        max_len = int(lengths.max())
+        n = len(prepped)
+        padded = np.zeros((n, max_len), dtype=np.float32)
+        for i, s in enumerate(prepped):
+            padded[i, :len(s)] = s
+        result = _dtw_pairwise_varlen_cuda(
+            padded, lengths,
+            use_open_start=int(use_open_start),
+            use_open_end=int(use_open_end),
+        )
+        return np.asarray(result, dtype=np.float64)
+
+    n = len(prepped)
+    result = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = _dtw_distance_cpu(
+                prepped[i], prepped[j],
+                use_open_start=use_open_start,
+                use_open_end=use_open_end,
+            )
+            result[i, j] = d
+            result[j, i] = d
+    return result
+
+
 # ---------------------------------------------------------------------------
 # cleanup / is_available
 # ---------------------------------------------------------------------------
@@ -412,6 +484,7 @@ def is_available() -> bool:
 __all__ = [
     "dtw_distance",
     "dtw_pairwise",
+    "dtw_pairwise_varlen",
     "cleanup",
     "is_available",
     "backend",

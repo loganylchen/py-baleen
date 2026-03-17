@@ -43,6 +43,31 @@ extern "C"
         float *out_distances);
 
     /**
+     * @brief Compute pairwise DTW distances for variable-length sequences
+     *
+     * Sequences are stored in a padded 2D layout (num_sequences × max_length),
+     * with actual lengths given separately.  Only the first seq_lengths[i]
+     * elements of row i are used; the rest are ignored.
+     *
+     * @param sequences     Padded array (num_sequences * max_length floats)
+     * @param seq_lengths   Actual length of each sequence (num_sequences values)
+     * @param num_sequences Number of sequences
+     * @param max_length    Padded row width (>= max of seq_lengths)
+     * @param use_open_start Whether to use open start boundary
+     * @param use_open_end   Whether to use open end boundary
+     * @param out_distances  Output matrix (num_sequences * num_sequences floats)
+     * @return 0=success, non-zero=error
+     */
+    int opendba_dtw_pairwise_varlen(
+        const float *sequences,
+        const size_t *seq_lengths,
+        size_t num_sequences,
+        size_t max_length,
+        int use_open_start,
+        int use_open_end,
+        float *out_distances);
+
+    /**
      * @brief 清理 CUDA 资源
      */
     void opendba_dtw_cleanup();
