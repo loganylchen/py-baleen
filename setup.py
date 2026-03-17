@@ -10,6 +10,7 @@ Build modes:
 """
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -32,21 +33,17 @@ def _find_cuda_home():
       3. nvcc location on PATH (derive from its parent)
       4. Common installation paths
     """
-    # Env vars
     for env_var in ("CUDA_HOME", "CUDA_PATH"):
         val = os.environ.get(env_var)
         if val and os.path.isdir(val):
             return val
 
-    # nvcc on PATH
     nvcc = shutil.which("nvcc")
     if nvcc:
-        # nvcc is typically at <cuda_home>/bin/nvcc
         cuda_home = os.path.dirname(os.path.dirname(os.path.realpath(nvcc)))
         if os.path.isdir(os.path.join(cuda_home, "include")):
             return cuda_home
 
-    # Common paths
     common_paths = [
         "/usr/local/cuda",
         "/usr/local/cuda-12",
@@ -60,75 +57,83 @@ def _find_cuda_home():
     return None
 
 
-def _cuda_is_available():
-    """Check if CUDA toolkit is usable (nvcc compiles a trivial program)."""
+def _nvcc_is_available():
+    """Quick check: is nvcc on PATH or in CUDA_HOME?"""
+    if shutil.which("nvcc"):
+        return True
+    cuda_home = _find_cuda_home()
+    if cuda_home:
+        nvcc_path = os.path.join(cuda_home, "bin", "nvcc")
+        return os.path.isfile(nvcc_path)
+    return False
+
+
+def _get_nvcc():
+    """Return the full path to nvcc, or None."""
     nvcc = shutil.which("nvcc")
-    if not nvcc:
-        return False
-    tmp_src = ""
-    tmp_out = ""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".cu", mode="w", delete=False) as f:
-            f.write("int main() { return 0; }\n")
-            f.flush()
-            tmp_src = f.name
-        tmp_out = tmp_src.replace(".cu", ".out")
-        result = subprocess.run(
-            [nvcc, tmp_src, "-o", tmp_out],
-            capture_output=True,
-            timeout=30,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-    finally:
-        for p in (tmp_src, tmp_out):
-            if p:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
+    if nvcc:
+        return nvcc
+    cuda_home = _find_cuda_home()
+    if cuda_home:
+        nvcc_path = os.path.join(cuda_home, "bin", "nvcc")
+        if os.path.isfile(nvcc_path):
+            return nvcc_path
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Custom build_ext that compiles .cu files with nvcc
+# Custom build_ext that compiles CUDA extensions with nvcc
 # ---------------------------------------------------------------------------
 
 class CUDABuildExt(build_ext):
     """Custom build_ext that:
-    1. Copies .cpp CUDA source to .cu so nvcc treats it as CUDA
-    2. Compiles .cu sources with nvcc instead of the system C compiler
-    3. Falls back gracefully if compilation fails
+    1. Detects CUDA availability at build time (not setup time)
+    2. Copies .cpp CUDA source to .cu so nvcc treats it as CUDA
+    3. Compiles .cu sources with nvcc
+    4. Falls back gracefully if CUDA is missing or compilation fails
     """
 
     def build_extensions(self):
-        for ext in self.extensions:
-            if not getattr(ext, "_is_cuda", False):
-                continue
+        # ── Gate: should we even try? ──
+        cuda_exts = [e for e in self.extensions if getattr(e, "_is_cuda", False)]
+        other_exts = [e for e in self.extensions if not getattr(e, "_is_cuda", False)]
 
-            # Rewrite sources: rename .cpp → .cu in a temp location
+        if os.environ.get("BALEEN_NO_CUDA", "").strip() in ("1", "true", "yes"):
+            print("\nℹ️  CUDA build disabled by BALEEN_NO_CUDA env var.")
+            self.extensions = other_exts
+            if self.extensions:
+                super().build_extensions()
+            return
+
+        if not _nvcc_is_available():
+            print("\nℹ️  nvcc not found. Skipping CUDA extension (CPU-only install).")
+            self.extensions = other_exts
+            if self.extensions:
+                super().build_extensions()
+            return
+
+        # ── Prepare .cpp → .cu copies ──
+        for ext in cuda_exts:
             new_sources = []
             for src in ext.sources:
                 if src.endswith(".cpp") and "_cuda_dtw" in src:
-                    cu_src = src.rsplit(".cpp", 1)[0] + ".cu"
-                    # Copy to .cu so nvcc picks it up
-                    cu_path = os.path.join(self.build_temp, os.path.basename(cu_src))
-                    os.makedirs(os.path.dirname(cu_path) or ".", exist_ok=True)
+                    os.makedirs(self.build_temp, exist_ok=True)
+                    cu_path = os.path.join(self.build_temp, os.path.basename(
+                        src.rsplit(".cpp", 1)[0] + ".cu"
+                    ))
                     shutil.copy2(src, cu_path)
                     new_sources.append(cu_path)
                 else:
                     new_sources.append(src)
             ext.sources = new_sources
 
+        # ── Build, with graceful fallback ──
         try:
             super().build_extensions()
         except Exception as e:
             print(f"\n⚠️  CUDA extension build failed: {e}")
             print("   Falling back to CPU-only installation.\n")
-            # Remove CUDA extensions and proceed
-            self.extensions = [
-                ext for ext in self.extensions if not getattr(ext, "_is_cuda", False)
-            ]
+            self.extensions = other_exts
             if self.extensions:
                 super().build_extensions()
 
@@ -137,29 +142,45 @@ class CUDABuildExt(build_ext):
             super().build_extension(ext)
             return
 
-        # Use nvcc as the compiler for CUDA extensions
-        cuda_home = _find_cuda_home()
-        nvcc = shutil.which("nvcc") or os.path.join(cuda_home, "bin", "nvcc")
+        nvcc = _get_nvcc()
+        if not nvcc:
+            raise RuntimeError("nvcc not found")
 
-        # Gather include dirs, library dirs
+        cuda_home = _find_cuda_home()
+
+        # ── Include / library directories ──
         include_dirs = list(ext.include_dirs or [])
         library_dirs = list(ext.library_dirs or [])
+
         if cuda_home:
             include_dirs.append(os.path.join(cuda_home, "include"))
-            lib_candidates = [
-                os.path.join(cuda_home, "lib64"),
-                os.path.join(cuda_home, "lib"),
-            ]
-            for ldir in lib_candidates:
+            for lib_subdir in ("lib64", "lib"):
+                ldir = os.path.join(cuda_home, lib_subdir)
                 if os.path.isdir(ldir):
                     library_dirs.append(ldir)
                     break
 
-        # Build output path
+        # Local CUDA headers (dtw.hpp, cuda_utils.hpp, etc.)
+        cuda_src_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "baleen", "_cuda_dtw",
+        )
+        include_dirs.append(cuda_src_dir)
+
+        # Python + NumPy includes
+        from sysconfig import get_paths as _get_paths
+        include_dirs.append(_get_paths()["include"])
+        try:
+            import numpy
+            include_dirs.append(numpy.get_include())
+        except ImportError:
+            raise RuntimeError("numpy is required to build the CUDA extension")
+
+        # ── Output path ──
         ext_path = self.get_ext_fullpath(ext.name)
         os.makedirs(os.path.dirname(ext_path), exist_ok=True)
 
-        # Compile each source into an object file
+        # ── Compile each source ──
         objects = []
         for src in ext.sources:
             obj = src + ".o"
@@ -168,65 +189,39 @@ class CUDABuildExt(build_ext):
                 "-std=c++11",
                 "-O3",
                 "-Xcompiler", "-fPIC",
-                "--shared",
                 "-c", src,
                 "-o", obj,
             ]
-            # Add include directories
             for inc in include_dirs:
                 compile_cmd.extend(["-I", inc])
-            # Add Python include
-            compile_cmd.extend(["-I", self._get_python_include()])
-            # Add numpy include
-            compile_cmd.extend(["-I", self._get_numpy_include()])
-            # Add CUDA source directory for local headers
-            cuda_src_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "baleen", "_cuda_dtw",
-            )
-            compile_cmd.extend(["-I", cuda_src_dir])
 
-            print(f"  nvcc compile: {' '.join(compile_cmd)}")
+            print(f"  [baleen] nvcc compile: {os.path.basename(src)}")
             subprocess.check_call(compile_cmd)
             objects.append(obj)
 
-        # Link into shared library
-        link_cmd = [
-            nvcc,
-            "--shared",
-            "-o", ext_path,
-        ] + objects
+        # ── Link ──
+        link_cmd = [nvcc, "--shared", "-o", ext_path] + objects
 
         for ldir in library_dirs:
             link_cmd.extend(["-L", ldir])
         for lib in (ext.libraries or []):
             link_cmd.extend(["-l", lib])
 
-        # Link against Python library
-        link_cmd.extend(["-Xcompiler", f"-undefined,dynamic_lookup"])
+        # Platform-specific linker flags
+        if platform.system() == "Darwin":
+            link_cmd.extend(["-Xcompiler", "-undefined,dynamic_lookup"])
 
-        print(f"  nvcc link: {' '.join(link_cmd)}")
+        print(f"  [baleen] nvcc link: {os.path.basename(ext_path)}")
         subprocess.check_call(link_cmd)
-
-    @staticmethod
-    def _get_python_include():
-        from sysconfig import get_paths
-        return get_paths()["include"]
-
-    @staticmethod
-    def _get_numpy_include():
-        import numpy
-        return numpy.get_include()
 
 
 # ---------------------------------------------------------------------------
-# Extension definition
+# Extension definition — always declared, build_ext decides whether to build
 # ---------------------------------------------------------------------------
 
 def _make_cuda_extension():
     """Create the CUDA extension module definition."""
     cuda_src_dir = os.path.join("baleen", "_cuda_dtw")
-
     ext = Extension(
         name="baleen._cuda_dtw._cuda_dtw",
         sources=[
@@ -236,37 +231,13 @@ def _make_cuda_extension():
         libraries=["cudart"],
         language="c++",
     )
-    # Tag so our custom build_ext knows to handle it specially
-    ext._is_cuda = True
+    ext._is_cuda = True  # type: ignore[attr-defined]
     return ext
 
 
 # ---------------------------------------------------------------------------
-# Main setup
+# Always include the CUDA extension; CUDABuildExt skips it if nvcc is absent
 # ---------------------------------------------------------------------------
-
-def _should_build_cuda():
-    """Decide whether to attempt CUDA extension build."""
-    # User explicitly disabled
-    if os.environ.get("BALEEN_NO_CUDA", "").strip() in ("1", "true", "yes"):
-        print("ℹ️  CUDA extension disabled by BALEEN_NO_CUDA env var.")
-        return False
-
-    # Check for CUDA toolkit
-    if not _cuda_is_available():
-        print("ℹ️  CUDA toolkit not found. Installing without GPU acceleration.")
-        return False
-
-    return True
-
-
-ext_modules = []
-cmdclass = {}
-
-if _should_build_cuda():
-    ext_modules.append(_make_cuda_extension())
-    cmdclass["build_ext"] = CUDABuildExt
-    print("🔧 CUDA extension will be built.")
 
 setup(
     name="baleen",
@@ -278,7 +249,7 @@ setup(
     install_requires=[
         "numpy",
     ],
-    ext_modules=ext_modules,
-    cmdclass=cmdclass,
+    ext_modules=[_make_cuda_extension()],
+    cmdclass={"build_ext": CUDABuildExt},
     zip_safe=False,
 )

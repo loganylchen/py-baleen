@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "baleen"
+version = "0.1.0"
+description = "CUDA-accelerated Dynamic Time Warping (DTW) for time series analysis"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
