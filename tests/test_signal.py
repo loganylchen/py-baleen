@@ -7,6 +7,7 @@ import numpy as np
 from baleen.eventalign._signal import (
     PositionSignals,
     extract_signals_for_dtw,
+    extract_signals_for_dtw_padded,
     get_common_positions,
     group_signals_by_position,
     parse_eventalign,
@@ -277,3 +278,107 @@ class TestGetCommonPositions:
         native = {300: self._dummy(300), 100: self._dummy(100), 200: self._dummy(200)}
         ivt = {200: self._dummy(200), 100: self._dummy(100), 300: self._dummy(300)}
         assert get_common_positions(native, ivt) == [100, 200, 300]
+
+
+class TestExtractSignalsForDTWPadded:
+    def _make_positions(self) -> dict[int, PositionSignals]:
+        return {
+            100: PositionSignals(
+                contig="chr1", position=100, reference_kmer="AAAAA",
+                read_signals={
+                    "r1": np.array([1.0, 2.0], dtype=np.float32),
+                    "r2": np.array([10.0], dtype=np.float32),
+                },
+                read_names=["r1", "r2"],
+            ),
+            101: PositionSignals(
+                contig="chr1", position=101, reference_kmer="AACGT",
+                read_signals={
+                    "r1": np.array([3.0, 4.0], dtype=np.float32),
+                    "r2": np.array([20.0, 30.0], dtype=np.float32),
+                },
+                read_names=["r1", "r2"],
+            ),
+            102: PositionSignals(
+                contig="chr1", position=102, reference_kmer="CGTAA",
+                read_signals={
+                    "r1": np.array([5.0], dtype=np.float32),
+                },
+                read_names=["r1"],
+            ),
+        }
+
+    def test_padding_zero_same_as_unpadded(self) -> None:
+        positions = self._make_positions()
+        names_p, sigs_p = extract_signals_for_dtw_padded(positions, 100, padding=0)
+        names_u, sigs_u = extract_signals_for_dtw(positions[100])
+        assert names_p == names_u
+        for a, b in zip(sigs_p, sigs_u):
+            np.testing.assert_array_equal(a, b)
+
+    def test_padding_one_concatenates_neighbors(self) -> None:
+        positions = self._make_positions()
+        names, sigs = extract_signals_for_dtw_padded(positions, 101, padding=1)
+        assert names == ["r1", "r2"]
+        np.testing.assert_array_almost_equal(
+            sigs[0], np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+        )
+        np.testing.assert_array_almost_equal(
+            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        )
+
+    def test_padding_skips_missing_neighbor(self) -> None:
+        positions = self._make_positions()
+        names, sigs = extract_signals_for_dtw_padded(positions, 100, padding=1)
+        assert names == ["r1", "r2"]
+        np.testing.assert_array_almost_equal(
+            sigs[0], np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        )
+        np.testing.assert_array_almost_equal(
+            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        )
+
+    def test_padding_read_absent_in_neighbor(self) -> None:
+        positions = self._make_positions()
+        names, sigs = extract_signals_for_dtw_padded(positions, 102, padding=1)
+        assert names == ["r1"]
+        np.testing.assert_array_almost_equal(
+            sigs[0], np.array([3.0, 4.0, 5.0], dtype=np.float32),
+        )
+
+    def test_padding_large_window(self) -> None:
+        positions = self._make_positions()
+        names, sigs = extract_signals_for_dtw_padded(positions, 101, padding=5)
+        assert names == ["r1", "r2"]
+        np.testing.assert_array_almost_equal(
+            sigs[0], np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+        )
+        np.testing.assert_array_almost_equal(
+            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        )
+
+    def test_padding_negative_raises(self) -> None:
+        import pytest
+        positions = self._make_positions()
+        with pytest.raises(ValueError, match="padding must be >= 0"):
+            extract_signals_for_dtw_padded(positions, 100, padding=-1)
+
+    def test_target_not_in_positions(self) -> None:
+        positions = self._make_positions()
+        names, sigs = extract_signals_for_dtw_padded(positions, 999, padding=1)
+        assert names == []
+        assert sigs == []
+
+    def test_only_center_position_exists(self) -> None:
+        positions = {
+            50: PositionSignals(
+                contig="chr1", position=50, reference_kmer="TTTTT",
+                read_signals={"r1": np.array([7.0, 8.0], dtype=np.float32)},
+                read_names=["r1"],
+            ),
+        }
+        names, sigs = extract_signals_for_dtw_padded(positions, 50, padding=2)
+        assert names == ["r1"]
+        np.testing.assert_array_almost_equal(
+            sigs[0], np.array([7.0, 8.0], dtype=np.float32),
+        )

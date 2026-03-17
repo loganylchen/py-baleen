@@ -150,6 +150,71 @@ def extract_signals_for_dtw(
     return read_names, signals
 
 
+def extract_signals_for_dtw_padded(
+    all_positions: dict[int, PositionSignals],
+    target_position: int,
+    padding: int,
+) -> tuple[list[str], list[NDArray[np.float32]]]:
+    """Extract per-read signals with neighboring-position padding.
+
+    For each read present at *target_position*, concatenate the signal from
+    positions ``[target - padding, ..., target, ..., target + padding]`` (in
+    ascending position order).  Neighbor positions where the read has no signal
+    are simply skipped — no zero-fill is applied.
+
+    Parameters
+    ----------
+    all_positions : dict[int, PositionSignals]
+        Complete position→signals mapping (from ``group_signals_by_position``).
+    target_position : int
+        The centre position to extract.
+    padding : int
+        Number of flanking positions on each side.  ``padding=0`` is equivalent
+        to the plain :func:`extract_signals_for_dtw`.
+
+    Returns
+    -------
+    tuple[list[str], list[NDArray[np.float32]]]
+        Read names and their padded signal arrays.
+    """
+    if padding < 0:
+        raise ValueError(f"padding must be >= 0, got {padding}")
+
+    if target_position not in all_positions:
+        return [], []
+
+    center = all_positions[target_position]
+    read_names = list(center.read_names)
+
+    if padding == 0:
+        return extract_signals_for_dtw(center)
+
+    window_positions = list(range(target_position - padding, target_position + padding + 1))
+
+    signals: list[NDArray[np.float32]] = []
+    for read_name in read_names:
+        chunks: list[NDArray[np.float32]] = []
+        for pos in window_positions:
+            pos_data = all_positions.get(pos)
+            if pos_data is None:
+                continue
+            sig = pos_data.read_signals.get(read_name)
+            if sig is None:
+                continue
+            arr = np.asarray(sig, dtype=np.float32)
+            if arr.ndim != 1:
+                arr = arr.reshape(-1)
+            if arr.size > 0:
+                chunks.append(arr)
+
+        if chunks:
+            signals.append(np.concatenate(chunks))
+        else:
+            signals.append(np.array([], dtype=np.float32))
+
+    return read_names, signals
+
+
 def get_common_positions(
     native_signals: dict[int, PositionSignals],
     ivt_signals: dict[int, PositionSignals],

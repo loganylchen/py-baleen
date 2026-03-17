@@ -65,6 +65,7 @@ class PipelineMetadata:
     f5c_version: str
     min_depth: int
     use_cuda: Optional[bool]
+    padding: int
     n_contigs_total: int
     n_contigs_passed_filter: int
     n_contigs_skipped: int
@@ -150,6 +151,7 @@ def run_pipeline(
     use_cuda: Optional[bool] = None,
     use_open_start: bool = False,
     use_open_end: bool = False,
+    padding: int = 0,
     output_dir: Optional[PathLike] = None,
     cleanup_temp: bool = True,
     rna: bool = True,
@@ -168,7 +170,7 @@ def run_pipeline(
     logger.info("  ivt_fastq:    %s", ivt_fastq)
     logger.info("  ivt_blow5:    %s", ivt_blow5)
     logger.info("  ref_fasta:    %s", ref_fasta)
-    logger.info("  min_depth=%d  use_cuda=%s  rna=%s", min_depth, use_cuda, rna)
+    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d", min_depth, use_cuda, rna, padding)
     logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s",
                 use_open_start, use_open_end, min_mapq, primary_only)
     logger.info("=" * 60)
@@ -242,6 +244,7 @@ def run_pipeline(
         f5c_version=f5c_version,
         min_depth=min_depth,
         use_cuda=use_cuda,
+        padding=padding,
         n_contigs_total=len(filter_results),
         n_contigs_passed_filter=len(passed_contigs),
         n_contigs_skipped=len(filter_results) - len(passed_contigs),
@@ -334,8 +337,16 @@ def run_pipeline(
                 native_pos = native_by_pos[pos]
                 ivt_pos = ivt_by_pos[pos]
 
-                native_read_names, native_signals = _signal.extract_signals_for_dtw(native_pos)
-                ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw(ivt_pos)
+                if padding > 0:
+                    native_read_names, native_signals = _signal.extract_signals_for_dtw_padded(
+                        native_by_pos, pos, padding,
+                    )
+                    ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw_padded(
+                        ivt_by_pos, pos, padding,
+                    )
+                else:
+                    native_read_names, native_signals = _signal.extract_signals_for_dtw(native_pos)
+                    ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw(ivt_pos)
 
                 if not native_signals or not ivt_signals:
                     logger.debug(
