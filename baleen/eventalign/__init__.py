@@ -43,6 +43,11 @@ from baleen.eventalign._pipeline import (
     run_pipeline,
     save_results,
 )
+from baleen.eventalign._probability import (
+    AlgorithmName,
+    ModificationProbabilities,
+    compute_modification_probabilities,
+)
 from baleen.eventalign._signal import PositionSignals
 
 __all__ = [
@@ -56,4 +61,7 @@ __all__ = [
     "ContigFilterResult",
     "FilterReason",
     "PositionSignals",
+    "AlgorithmName",
+    "ModificationProbabilities",
+    "compute_modification_probabilities",
 ]

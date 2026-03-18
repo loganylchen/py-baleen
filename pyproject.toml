@@ -7,4 +7,4 @@ name = "baleen"
 version = "0.1.0"
 description = "CUDA-accelerated DTW and nanopore signal analysis pipeline"
 requires-python = ">=3.9"
-dependencies = ["numpy", "tslearn", "pysam"]
+dependencies = ["numpy", "tslearn", "pysam", "scipy"]
