@@ -163,9 +163,10 @@ class TestGroupSignalsByPosition:
         assert sorted(grouped.keys()) == [100, 200, 300]
 
     def test_same_read_multiple_events_concatenated(self, tmp_path: Path) -> None:
+        """Events are concatenated in file order when start_idx matches event_index."""
         rows = [
-            _base_row(read_name="read_001", position=100, event_index=0, samples="1,2,3"),
-            _base_row(read_name="read_001", position=100, event_index=1, samples="4,5,6"),
+            _base_row(read_name="read_001", position=100, event_index=0, start_idx=10, samples="1,2,3"),
+            _base_row(read_name="read_001", position=100, event_index=1, start_idx=20, samples="4,5,6"),
         ]
         path = write_test_eventalign(tmp_path, "concat.tsv", rows)
         grouped = group_signals_by_position(path)
@@ -173,6 +174,64 @@ class TestGroupSignalsByPosition:
         np.testing.assert_array_almost_equal(
             grouped[100].read_signals["read_001"],
             np.array([1, 2, 3, 4, 5, 6], dtype=np.float32),
+        )
+
+    def test_concatenate_sorted_by_start_idx(self, tmp_path: Path) -> None:
+        """Events should be concatenated in start_idx order, not file order."""
+        rows = [
+            _base_row(read_name="read_001", position=100, start_idx=30, samples="7,8,9"),
+            _base_row(read_name="read_001", position=100, start_idx=10, samples="1,2,3"),
+            _base_row(read_name="read_001", position=100, start_idx=20, samples="4,5,6"),
+        ]
+        path = write_test_eventalign(tmp_path, "sorted.tsv", rows)
+        grouped = group_signals_by_position(path)
+
+        # Should be sorted by start_idx: 10, 20, 30 → [1,2,3,4,5,6,7,8,9]
+        np.testing.assert_array_almost_equal(
+            grouped[100].read_signals["read_001"],
+            np.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.float32),
+        )
+
+    def test_concatenate_mixed_start_idx_none(self, tmp_path: Path) -> None:
+        """When some events lack start_idx, fall back to file order for those."""
+        # Need to manually write rows since _base_row converts None to "None" string
+        header = EVENTALIGN_HEADER
+        path = tmp_path / "mixed.tsv"
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(header + "\n")
+            # Row with start_idx=20
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t0\t75.1\t1.2\t0.004\t74.9\t1.1\t4,5,6\t20\t26\n")
+            # Row with no start_idx (empty)
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t1\t75.1\t1.2\t0.004\t74.9\t1.1\t7,8\t\t\n")
+            # Row with start_idx=10
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t2\t75.1\t1.2\t0.004\t74.9\t1.1\t1,2,3\t10\t16\n")
+
+        grouped = group_signals_by_position(path)
+
+        # Sorted by start_idx (10, 20) + no-index at end (file order: 7,8)
+        np.testing.assert_array_almost_equal(
+            grouped[100].read_signals["read_001"],
+            np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32),
+        )
+
+    def test_concatenate_all_start_idx_none(self, tmp_path: Path) -> None:
+        """When all events lack start_idx. use file order (backward compat)."""
+        # Need to manually write rows since _base_row converts None to "None" string
+        header = EVENTALIGN_HEADER
+        path = tmp_path / "all_none.tsv"
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(header + "\n")
+            # Rows with no start_idx (empty)
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t0\t75.1\t1.2\t0.004\t74.9\t1.1\t7,8,9\t\t\n")
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t1\t75.1\t1.2\t0.004\t74.9\t1.1\t1,2,3\t\t\n")
+            handle.write("chr1\t100\tACGTA\tread_001\t+\t2\t75.1\t1.2\t0.004\t74.9\t1.1\t4,5,6\t\t\n")
+
+        grouped = group_signals_by_position(path)
+
+        # All None: file order
+        np.testing.assert_array_almost_equal(
+            grouped[100].read_signals["read_001"],
+            np.array([7, 8, 9, 1, 2, 3, 4, 5, 6], dtype=np.float32),
         )
 
     def test_read_order_preserved(self, tmp_path: Path) -> None:

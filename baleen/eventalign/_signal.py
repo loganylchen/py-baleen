@@ -89,15 +89,19 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
 
     Notes
     -----
+    Events for the same ``(read_name, position)`` are concatenated in
+    ``start_idx`` order to ensure correct signal temporal ordering.
+    If ``start_idx`` is ``None`` (when ``--signal-index`` not used),
+    events are concatenated in file order.
+
     RNA nanopore signal is generated in 3'→5' direction, i.e. reversed relative
-    to the reference/transcript 5'→3' sequence direction. Eventalign row order is
-    already in raw signal order, so events for a given ``(read_name, position)``
-    are concatenated strictly in file order. Any sequence-direction reversal is
-    intentionally left to downstream callers/pipeline steps.
+    to the reference/transcript 5'→3' sequence direction. Any sequence-direction
+    reversal is intentionally left to downstream callers/pipeline steps.
     """
 
     grouped: dict[int, PositionSignals] = {}
-    pending: defaultdict[int, defaultdict[str, list[NDArray[np.float32]]]] = defaultdict(
+    # Store (start_idx, samples) tuples for sorting
+    pending: defaultdict[int, defaultdict[str, list[tuple[Optional[int], NDArray[np.float32]]]]] = defaultdict(
         lambda: defaultdict(list)
     )
 
@@ -119,14 +123,28 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
             pos_signals.read_signals[event.read_name] = np.array([], dtype=np.float32)
             pos_signals.read_names.append(event.read_name)
 
-        pending[event.position][event.read_name].append(event.samples)
+        pending[event.position][event.read_name].append((event.start_idx, event.samples))
 
     for position, per_read in pending.items():
         for read_name, chunks in per_read.items():
             if not chunks:
                 grouped[position].read_signals[read_name] = np.array([], dtype=np.float32)
                 continue
-            grouped[position].read_signals[read_name] = np.concatenate(chunks).astype(np.float32, copy=False)
+
+            # Separate events with and without start_idx
+            with_idx: list[tuple[int, NDArray[np.float32]]] = [
+                (idx, s) for idx, s in chunks if idx is not None
+            ]
+            without_idx: list[NDArray[np.float32]] = [
+                s for idx, s in chunks if idx is None
+            ]
+
+            # Sort events with start_idx by index
+            with_idx.sort(key=lambda x: x[0])
+
+            # Concatenate: sorted events first, then events without index (file order)
+            sorted_signals: list[NDArray[np.float32]] = [s for _, s in with_idx] + without_idx
+            grouped[position].read_signals[read_name] = np.concatenate(sorted_signals).astype(np.float32, copy=False)
 
     total_pairs = sum(len(ps.read_names) for ps in grouped.values())
     elapsed = time.perf_counter() - t0
