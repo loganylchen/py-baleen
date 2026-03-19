@@ -415,15 +415,20 @@ def _anchored_mixture_em(
         or separation < separation_threshold
     )
 
-    if null_gate:
-        return np.zeros_like(z_all), pi, True
-
     # Posteriors using pi-weighted prior from EM
     f0_all = _normal_pdf(z_all, mu0, sigma0)
     f1_all = _normal_pdf(z_all, mu1, sigma1)
     denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
     probs = (pi * f1_all) / denom_all
-    return np.clip(probs, 0.0, 1.0), pi, False
+    probs = np.clip(probs, 0.0, 1.0)
+
+    if null_gate:
+        # Soft gate: cap at ceiling to preserve ranking information
+        _HIER_NULL_GATE_CEILING = 0.1
+        probs = np.minimum(probs, _HIER_NULL_GATE_CEILING)
+        return probs, pi, True
+
+    return probs, pi, False
 
 
 # ---------------------------------------------------------------------------

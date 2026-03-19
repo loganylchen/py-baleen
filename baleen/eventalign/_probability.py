@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _EPS = 1e-300  # avoid log(0)
 _MIN_SIGMA = 1e-6  # lower bound on fitted standard deviations
+_NULL_GATE_CEILING = 0.1  # max probability when null gate fires
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -213,20 +214,17 @@ def _calibrate_normal(
     separation = abs(mu1 - mu0) / max(sigma0, _MIN_SIGMA)
     null_gate = pi < pi_threshold or bic_mix >= bic_null or separation < 1.0
 
-    if null_gate:
-        return _CalibrationResult(
-            probabilities=np.zeros_like(scores_all),
-            pi=pi,
-            null_gate_active=True,
-        )
-
     # Compute posteriors using pi-weighted prior from EM.
-    # This suppresses false positives at positions where pi is small.
     f0_all = _normal_pdf(scores_all, mu0, sigma0)
     f1_all = _normal_pdf(scores_all, mu1, sigma1)
     denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
     probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
+
+    if null_gate:
+        # Soft gate: cap probabilities to preserve ranking information
+        probs = np.minimum(probs, _NULL_GATE_CEILING)
+        return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=True)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
 
@@ -306,18 +304,15 @@ def _calibrate_beta(
     separation = abs(alt_mean_final - null_mean)
     null_gate = pi < pi_threshold or bic_mix >= bic_null or separation < 0.1
 
-    if null_gate:
-        return _CalibrationResult(
-            probabilities=np.zeros_like(scores_all),
-            pi=pi,
-            null_gate_active=True,
-        )
-
     f0_all = _beta_pdf(scores_all, a0, b0)
     f1_all = _beta_pdf(scores_all, a1, b1)
     denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
     probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
+
+    if null_gate:
+        probs = np.minimum(probs, _NULL_GATE_CEILING)
+        return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=True)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
 
@@ -640,23 +635,14 @@ def mds_gmm(
     separation = centroid_sep / max(null_scale, _MIN_SIGMA)
     null_gate = pi < pi_threshold or bic_mix >= bic_null or separation < 1.0
 
-    if null_gate:
-        return ModificationProbabilities(
-            algorithm=AlgorithmName.MDS_GMM,
-            position=-1,
-            probabilities=np.zeros(n_total, dtype=np.float64),
-            n_native=n_native,
-            n_ivt=n_ivt,
-            scores=scores_all,
-            null_gate_active=True,
-            mixing_proportion=pi,
-        )
-
     f0_all = _mvn_pdf(coords, mu0, sigma0)
     f1_all = _mvn_pdf(coords, mu1, sigma1)
     denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
     probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
+
+    if null_gate:
+        probs = np.minimum(probs, _NULL_GATE_CEILING)
 
     return ModificationProbabilities(
         algorithm=AlgorithmName.MDS_GMM,
@@ -665,7 +651,7 @@ def mds_gmm(
         n_native=n_native,
         n_ivt=n_ivt,
         scores=scores_all,
-        null_gate_active=False,
+        null_gate_active=null_gate,
         mixing_proportion=pi,
     )
 
