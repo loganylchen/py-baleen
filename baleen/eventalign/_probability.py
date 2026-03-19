@@ -407,9 +407,15 @@ def _score_knn_ivt_purity(
         k = int(_clip(round(math.sqrt(n_total)), 3, 10))
     k = min(k, n_total - 1)  # can't have more neighbors than other reads
 
-    # Bandwidth for weighting
-    off_diag = distance_matrix[np.triu_indices(n_total, k=1)]
-    eta = float(np.median(off_diag)) if len(off_diag) > 0 else 1.0
+    # Bandwidth: use median IVT-to-IVT distance (tighter, specific to null)
+    ivt_indices = np.arange(n_native, n_total)
+    if len(ivt_indices) >= 2:
+        ivt_pairs = distance_matrix[np.ix_(ivt_indices, ivt_indices)]
+        ivt_off_diag = ivt_pairs[np.triu_indices(len(ivt_indices), k=1)]
+        eta = float(np.median(ivt_off_diag)) if len(ivt_off_diag) > 0 else 1.0
+    else:
+        off_diag = distance_matrix[np.triu_indices(n_total, k=1)]
+        eta = float(np.median(off_diag)) if len(off_diag) > 0 else 1.0
     eta = max(eta, _MIN_SIGMA)
 
     is_ivt = np.zeros(n_total, dtype=bool)
