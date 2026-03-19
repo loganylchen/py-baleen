@@ -220,13 +220,12 @@ def _calibrate_normal(
             null_gate_active=True,
         )
 
-    # Compute posteriors for ALL reads using likelihood ratio (not pi-weighted).
-    # This avoids the problem where pi→1 makes all posteriors approach 1.
-    # We use a fixed 50/50 prior so posteriors reflect pure likelihood evidence.
+    # Compute posteriors using pi-weighted prior from EM.
+    # This suppresses false positives at positions where pi is small.
     f0_all = _normal_pdf(scores_all, mu0, sigma0)
     f1_all = _normal_pdf(scores_all, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
+    probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
@@ -316,8 +315,8 @@ def _calibrate_beta(
 
     f0_all = _beta_pdf(scores_all, a0, b0)
     f1_all = _beta_pdf(scores_all, a1, b1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
+    probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
@@ -655,8 +654,8 @@ def mds_gmm(
 
     f0_all = _mvn_pdf(coords, mu0, sigma0)
     f1_all = _mvn_pdf(coords, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
+    probs = (pi * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return ModificationProbabilities(

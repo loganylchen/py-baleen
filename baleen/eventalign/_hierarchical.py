@@ -418,11 +418,11 @@ def _anchored_mixture_em(
     if null_gate:
         return np.zeros_like(z_all), pi, True
 
-    # Posteriors via likelihood ratio (50/50 prior, as in _probability.py)
+    # Posteriors using pi-weighted prior from EM
     f0_all = _normal_pdf(z_all, mu0, sigma0)
     f1_all = _normal_pdf(z_all, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi) * f0_all + pi * f1_all + _EPS
+    probs = (pi * f1_all) / denom_all
     return np.clip(probs, 0.0, 1.0), pi, False
 
 
