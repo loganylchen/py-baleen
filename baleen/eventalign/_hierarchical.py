@@ -41,6 +41,7 @@ from numpy.typing import NDArray
 from scipy.stats import norm as _norm_dist
 
 if TYPE_CHECKING:
+    from baleen.eventalign._hmm_training import HMMParams
     from baleen.eventalign._pipeline import ContigResult, PositionResult
 
 logger = logging.getLogger(__name__)
@@ -581,6 +582,7 @@ def _run_hmm_on_trajectories(
     *,
     min_positions: int = 3,
     p_stay_per_base: float = 0.98,
+    hmm_params: HMMParams | None = None,
 ) -> None:
     """Run forward-backward on each trajectory and write p_mod_hmm in-place.
 
@@ -589,7 +591,15 @@ def _run_hmm_on_trajectories(
 
     Reads with fewer than *min_positions* observations are skipped (their
     p_mod_hmm remains as the V2 p_mod_raw fallback).
+
+    When *hmm_params* is provided, its ``p_stay_per_base``, ``init_prob``,
+    and ``emission_transform`` override the defaults.
     """
+    # Resolve HMM parameters
+    effective_p_stay = hmm_params.p_stay_per_base if hmm_params else p_stay_per_base
+    effective_init = hmm_params.init_prob if hmm_params else None
+    emission_transform = hmm_params.emission_transform if hmm_params else None
+
     for traj in trajectories:
         if len(traj.positions) < min_positions:
             continue
@@ -602,17 +612,38 @@ def _run_hmm_on_trajectories(
         ):
             ps = position_stats[pos]
             p_mod = ps.p_mod_raw[read_idx]
-            # emission[t, 0] = P(obs | unmod) ~ 1 - p_mod
-            # emission[t, 1] = P(obs | mod)   ~ p_mod
-            # Clamp away from 0/1 for numerical stability
-            p_mod_safe = max(min(p_mod, 1.0 - 1e-10), 1e-10)
-            emissions[t_idx, 0] = 1.0 - p_mod_safe
-            emissions[t_idx, 1] = p_mod_safe
+
+            if emission_transform is None:
+                # Default: use raw p_mod directly
+                p_mod_safe = max(min(p_mod, 1.0 - 1e-10), 1e-10)
+                emissions[t_idx, 0] = 1.0 - p_mod_safe
+                emissions[t_idx, 1] = p_mod_safe
+            else:
+                # Lazy import to resolve type at runtime
+                from baleen.eventalign._hmm_training import (
+                    EmissionCalibrator,
+                    EmissionKDE,
+                )
+
+                if isinstance(emission_transform, EmissionCalibrator):
+                    calibrated = emission_transform.transform(
+                        np.array([p_mod])
+                    )[0]
+                    calibrated = max(min(calibrated, 1.0 - 1e-10), 1e-10)
+                    emissions[t_idx, 0] = 1.0 - calibrated
+                    emissions[t_idx, 1] = calibrated
+                elif isinstance(emission_transform, EmissionKDE):
+                    p_unmod, p_mod_kde = emission_transform.emission_probs(
+                        np.array([p_mod])
+                    )
+                    emissions[t_idx, 0] = p_unmod[0]
+                    emissions[t_idx, 1] = p_mod_kde[0]
 
         posteriors = _forward_backward(
             emissions,
             traj.positions,
-            p_stay_per_base=p_stay_per_base,
+            init_prob=effective_init,
+            p_stay_per_base=effective_p_stay,
         )
 
         # Write back
@@ -640,6 +671,7 @@ def compute_sequential_modification_probabilities(
     hmm_min_positions: int = 3,
     hmm_p_stay_per_base: float = 0.98,
     run_hmm: bool = True,
+    hmm_params: HMMParams | None = None,
 ) -> ContigModificationResult:
     """Run the full V1→V2→V3 hierarchical pipeline on a contig.
 
@@ -663,6 +695,10 @@ def compute_sequential_modification_probabilities(
         Per-base state persistence for HMM transitions.
     run_hmm : bool
         If False, skip V3 entirely.
+    hmm_params : HMMParams | None
+        Trained HMM parameters.  When provided, overrides
+        ``hmm_p_stay_per_base`` and uses learned emission transforms
+        and initial state probabilities.
 
     Returns
     -------
@@ -784,12 +820,14 @@ def compute_sequential_modification_probabilities(
             position_stats,
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
+            hmm_params=hmm_params,
         )
         _run_hmm_on_trajectories(
             ivt_trajs,
             position_stats,
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
+            hmm_params=hmm_params,
         )
 
     return ContigModificationResult(

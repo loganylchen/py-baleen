@@ -48,6 +48,19 @@ from baleen.eventalign._hierarchical import (
     CoverageClass,
     compute_sequential_modification_probabilities,
 )
+from baleen.eventalign._hmm_training import (
+    CVResult,
+    EmissionCalibrator,
+    EmissionKDE,
+    HMMParams,
+    create_unsupervised_params,
+    cross_validate_hmm,
+    labels_from_known_modifications,
+    load_hmm_params,
+    save_hmm_params,
+    train_semi_supervised,
+    train_supervised,
+)
 from baleen.eventalign._probability import (
     AlgorithmName,
     ModificationProbabilities,
@@ -72,4 +85,15 @@ __all__ = [
     "CoverageClass",
     "ContigModificationResult",
     "compute_sequential_modification_probabilities",
+    "HMMParams",
+    "EmissionCalibrator",
+    "EmissionKDE",
+    "create_unsupervised_params",
+    "train_semi_supervised",
+    "train_supervised",
+    "labels_from_known_modifications",
+    "cross_validate_hmm",
+    "CVResult",
+    "save_hmm_params",
+    "load_hmm_params",
 ]
