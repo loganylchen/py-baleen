@@ -43,6 +43,11 @@ from baleen.eventalign._pipeline import (
     run_pipeline,
     save_results,
 )
+from baleen.eventalign._hierarchical import (
+    ContigModificationResult,
+    CoverageClass,
+    compute_sequential_modification_probabilities,
+)
 from baleen.eventalign._probability import (
     AlgorithmName,
     ModificationProbabilities,
@@ -64,4 +69,7 @@ __all__ = [
     "AlgorithmName",
     "ModificationProbabilities",
     "compute_modification_probabilities",
+    "CoverageClass",
+    "ContigModificationResult",
+    "compute_sequential_modification_probabilities",
 ]
