@@ -23,8 +23,10 @@ RUN pip install --no-cache-dir .
 # --- Runtime stage ---
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libhdf5-103-1 zlib1g \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zlib1g \
+    && apt-cache search '^libhdf5-[0-9]' | head -1 | awk '{print $1}' \
+       | xargs apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
