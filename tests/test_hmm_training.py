@@ -442,7 +442,8 @@ def test_hmm_params_in_pipeline():
     assert max(diffs) > 1e-6
 
 
-def test_backward_compat():
+def test_default_uses_3state_unsupervised():
+    """Default (hmm_params=None) should produce same results as explicit 3-state unsupervised."""
     cr = _make_contig_result(
         n_positions=9,
         n_native=10,
@@ -451,15 +452,15 @@ def test_backward_compat():
         seed=901,
         contig_name="chrY",
     )
-    legacy = hier.compute_sequential_modification_probabilities(cr)
-    unsup = hier.compute_sequential_modification_probabilities(
+    default = hier.compute_sequential_modification_probabilities(cr)
+    unsup_3s = hier.compute_sequential_modification_probabilities(
         cr,
-        hmm_params=hmm.create_unsupervised_params(n_states=2),
+        hmm_params=hmm.create_unsupervised_params(n_states=3),
     )
-    for pos in legacy.position_stats:
+    for pos in default.position_stats:
         np.testing.assert_allclose(
-            legacy.position_stats[pos].p_mod_hmm,
-            unsup.position_stats[pos].p_mod_hmm,
+            default.position_stats[pos].p_mod_hmm,
+            unsup_3s.position_stats[pos].p_mod_hmm,
             atol=1e-10,
         )
 

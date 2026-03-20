@@ -1148,12 +1148,18 @@ def compute_sequential_modification_probabilities(
     )
 
     if run_hmm:
+        # Default to 3-state unsupervised HMM when no params provided
+        effective_hmm_params = hmm_params
+        if effective_hmm_params is None:
+            from baleen.eventalign._hmm_training import create_unsupervised_params
+            effective_hmm_params = create_unsupervised_params(n_states=3)
+
         _run_hmm_on_trajectories(
             native_trajs,
             position_stats,
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
-            hmm_params=hmm_params,
+            hmm_params=effective_hmm_params,
             emission_source=emission_source,
         )
         _run_hmm_on_trajectories(
@@ -1161,7 +1167,7 @@ def compute_sequential_modification_probabilities(
             position_stats,
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
-            hmm_params=hmm_params,
+            hmm_params=effective_hmm_params,
             emission_source=emission_source,
         )
 

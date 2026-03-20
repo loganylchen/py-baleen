@@ -66,6 +66,12 @@ from baleen.eventalign._probability import (
     ModificationProbabilities,
     compute_modification_probabilities,
 )
+from baleen.eventalign._aggregation import (
+    SiteResult,
+    aggregate_all,
+    aggregate_contig,
+    write_site_tsv,
+)
 from baleen.eventalign._signal import PositionSignals
 
 __all__ = [
@@ -96,4 +102,8 @@ __all__ = [
     "CVResult",
     "save_hmm_params",
     "load_hmm_params",
+    "SiteResult",
+    "aggregate_contig",
+    "aggregate_all",
+    "write_site_tsv",
 ]
