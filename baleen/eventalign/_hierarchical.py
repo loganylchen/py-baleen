@@ -55,6 +55,11 @@ _MIN_SIGMA = 1e-6
 _MAD_SCALE = 1.4826  # MAD → σ for Normal
 
 
+def _sigmoid(x: float | NDArray[np.float64]) -> float | NDArray[np.float64]:
+    """Numerically stable sigmoid."""
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+
+
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
@@ -99,7 +104,9 @@ class PositionStats:
     mixture_pi: float
     """Fitted mixing proportion for alt component."""
     mixture_null_gate: bool
-    """True if position classified as unmodified by mixture."""
+    """True if position classified as unmodified by mixture (hard gate, legacy)."""
+    gate_weight: float
+    """Continuous soft gate weight ∈ [0, 1].  1 = fully open, 0 = fully gated."""
 
     # V3 — HMM smoothed (populated only if HMM runs)
     p_mod_hmm: NDArray[np.float64]
@@ -168,30 +175,75 @@ def _extract_ivt_distances(
     n_native: int,
     n_ivt: int,
 ) -> NDArray[np.float64]:
-    """Per-read median distance to IVT controls, log1p-transformed.
+    """Per-read enriched score combining IVT distance, native cohesion,
+    and IVT baseline correction.
 
-    Same semantics as ``_probability._score_distance_to_ivt`` but uses
-    ``log1p`` instead of ``log`` for better numerical behaviour near zero.
+    Computes three components per read and combines them:
+      1. Median distance to IVT (log1p-transformed) — original score
+      2. Asymmetric correction: subtract IVT self-similarity baseline
+      3. Native cohesion ratio boost for native reads
 
     Returns shape ``(n_native + n_ivt,)``.
     """
     n_total = n_native + n_ivt
     ivt_indices = np.arange(n_native, n_total)
-    scores = np.empty(n_total, dtype=np.float64)
+    native_indices = np.arange(n_native)
 
+    # Component 1: median distance to IVT per read
+    dist_to_ivt = np.empty(n_total, dtype=np.float64)
     for i in range(n_total):
         if i >= n_native:
-            # IVT read — leave-one-out
             others = ivt_indices[ivt_indices != i]
         else:
             others = ivt_indices
-
         if len(others) == 0:
-            scores[i] = 0.0
+            dist_to_ivt[i] = 0.0
         else:
-            scores[i] = float(np.median(distance_matrix[i, others]))
+            dist_to_ivt[i] = float(np.median(distance_matrix[i, others]))
 
-    return np.log1p(scores)
+    # Component 2: IVT self-similarity baseline
+    if n_ivt >= 2:
+        ivt_self_dists = []
+        for i in ivt_indices:
+            others = ivt_indices[ivt_indices != i]
+            ivt_self_dists.append(float(np.median(distance_matrix[i, others])))
+        ivt_baseline = float(np.median(ivt_self_dists))
+        ivt_mad = float(np.median(np.abs(np.array(ivt_self_dists) - ivt_baseline)))
+        ivt_scale = max(ivt_mad * _MAD_SCALE, _MIN_SIGMA)
+    else:
+        ivt_baseline = 0.0
+        ivt_scale = 1.0
+
+    # Component 3: native within-group distances (cohesion)
+    if n_native >= 2:
+        native_self_dists = np.empty(n_native, dtype=np.float64)
+        for i in native_indices:
+            others = native_indices[native_indices != i]
+            native_self_dists[i] = float(np.median(distance_matrix[i, others]))
+        native_cohesion = float(np.median(native_self_dists))
+    else:
+        native_cohesion = 0.0
+
+    # Combine: asymmetric score = (dist_to_ivt - ivt_baseline) / ivt_scale
+    # For native reads with good cohesion, boost by cohesion ratio
+    scores = np.empty(n_total, dtype=np.float64)
+    for i in range(n_total):
+        base_score = dist_to_ivt[i]
+
+        if i < n_native and n_native >= 2 and n_ivt >= 2:
+            # Asymmetric correction: excess distance beyond IVT self-similarity
+            excess = max(base_score - ivt_baseline, 0.0)
+            # Cohesion ratio: high when native reads agree with each other
+            # but differ from IVT (strong modification signal)
+            cohesion_ratio = base_score / max(native_cohesion, _MIN_SIGMA)
+            # Blend: log1p(base) + weighted excess + cohesion bonus
+            scores[i] = np.log1p(base_score) + 0.3 * excess / ivt_scale
+            if cohesion_ratio > 1.5:
+                scores[i] += 0.2 * np.log1p(cohesion_ratio - 1.0)
+        else:
+            scores[i] = np.log1p(base_score)
+
+    return scores
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +383,84 @@ def _shrink_parameters(
 
 
 # ---------------------------------------------------------------------------
-# V2 — Anchored two-component mixture on native z-scores
+# V2 — Contig-pooled mixture EM
+# ---------------------------------------------------------------------------
+
+
+def _contig_pooled_mixture_em(
+    position_stats: dict[int, PositionStats],
+    sorted_positions: list[int],
+    *,
+    max_iter: int = 200,
+    tol: float = 1e-6,
+) -> tuple[float, float]:
+    """Fit a global two-component mixture across the entire contig.
+
+    Concatenates native z-scores from all positions and fits a single
+    null + alternative EM.  Returns ``(global_mu1, global_sigma1)`` for
+    the alternative component, to be used as a prior for per-position
+    fits at low-coverage positions.
+
+    Returns ``(None, None)`` if insufficient data.
+    """
+    from baleen.eventalign._probability import _normal_pdf
+
+    # Collect all native z-scores and IVT z-scores
+    all_z_native = []
+    all_z_ivt = []
+    for pos in sorted_positions:
+        ps = position_stats[pos]
+        if ps.n_native >= 2 and ps.n_ivt >= 2:
+            all_z_native.append(ps.z_scores[: ps.n_native])
+            all_z_ivt.append(ps.z_scores[ps.n_native :])
+
+    if len(all_z_native) < 3:
+        return None, None
+
+    z_native_pool = np.concatenate(all_z_native)
+    z_ivt_pool = np.concatenate(all_z_ivt)
+
+    if len(z_native_pool) < 10:
+        return None, None
+
+    # Null from pooled IVT
+    mu0 = float(np.median(z_ivt_pool))
+    mad0 = float(np.median(np.abs(z_ivt_pool - mu0)))
+    sigma0 = max(mad0 * _MAD_SCALE, _MIN_SIGMA)
+
+    # Init alternative
+    pi = 0.1
+    mu1 = max(float(np.mean(z_native_pool)), mu0 + 0.5 * sigma0)
+    sigma1 = sigma0
+
+    for _ in range(max_iter):
+        f0 = _normal_pdf(z_native_pool, mu0, sigma0)
+        f1 = _normal_pdf(z_native_pool, mu1, sigma1)
+        denom = (1.0 - pi) * f0 + pi * f1 + _EPS
+        r = (pi * f1) / denom
+
+        pi_new = float(np.mean(r))
+        r_sum = float(np.sum(r)) + _EPS
+        mu1_new = float(np.sum(r * z_native_pool)) / r_sum
+        sigma1_new = math.sqrt(
+            max(float(np.sum(r * (z_native_pool - mu1_new) ** 2)) / r_sum,
+                _MIN_SIGMA ** 2)
+        )
+
+        if abs(pi_new - pi) < tol and abs(mu1_new - mu1) < tol:
+            pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+            break
+        pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+
+    logger.debug(
+        "Contig-pooled EM: pi=%.3f, mu1=%.3f, sigma1=%.3f (n=%d reads from %d positions)",
+        pi, mu1, sigma1, len(z_native_pool), len(all_z_native),
+    )
+    return mu1, sigma1
+
+
+# ---------------------------------------------------------------------------
+# V2 — Anchored two-component mixture on native z-scores (with soft gating)
 # ---------------------------------------------------------------------------
 
 
@@ -344,40 +473,69 @@ def _anchored_mixture_em(
     tol: float = 1e-6,
     pi_threshold: float = 0.05,
     separation_threshold: float = 0.8,
-) -> tuple[NDArray[np.float64], float, bool]:
+    tau_pi: float = 0.02,
+    tau_bic: float = 5.0,
+    tau_sep: float = 0.3,
+    global_mu1: float | None = None,
+    global_sigma1: float | None = None,
+    min_reads_for_local: int = 50,
+) -> tuple[NDArray[np.float64], float, bool, float]:
     """EM with null fixed to IVT distribution, alternative free.
 
-    The null component is fitted from IVT z-scores (should be ~N(0,1) if
-    shrinkage worked correctly).  The alternative is initialised shifted
-    right and fitted via EM on native z-scores only.
+    Uses **soft gating** instead of hard binary gates.  Three sigmoid
+    weights (pi, BIC, separation) are multiplied into a continuous
+    gate_weight ∈ [0, 1].  The final probability is a blend of the
+    mixture posterior and a z-score-based fallback.
 
     Parameters
     ----------
     z_native : z-scores of native reads at this position
     z_ivt : z-scores of IVT reads at this position
     z_all : z-scores of ALL reads (native + IVT, in that order)
+    tau_pi, tau_bic, tau_sep : float
+        Temperature parameters for the soft sigmoid gates.
+    global_mu1, global_sigma1 : float | None
+        If provided, used as the alternative component parameters for
+        low-coverage positions (< min_reads_for_local native reads).
+    min_reads_for_local : int
+        Minimum native reads to fit a per-position alternative.
 
     Returns
     -------
-    (p_mod_all, pi, null_gate_active)
-        p_mod_all has shape matching z_all
+    (p_mod_all, pi, null_gate_legacy, gate_weight)
+        p_mod_all has shape matching z_all.
+        null_gate_legacy is True if the hard gate would have fired (kept
+        for backward-compatible reporting).
+        gate_weight is the continuous soft gate ∈ [0, 1].
     """
     from baleen.eventalign._probability import (
         _normal_pdf, _normal_log_likelihood, _EPS as _PROB_EPS,
     )
 
     if len(z_ivt) < 2 or len(z_native) < 2:
-        return np.zeros_like(z_all), 0.0, True
+        # Insufficient data — use z-score fallback only
+        fallback = 1.0 - _norm_dist.cdf(-z_all)
+        return np.clip(fallback, 0.0, 1.0), 0.0, True, 0.0
 
     # Null from IVT z-scores (should be centred near 0)
     mu0 = float(np.median(z_ivt))
     mad0 = float(np.median(np.abs(z_ivt - mu0)))
     sigma0 = max(mad0 * _MAD_SCALE, _MIN_SIGMA)
 
-    # Init alternative — shifted right
+    # Init alternative — use global params if available and low coverage
+    use_global = (
+        global_mu1 is not None
+        and global_sigma1 is not None
+        and len(z_native) < min_reads_for_local
+    )
+    if use_global:
+        mu1 = global_mu1
+        sigma1 = global_sigma1
+    else:
+        mu1 = max(float(np.mean(z_native)), mu0 + 0.5 * sigma0)
+        sigma1 = sigma0
+
     pi = 0.1
-    mu1 = max(float(np.mean(z_native)), mu0 + 0.5 * sigma0)
-    sigma1 = sigma0
 
     for _ in range(max_iter):
         f0 = _normal_pdf(z_native, mu0, sigma0)
@@ -387,18 +545,24 @@ def _anchored_mixture_em(
 
         pi_new = float(np.mean(r))
         r_sum = float(np.sum(r)) + _EPS
-        mu1_new = float(np.sum(r * z_native)) / r_sum
-        sigma1_new = math.sqrt(
-            max(float(np.sum(r * (z_native - mu1_new) ** 2)) / r_sum,
-                _MIN_SIGMA ** 2)
-        )
 
-        if abs(pi_new - pi) < tol and abs(mu1_new - mu1) < tol:
-            pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+        if use_global:
+            # Keep global params, only update pi
+            pass
+        else:
+            mu1_new = float(np.sum(r * z_native)) / r_sum
+            sigma1_new = math.sqrt(
+                max(float(np.sum(r * (z_native - mu1_new) ** 2)) / r_sum,
+                    _MIN_SIGMA ** 2)
+            )
+            mu1, sigma1 = mu1_new, sigma1_new
+
+        if abs(pi_new - pi) < tol:
+            pi = pi_new
             break
-        pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+        pi = pi_new
 
-    # Gates
+    # Compute gate signals
     separation = abs(mu1 - mu0) / max(sigma0, _MIN_SIGMA)
     n = len(z_native)
 
@@ -409,21 +573,32 @@ def _anchored_mixture_em(
     bic_null = -2 * ll_null + 2 * math.log(max(n, 1))
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))
 
-    null_gate = (
+    # Legacy hard gate (for reporting / backward compat)
+    null_gate_legacy = (
         pi < pi_threshold
         or bic_mix >= bic_null
         or separation < separation_threshold
     )
 
-    if null_gate:
-        return np.zeros_like(z_all), pi, True
+    # Soft gate: continuous weights ∈ [0, 1]
+    w_pi = float(_sigmoid((pi - pi_threshold) / tau_pi))
+    w_bic = float(_sigmoid((bic_null - bic_mix) / tau_bic))
+    w_sep = float(_sigmoid((separation - separation_threshold) / tau_sep))
+    gate_weight = w_pi * w_bic * w_sep
 
-    # Posteriors via likelihood ratio (50/50 prior, as in _probability.py)
+    # Mixture posteriors (always computed now)
     f0_all = _normal_pdf(z_all, mu0, sigma0)
     f1_all = _normal_pdf(z_all, mu1, sigma1)
     denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
-    return np.clip(probs, 0.0, 1.0), pi, False
+    raw_posterior = f1_all / denom_all
+
+    # Fallback: z-score-based probability (always nonzero for high z)
+    fallback = 1.0 - _norm_dist.cdf(-z_all)
+
+    # Blend: high gate_weight → trust mixture; low → fall back to z-score
+    final_prob = gate_weight * raw_posterior + (1.0 - gate_weight) * fallback
+
+    return np.clip(final_prob, 0.0, 1.0), pi, null_gate_legacy, gate_weight
 
 
 # ---------------------------------------------------------------------------
@@ -783,27 +958,37 @@ def compute_sequential_modification_probabilities(
             p_mod_raw=np.zeros(n_total, dtype=np.float64),
             mixture_pi=0.0,
             mixture_null_gate=True,
+            gate_weight=0.0,
             p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
         )
 
-    # ── V2: Anchored mixture ─────────────────────────────────────────────
+    # ── V2a: Contig-pooled EM for global alternative parameters ────────
+
+    global_mu1, global_sigma1 = _contig_pooled_mixture_em(
+        position_stats, sorted_positions,
+    )
+
+    # ── V2b: Per-position anchored mixture with soft gating ────────────
 
     for pos in sorted_positions:
         ps = position_stats[pos]
         z_native = ps.z_scores[: ps.n_native]
         z_ivt = ps.z_scores[ps.n_native :]
 
-        p_mod_all, pi, null_gate = _anchored_mixture_em(
+        p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
             z_native,
             z_ivt,
             ps.z_scores,
             max_iter=mixture_max_iter,
             pi_threshold=mixture_pi_threshold,
             separation_threshold=mixture_separation,
+            global_mu1=global_mu1,
+            global_sigma1=global_sigma1,
         )
         ps.p_mod_raw[:] = p_mod_all
         ps.mixture_pi = pi
         ps.mixture_null_gate = null_gate
+        ps.gate_weight = gw
 
         # Default HMM to V2 result (will be overwritten if HMM runs)
         ps.p_mod_hmm[:] = p_mod_all

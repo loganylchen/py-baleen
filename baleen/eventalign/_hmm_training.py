@@ -217,11 +217,62 @@ def _fit_platt_scaling(
     return float(result.x[0]), float(result.x[1])
 
 
+def _learn_transition_from_labels(
+    training_data: dict[str, ContigModificationResult],
+    labels: dict[tuple[str, int], bool],
+) -> float:
+    """Learn p_stay_per_base from labeled data via MLE on state transitions.
+
+    Counts same-state vs different-state transitions along read
+    trajectories, weighted by 1/gap to normalize for genomic distance.
+
+    Returns the learned p_stay, clamped to [0.8, 0.999].
+    Falls back to 0.98 if insufficient transition data.
+    """
+    same_count = 0.0
+    diff_count = 0.0
+
+    for contig_name, cmr in training_data.items():
+        all_trajs = list(cmr.native_trajectories) + list(cmr.ivt_trajectories)
+        is_ivt_offset = len(cmr.native_trajectories)
+
+        for traj_idx, traj in enumerate(all_trajs):
+            is_ivt = traj_idx >= is_ivt_offset
+            labeled_pairs: list[tuple[int, int]] = []
+            for pos in traj.positions:
+                key = (contig_name, pos)
+                if key not in labels:
+                    continue
+                if is_ivt:
+                    state = 0
+                else:
+                    state = 1 if labels[key] else 0
+                labeled_pairs.append((pos, state))
+
+            for i in range(len(labeled_pairs) - 1):
+                pos_i, state_i = labeled_pairs[i]
+                pos_j, state_j = labeled_pairs[i + 1]
+                gap = max(pos_j - pos_i, 1)
+                if state_i == state_j:
+                    same_count += 1.0 / gap
+                else:
+                    diff_count += 1.0 / gap
+
+    total = same_count + diff_count
+    if total < 5.0:
+        return 0.98
+
+    p_stay = same_count / total
+    return max(0.8, min(p_stay, 0.999))
+
+
 def train_semi_supervised(
     training_data: dict[str, ContigModificationResult],
     labels: dict[tuple[str, int], bool],
     *,
     species_name: str = "",
+    species_names: list[str] | None = None,
+    learn_transitions: bool = True,
 ) -> HMMParams:
     """Train Mode B (semi-supervised) HMM parameters.
 
@@ -234,12 +285,19 @@ def train_semi_supervised(
         ``{(contig, pipeline_position): is_modified}`` — True means the
         position is known to carry a modification.
     species_name
-        Optional species tag stored in metadata.
+        Optional single species tag stored in metadata.
+    species_names
+        Optional list of species names for multi-organism pooling.
+        Takes precedence over ``species_name`` if provided.
+    learn_transitions
+        If True (default), learn ``p_stay_per_base`` from labeled
+        trajectories instead of using the hardcoded 0.98 default.
 
     Returns
     -------
     HMMParams
-        With Platt-calibrated emission transform and learned ``init_prob``.
+        With Platt-calibrated emission transform, learned ``init_prob``,
+        and optionally learned transition parameters.
 
     Raises
     ------
@@ -306,15 +364,28 @@ def train_semi_supervised(
     a, b = _fit_platt_scaling(raw_arr, true_arr)
     calibrator = EmissionCalibrator(a=a, b=b)
 
+    # ── Learn transition parameters from labeled trajectories ────────────
+    if learn_transitions:
+        p_stay = _learn_transition_from_labels(training_data, labels)
+        logger.info("Semi-supervised learned p_stay=%.4f from labeled data", p_stay)
+    else:
+        p_stay = 0.98
+
     # ── Learned init_prob from base rate ─────────────────────────────────
     base_rate = n_pos / max(n_pos + n_neg, 1)
     init_prob = np.array([1.0 - base_rate, base_rate], dtype=np.float64)
 
-    species_list = [species_name] if species_name else []
+    # ── Species metadata ─────────────────────────────────────────────────
+    if species_names is not None:
+        species_list = list(species_names)
+    elif species_name:
+        species_list = [species_name]
+    else:
+        species_list = []
 
     return HMMParams(
         mode="semi_supervised",
-        p_stay_per_base=0.98,  # keep default
+        p_stay_per_base=p_stay,
         init_prob=init_prob,
         emission_transform=calibrator,
         training_species=species_list,

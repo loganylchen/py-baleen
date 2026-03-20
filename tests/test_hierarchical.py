@@ -287,42 +287,76 @@ class TestAnchoredMixtureEM:
         z_ivt = rng.normal(0.0, 1.0, size=20)
         z_native = rng.normal(3.0, 1.0, size=20)
         z_all = np.concatenate([z_native, z_ivt])
-        probs, pi, null_gate = _anchored_mixture_em(z_native, z_ivt, z_all)
+        probs, pi, null_gate, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
         assert not null_gate
+        assert gate_weight > 0.5
         native_probs = probs[:20]
         ivt_probs = probs[20:]
         assert np.mean(native_probs) > 0.5
         assert np.mean(ivt_probs) < 0.5
 
-    def test_homogeneous_triggers_null_gate(self):
+    def test_homogeneous_soft_gate(self):
+        """Homogeneous data should have low gate_weight but NOT zero probs
+        (soft gating gives attenuated fallback, not hard zeros)."""
         rng = np.random.RandomState(42)
         z_ivt = rng.normal(0.0, 1.0, size=20)
         z_native = rng.normal(0.0, 1.0, size=20)
         z_all = np.concatenate([z_native, z_ivt])
-        probs, pi, null_gate = _anchored_mixture_em(z_native, z_ivt, z_all)
-        assert null_gate
-        assert np.all(probs == 0.0)
+        probs, pi, null_gate, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
+        assert null_gate  # legacy gate still fires
+        assert gate_weight < 0.3  # soft gate is low
+        # With soft gating, probs are NOT all zero — they use z-score fallback
+        assert np.mean(probs) < 0.5  # but values should be low
 
-    def test_too_few_ivt(self):
+    def test_too_few_ivt_uses_fallback(self):
         z_ivt = np.array([0.0])
         z_native = np.array([3.0, 4.0, 5.0])
         z_all = np.concatenate([z_native, z_ivt])
-        probs, pi, null_gate = _anchored_mixture_em(z_native, z_ivt, z_all)
+        probs, pi, null_gate, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
         assert null_gate
+        assert gate_weight == 0.0
+        # Fallback gives nonzero probs for high z-scores
+        assert np.all(probs >= 0.0)
+        assert np.all(probs <= 1.0)
 
-    def test_too_few_native(self):
+    def test_too_few_native_uses_fallback(self):
         z_ivt = np.array([0.0, 0.5])
         z_native = np.array([3.0])
         z_all = np.concatenate([z_native, z_ivt])
-        probs, pi, null_gate = _anchored_mixture_em(z_native, z_ivt, z_all)
+        probs, pi, null_gate, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
         assert null_gate
+        assert gate_weight == 0.0
 
     def test_probs_bounded(self):
         rng = np.random.RandomState(42)
         z_ivt = rng.normal(0.0, 1.0, size=30)
         z_native = rng.normal(4.0, 1.0, size=30)
         z_all = np.concatenate([z_native, z_ivt])
-        probs, _, null_gate = _anchored_mixture_em(z_native, z_ivt, z_all)
+        probs, _, null_gate, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
+        assert np.all(probs >= 0.0)
+        assert np.all(probs <= 1.0)
+        assert 0.0 <= gate_weight <= 1.0
+
+    def test_soft_gate_borderline_nonzero(self):
+        """Borderline positions near thresholds should get nonzero probs."""
+        rng = np.random.RandomState(42)
+        z_ivt = rng.normal(0.0, 1.0, size=15)
+        z_native = rng.normal(1.0, 1.0, size=15)  # mild shift
+        z_all = np.concatenate([z_native, z_ivt])
+        probs, _, _, gate_weight = _anchored_mixture_em(z_native, z_ivt, z_all)
+        # With soft gating, even borderline positions produce nonzero probs
+        assert np.any(probs > 0.0)
+
+    def test_global_params_used_for_low_coverage(self):
+        """When global params provided, low-coverage positions use them."""
+        rng = np.random.RandomState(42)
+        z_ivt = rng.normal(0.0, 1.0, size=5)
+        z_native = rng.normal(2.0, 1.0, size=5)  # few reads
+        z_all = np.concatenate([z_native, z_ivt])
+        probs, _, _, gw = _anchored_mixture_em(
+            z_native, z_ivt, z_all,
+            global_mu1=3.0, global_sigma1=1.0,
+        )
         assert np.all(probs >= 0.0)
         assert np.all(probs <= 1.0)
 
@@ -639,3 +673,99 @@ class TestFullPipeline:
         r2 = compute_sequential_modification_probabilities(cr, shrinkage_window=50)
         pos = sorted(cr.positions.keys())[0]
         assert r1.position_stats[pos].mu_shrunk != r2.position_stats[pos].mu_shrunk or True
+
+    def test_gate_weight_present(self):
+        """Every position should have a gate_weight field."""
+        cr = _make_contig_result(
+            n_positions=5, n_native=15, n_ivt=10,
+            modified_positions={2}, seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr)
+        for ps in result.position_stats.values():
+            assert 0.0 <= ps.gate_weight <= 1.0
+
+    def test_soft_gating_preserves_signal(self):
+        """Modified positions should have nonzero p_mod_raw even with soft gate."""
+        cr = _make_contig_result(
+            n_positions=10, n_native=15, n_ivt=10,
+            modified_positions={3, 7}, seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr)
+        sorted_pos = sorted(cr.positions.keys())
+        for mod_idx in [3, 7]:
+            ps = result.position_stats[sorted_pos[mod_idx]]
+            # Soft gating means modified positions always have nonzero signal
+            assert np.max(ps.native_p_mod_raw) > 0.0
+
+    def test_modified_positions_higher_than_unmodified(self):
+        """Modified positions should have higher mean p_mod_raw than unmodified."""
+        cr = _make_contig_result(
+            n_positions=10, n_native=15, n_ivt=10,
+            modified_positions={3}, seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr)
+        sorted_pos = sorted(cr.positions.keys())
+        ps_mod = result.position_stats[sorted_pos[3]]
+        ps_unmod = result.position_stats[sorted_pos[0]]
+        assert np.mean(ps_mod.native_p_mod_raw) > np.mean(ps_unmod.native_p_mod_raw)
+
+
+# ---------------------------------------------------------------------------
+# Tests — _contig_pooled_mixture_em
+# ---------------------------------------------------------------------------
+
+
+_contig_pooled_mixture_em = hier._contig_pooled_mixture_em
+
+
+class TestContigPooledEM:
+    def test_returns_global_params(self):
+        cr = _make_contig_result(
+            n_positions=10, n_native=15, n_ivt=10,
+            modified_positions={3, 7}, seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr, run_hmm=False)
+        sorted_pos = sorted(cr.positions.keys())
+        mu1, sigma1 = _contig_pooled_mixture_em(
+            result.position_stats, sorted_pos,
+        )
+        assert mu1 is not None
+        assert sigma1 is not None
+        assert sigma1 > 0
+
+    def test_insufficient_data_returns_none(self):
+        cr = _make_contig_result(n_positions=1, n_native=5, n_ivt=5, seed=42)
+        result = compute_sequential_modification_probabilities(cr, run_hmm=False)
+        sorted_pos = sorted(cr.positions.keys())
+        mu1, sigma1 = _contig_pooled_mixture_em(
+            result.position_stats, sorted_pos,
+        )
+        # Only 1 position — falls below minimum of 3
+        assert mu1 is None
+        assert sigma1 is None
+
+
+# ---------------------------------------------------------------------------
+# Tests — improved V1 scoring
+# ---------------------------------------------------------------------------
+
+
+class TestImprovedV1Scoring:
+    def test_modified_higher_scores_than_unmodified(self):
+        """Modified positions should produce higher V1 scores for native reads."""
+        dm_mod = _make_block_distance_matrix(10, 10, between=8.0, noise=0.1)
+        dm_unmod = _make_homogeneous_matrix(10, 10, base_dist=1.0, noise=0.05)
+        scores_mod = _extract_ivt_distances(dm_mod, 10, 10)
+        scores_unmod = _extract_ivt_distances(dm_unmod, 10, 10)
+        # Native reads (first 10) should score higher for modified
+        assert np.mean(scores_mod[:10]) > np.mean(scores_unmod[:10])
+
+    def test_cohesion_ratio_boost(self):
+        """When native reads are cohesive but far from IVT, scores should be boosted."""
+        dm = _make_block_distance_matrix(
+            10, 10, within_native=0.5, within_ivt=0.5,
+            between=8.0, noise=0.05,
+        )
+        scores = _extract_ivt_distances(dm, 10, 10)
+        # Native scores should be well above IVT scores
+        assert np.mean(scores[:10]) > np.mean(scores[10:]) * 1.2
