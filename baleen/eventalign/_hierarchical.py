@@ -844,9 +844,9 @@ def _run_hmm_on_trajectories(
     emission_transform = hmm_params.emission_transform if hmm_params else None
     n_states = hmm_params.n_states if hmm_params else 2
 
-    # Precompute Beta PDF lookup grids for 3-state unsupervised mode
+    # Precompute Beta PDF lookup grids for all 3-state modes
     beta_grids = None
-    if n_states == 3 and emission_transform is None and hmm_params is not None:
+    if n_states == 3 and hmm_params is not None:
         n_grid = 1000
         grid_x = np.linspace(1e-6, 1.0 - 1e-6, n_grid)
         a_u, b_u = hmm_params.unmod_emission_beta

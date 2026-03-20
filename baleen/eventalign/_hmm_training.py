@@ -301,6 +301,7 @@ def train_semi_supervised(
     species_names: list[str] | None = None,
     learn_transitions: bool = True,
     emission_source: str = "p_mod_raw",
+    n_states: int = 2,
 ) -> HMMParams:
     """Train Mode B (semi-supervised) HMM parameters.
 
@@ -320,6 +321,9 @@ def train_semi_supervised(
     learn_transitions
         If True (default), learn ``p_stay_per_base`` from labeled
         trajectories instead of using the hardcoded 0.98 default.
+    n_states
+        Number of HMM states.  ``2`` (default) for U/M; ``3`` for
+        U/Flank/M where the Flank state uses Beta(3,3) emissions.
 
     Returns
     -------
@@ -402,7 +406,14 @@ def train_semi_supervised(
 
     # ── Learned init_prob from base rate ─────────────────────────────────
     base_rate = n_pos / max(n_pos + n_neg, 1)
-    init_prob = np.array([1.0 - base_rate, base_rate], dtype=np.float64)
+    if n_states == 3:
+        flank_rate = min(2.0 * base_rate, 0.3)
+        init_prob = np.array(
+            [1.0 - base_rate - flank_rate, flank_rate, base_rate],
+            dtype=np.float64,
+        )
+    else:
+        init_prob = np.array([1.0 - base_rate, base_rate], dtype=np.float64)
 
     # ── Species metadata ─────────────────────────────────────────────────
     if species_names is not None:
@@ -414,7 +425,7 @@ def train_semi_supervised(
 
     return HMMParams(
         mode="semi_supervised",
-        n_states=2,
+        n_states=n_states,
         p_stay_per_base=p_stay,
         init_prob=init_prob,
         emission_transform=calibrator,
@@ -437,6 +448,7 @@ def train_supervised(
     kde_n_bins: int = 200,
     kde_bandwidth: float | None = None,
     emission_source: str = "p_mod_raw",
+    n_states: int = 2,
 ) -> HMMParams:
     """Train Mode C (fully supervised) HMM parameters.
 
@@ -452,6 +464,9 @@ def train_supervised(
         Number of evaluation points for KDE grid.
     kde_bandwidth
         Explicit bandwidth for KDE; ``None`` = Scott's rule (default).
+    n_states
+        Number of HMM states.  ``2`` (default) for U/M; ``3`` for
+        U/Flank/M where the Flank state uses Beta(3,3) emissions.
 
     Returns
     -------
@@ -569,13 +584,20 @@ def train_supervised(
 
     # ── 4. Learned init_prob ─────────────────────────────────────────────
     base_rate = n_pos / max(n_pos + n_neg, 1)
-    init_prob = np.array([1.0 - base_rate, base_rate], dtype=np.float64)
+    if n_states == 3:
+        flank_rate = min(2.0 * base_rate, 0.3)
+        init_prob = np.array(
+            [1.0 - base_rate - flank_rate, flank_rate, base_rate],
+            dtype=np.float64,
+        )
+    else:
+        init_prob = np.array([1.0 - base_rate, base_rate], dtype=np.float64)
 
     species_list = [species_name] if species_name else []
 
     return HMMParams(
         mode="supervised",
-        n_states=2,
+        n_states=n_states,
         p_stay_per_base=p_stay,
         init_prob=init_prob,
         emission_transform=emission_kde,

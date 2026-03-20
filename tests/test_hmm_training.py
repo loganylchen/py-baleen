@@ -517,6 +517,73 @@ def test_save_load_roundtrip_3state():
         os.unlink(tmp.name)
 
 
+def test_train_semi_supervised_3state():
+    v2_results, labels, _ = _build_training_data(
+        n_contigs=3,
+        n_positions=10,
+        modified_per_contig=5,
+        seed_base=210,
+    )
+    params = hmm.train_semi_supervised(
+        v2_results, labels, species_name="synthetic", n_states=3,
+    )
+    assert params.mode == "semi_supervised"
+    assert params.n_states == 3
+    assert params.init_prob.shape == (3,)
+    assert params.init_prob.sum() == pytest.approx(1.0)
+    assert isinstance(params.emission_transform, EmissionCalibrator)
+
+
+def test_train_supervised_3state():
+    v2_results, labels, _ = _build_training_data(
+        n_contigs=4,
+        n_positions=15,
+        modified_per_contig=8,
+        seed_base=410,
+    )
+    mixed_labels: dict[tuple[str, int], bool] = {}
+    per_contig_counts: dict[str, int] = {}
+    for (contig, pos), is_mod in sorted(labels.items()):
+        idx = per_contig_counts.get(contig, 0)
+        per_contig_counts[contig] = idx + 1
+        mixed_labels[(contig, pos)] = is_mod if (idx % 4) else True
+
+    params = hmm.train_supervised(
+        v2_results, mixed_labels, species_name="synthetic", n_states=3,
+    )
+    assert params.mode == "supervised"
+    assert params.n_states == 3
+    assert params.init_prob.shape == (3,)
+    assert params.init_prob.sum() == pytest.approx(1.0)
+    assert isinstance(params.emission_transform, EmissionKDE)
+
+
+def test_save_load_roundtrip_3state_calibrator():
+    params = HMMParams(
+        mode="semi_supervised",
+        n_states=3,
+        p_stay_per_base=0.96,
+        init_prob=np.array([0.5, 0.3, 0.2], dtype=np.float64),
+        emission_transform=EmissionCalibrator(a=1.8, b=-0.5),
+        training_species=["ecoli"],
+        n_training_positions=50,
+        n_training_reads=1200,
+    )
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    try:
+        hmm.save_hmm_params(params, tmp.name)
+        loaded = hmm.load_hmm_params(tmp.name)
+        assert loaded.mode == "semi_supervised"
+        assert loaded.n_states == 3
+        np.testing.assert_allclose(loaded.init_prob, params.init_prob)
+        assert isinstance(loaded.emission_transform, EmissionCalibrator)
+        assert loaded.emission_transform.a == pytest.approx(1.8)
+        assert loaded.emission_transform.b == pytest.approx(-0.5)
+    finally:
+        os.unlink(tmp.name)
+
+
 def test_load_backward_compat_2state():
     """Loading a 2-state JSON (without n_states key) should default to n_states=2."""
     data = {
