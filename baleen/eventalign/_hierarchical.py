@@ -108,6 +108,10 @@ class PositionStats:
     gate_weight: float
     """Continuous soft gate weight ∈ [0, 1].  1 = fully open, 0 = fully gated."""
 
+    # kNN IVT-purity scores (populated only if computed)
+    p_mod_knn: NDArray[np.float64]
+    """kNN IVT-purity P(mod), shape (n_native + n_ivt,). NaN if not computed."""
+
     # V3 — HMM smoothed (populated only if HMM runs)
     p_mod_hmm: NDArray[np.float64]
     """HMM-smoothed P(mod), shape (n_native + n_ivt,).  NaN if HMM skipped."""
@@ -127,6 +131,14 @@ class PositionStats:
     @property
     def ivt_p_mod_raw(self) -> NDArray[np.float64]:
         return self.p_mod_raw[self.n_native :]
+
+    @property
+    def native_p_mod_knn(self) -> NDArray[np.float64]:
+        return self.p_mod_knn[: self.n_native]
+
+    @property
+    def ivt_p_mod_knn(self) -> NDArray[np.float64]:
+        return self.p_mod_knn[self.n_native :]
 
     @property
     def native_p_mod_hmm(self) -> NDArray[np.float64]:
@@ -758,6 +770,7 @@ def _run_hmm_on_trajectories(
     min_positions: int = 3,
     p_stay_per_base: float = 0.98,
     hmm_params: HMMParams | None = None,
+    emission_source: str = "p_mod_raw",
 ) -> None:
     """Run forward-backward on each trajectory and write p_mod_hmm in-place.
 
@@ -786,7 +799,7 @@ def _run_hmm_on_trajectories(
             zip(traj.positions, traj.indices)
         ):
             ps = position_stats[pos]
-            p_mod = ps.p_mod_raw[read_idx]
+            p_mod = getattr(ps, emission_source)[read_idx]
 
             if emission_transform is None:
                 # Default: use raw p_mod directly
@@ -847,6 +860,7 @@ def compute_sequential_modification_probabilities(
     hmm_p_stay_per_base: float = 0.98,
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
+    emission_source: str = "p_mod_raw",
 ) -> ContigModificationResult:
     """Run the full V1→V2→V3 hierarchical pipeline on a contig.
 
@@ -874,6 +888,10 @@ def compute_sequential_modification_probabilities(
         Trained HMM parameters.  When provided, overrides
         ``hmm_p_stay_per_base`` and uses learned emission transforms
         and initial state probabilities.
+    emission_source : str
+        Which per-read score field to use as HMM emissions.
+        ``"p_mod_raw"`` (default) uses V2 mixture posteriors;
+        ``"p_mod_knn"`` uses kNN IVT-purity scores.
 
     Returns
     -------
@@ -959,6 +977,7 @@ def compute_sequential_modification_probabilities(
             mixture_pi=0.0,
             mixture_null_gate=True,
             gate_weight=0.0,
+            p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
             p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
         )
 
@@ -993,6 +1012,28 @@ def compute_sequential_modification_probabilities(
         # Default HMM to V2 result (will be overwritten if HMM runs)
         ps.p_mod_hmm[:] = p_mod_all
 
+    # ── kNN IVT-purity scores ─────────────────────────────────────────────
+
+    from baleen.eventalign._probability import _score_knn_ivt_purity, _calibrate_beta
+
+    for pos in sorted_positions:
+        pr = contig_result.positions[pos]
+        ps = position_stats[pos]
+        n_total = pr.n_native_reads + pr.n_ivt_reads
+
+        if n_total < 3:
+            continue
+
+        raw_knn = _score_knn_ivt_purity(
+            pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
+        )
+
+        ivt_mask = np.zeros(n_total, dtype=bool)
+        ivt_mask[pr.n_native_reads:] = True
+
+        cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
+        ps.p_mod_knn[:] = cal.probabilities
+
     # ── V3: HMM smoothing ────────────────────────────────────────────────
 
     native_trajs, ivt_trajs = _build_read_trajectories(
@@ -1006,6 +1047,7 @@ def compute_sequential_modification_probabilities(
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
             hmm_params=hmm_params,
+            emission_source=emission_source,
         )
         _run_hmm_on_trajectories(
             ivt_trajs,
@@ -1013,6 +1055,7 @@ def compute_sequential_modification_probabilities(
             min_positions=hmm_min_positions,
             p_stay_per_base=hmm_p_stay_per_base,
             hmm_params=hmm_params,
+            emission_source=emission_source,
         )
 
     return ContigModificationResult(

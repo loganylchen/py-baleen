@@ -273,6 +273,7 @@ def train_semi_supervised(
     species_name: str = "",
     species_names: list[str] | None = None,
     learn_transitions: bool = True,
+    emission_source: str = "p_mod_raw",
 ) -> HMMParams:
     """Train Mode B (semi-supervised) HMM parameters.
 
@@ -337,19 +338,20 @@ def train_semi_supervised(
         ps = cmr.position_stats[pos]
         n_reads_total += ps.n_native + ps.n_ivt
 
+        source_scores = getattr(ps, emission_source)
         if is_mod:
             # Native reads at modified positions → label 1
             for i in range(ps.n_native):
-                raw_vals.append(float(ps.p_mod_raw[i]))
+                raw_vals.append(float(source_scores[i]))
                 true_vals.append(1.0)
             # IVT reads at modified positions → label 0 (IVT never modified)
             for i in range(ps.n_native, ps.n_native + ps.n_ivt):
-                raw_vals.append(float(ps.p_mod_raw[i]))
+                raw_vals.append(float(source_scores[i]))
                 true_vals.append(0.0)
         else:
             # All reads at unmodified positions → label 0
             for i in range(ps.n_native + ps.n_ivt):
-                raw_vals.append(float(ps.p_mod_raw[i]))
+                raw_vals.append(float(source_scores[i]))
                 true_vals.append(0.0)
 
     if len(raw_vals) == 0:
@@ -406,6 +408,7 @@ def train_supervised(
     species_name: str = "",
     kde_n_bins: int = 200,
     kde_bandwidth: float | None = None,
+    emission_source: str = "p_mod_raw",
 ) -> HMMParams:
     """Train Mode C (fully supervised) HMM parameters.
 
@@ -461,17 +464,18 @@ def train_supervised(
         ps = cmr.position_stats[pos]
         n_reads_total += ps.n_native + ps.n_ivt
 
+        source_scores = getattr(ps, emission_source)
         if is_mod:
             # Native reads → modified
             for i in range(ps.n_native):
-                mod_vals.append(float(ps.p_mod_raw[i]))
+                mod_vals.append(float(source_scores[i]))
             # IVT reads → unmodified
             for i in range(ps.n_native, ps.n_native + ps.n_ivt):
-                unmod_vals.append(float(ps.p_mod_raw[i]))
+                unmod_vals.append(float(source_scores[i]))
         else:
             # All reads → unmodified
             for i in range(ps.n_native + ps.n_ivt):
-                unmod_vals.append(float(ps.p_mod_raw[i]))
+                unmod_vals.append(float(source_scores[i]))
 
     if len(mod_vals) < 5 or len(unmod_vals) < 5:
         raise ValueError(
@@ -715,6 +719,7 @@ def cross_validate_hmm(
     *,
     cv_strategy: Literal["leave_one_contig_out", "kfold"] = "leave_one_contig_out",
     k: int = 5,
+    emission_source: str = "p_mod_raw",
     **hierarchical_kwargs,
 ) -> CVResult:
     """Cross-validate HMM training to detect overfitting.
@@ -795,9 +800,13 @@ def cross_validate_hmm(
 
         try:
             if mode == "semi_supervised":
-                hmm_params = train_semi_supervised(train_data, train_labels)
+                hmm_params = train_semi_supervised(
+                    train_data, train_labels, emission_source=emission_source,
+                )
             else:
-                hmm_params = train_supervised(train_data, train_labels)
+                hmm_params = train_supervised(
+                    train_data, train_labels, emission_source=emission_source,
+                )
         except ValueError as e:
             logger.warning(
                 "Skipping fold (test=%s): insufficient training data — %s",
@@ -815,7 +824,8 @@ def cross_validate_hmm(
                 continue
             cr = contig_results[test_contig]
             test_result = compute_sequential_modification_probabilities(
-                cr, hmm_params=hmm_params, **hierarchical_kwargs
+                cr, hmm_params=hmm_params, emission_source=emission_source,
+                **hierarchical_kwargs,
             )
 
             # Collect scores at labeled test positions
