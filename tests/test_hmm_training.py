@@ -170,8 +170,9 @@ def _build_training_data(
 def test_create_unsupervised_params():
     params = hmm.create_unsupervised_params()
     assert params.mode == "unsupervised"
+    assert params.n_states == 3
     assert params.p_stay_per_base == 0.98
-    np.testing.assert_allclose(params.init_prob, np.array([0.5, 0.5]))
+    np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
     assert params.emission_transform is None
 
 
@@ -335,6 +336,7 @@ def test_labels_from_known_modifications_no_auto_neg():
 def test_save_load_roundtrip_calibrator():
     params = HMMParams(
         mode="semi_supervised",
+        n_states=2,
         p_stay_per_base=0.98,
         init_prob=np.array([0.7, 0.3], dtype=np.float64),
         emission_transform=EmissionCalibrator(a=2.3, b=-0.9),
@@ -366,6 +368,7 @@ def test_save_load_roundtrip_kde():
     density_mod = np.linspace(3.0, 1.0, 50)
     params = HMMParams(
         mode="supervised",
+        n_states=2,
         p_stay_per_base=0.9,
         init_prob=np.array([0.6, 0.4], dtype=np.float64),
         emission_transform=EmissionKDE(
@@ -420,6 +423,7 @@ def test_hmm_params_in_pipeline():
     baseline = hier.compute_sequential_modification_probabilities(cr)
     params = HMMParams(
         mode="semi_supervised",
+        n_states=2,
         p_stay_per_base=0.98,
         init_prob=np.array([0.5, 0.5], dtype=np.float64),
         emission_transform=EmissionCalibrator(a=2.0, b=-1.0),
@@ -450,7 +454,7 @@ def test_backward_compat():
     legacy = hier.compute_sequential_modification_probabilities(cr)
     unsup = hier.compute_sequential_modification_probabilities(
         cr,
-        hmm_params=hmm.create_unsupervised_params(),
+        hmm_params=hmm.create_unsupervised_params(n_states=2),
     )
     for pos in legacy.position_stats:
         np.testing.assert_allclose(
@@ -458,3 +462,79 @@ def test_backward_compat():
             unsup.position_stats[pos].p_mod_hmm,
             atol=1e-10,
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests — 3-state unsupervised params
+# ---------------------------------------------------------------------------
+
+
+def test_create_unsupervised_params_3state():
+    params = hmm.create_unsupervised_params(n_states=3)
+    assert params.mode == "unsupervised"
+    assert params.n_states == 3
+    assert params.p_stay_per_base == 0.98
+    np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
+    assert params.emission_transform is None
+    assert params.unmod_emission_beta == (2.0, 8.0)
+    assert params.flank_emission_beta == (3.0, 3.0)
+    assert params.mod_emission_beta == (8.0, 2.0)
+
+
+def test_create_unsupervised_params_2state():
+    params = hmm.create_unsupervised_params(n_states=2)
+    assert params.n_states == 2
+    np.testing.assert_allclose(params.init_prob, np.array([0.5, 0.5]))
+
+
+# ---------------------------------------------------------------------------
+# Tests — 3-state serialization
+# ---------------------------------------------------------------------------
+
+
+def test_save_load_roundtrip_3state():
+    params = HMMParams(
+        mode="unsupervised",
+        n_states=3,
+        p_stay_per_base=0.97,
+        init_prob=np.array([0.7, 0.2, 0.1], dtype=np.float64),
+        unmod_emission_beta=(2.0, 8.0),
+        flank_emission_beta=(3.0, 3.0),
+        mod_emission_beta=(8.0, 2.0),
+    )
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    try:
+        hmm.save_hmm_params(params, tmp.name)
+        loaded = hmm.load_hmm_params(tmp.name)
+        assert loaded.n_states == 3
+        assert loaded.p_stay_per_base == 0.97
+        np.testing.assert_allclose(loaded.init_prob, params.init_prob)
+        assert loaded.unmod_emission_beta == (2.0, 8.0)
+        assert loaded.flank_emission_beta == (3.0, 3.0)
+        assert loaded.mod_emission_beta == (8.0, 2.0)
+    finally:
+        os.unlink(tmp.name)
+
+
+def test_load_backward_compat_2state():
+    """Loading a 2-state JSON (without n_states key) should default to n_states=2."""
+    data = {
+        "mode": "unsupervised",
+        "p_stay_per_base": 0.98,
+        "init_prob": [0.5, 0.5],
+        "emission_transform": {"type": "none"},
+        "training_species": [],
+        "n_training_positions": 0,
+        "n_training_reads": 0,
+    }
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
+    import json
+    json.dump(data, tmp)
+    tmp.close()
+    try:
+        loaded = hmm.load_hmm_params(tmp.name)
+        assert loaded.n_states == 2
+        np.testing.assert_allclose(loaded.init_prob, np.array([0.5, 0.5]))
+    finally:
+        os.unlink(tmp.name)

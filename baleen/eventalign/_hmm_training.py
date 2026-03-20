@@ -156,14 +156,30 @@ class HMMParams:
 
     All fields have defaults so the dataclass can be constructed
     incrementally or via :func:`create_unsupervised_params`.
+
+    The ``n_states`` field controls HMM topology:
+    - ``n_states=2``: Unmodified / Modified (original behaviour).
+    - ``n_states=3``: Unmodified / Flank / Modified.  The Flank state
+      absorbs the ±2-base signal halo around modification sites so that
+      only true modification positions contribute to ``p_mod_hmm``.
     """
 
     mode: Literal["unsupervised", "semi_supervised", "supervised"] = "unsupervised"
+    n_states: int = 3
     p_stay_per_base: float = 0.98
     init_prob: NDArray[np.float64] = field(
-        default_factory=lambda: np.array([0.5, 0.5], dtype=np.float64)
+        default_factory=lambda: np.array([0.7, 0.2, 0.1], dtype=np.float64)
     )
     emission_transform: EmissionCalibrator | EmissionKDE | None = None
+
+    # Beta emission parameters for unsupervised 3-state mode
+    unmod_emission_beta: tuple[float, float] = (2.0, 8.0)
+    """Beta(2, 8) — mean ≈ 0.2, concentrates on low kNN scores."""
+    flank_emission_beta: tuple[float, float] = (3.0, 3.0)
+    """Beta(3, 3) — mean = 0.5, symmetric for moderate kNN scores."""
+    mod_emission_beta: tuple[float, float] = (8.0, 2.0)
+    """Beta(8, 2) — mean ≈ 0.8, concentrates on high kNN scores."""
+
     # Metadata
     training_species: list[str] = field(default_factory=list)
     n_training_positions: int = 0
@@ -175,12 +191,23 @@ class HMMParams:
 # ---------------------------------------------------------------------------
 
 
-def create_unsupervised_params() -> HMMParams:
+def create_unsupervised_params(n_states: int = 3) -> HMMParams:
     """Build default (unsupervised) HMM parameters.
 
-    Equivalent to the hardcoded values in ``_hierarchical.py``.
+    Parameters
+    ----------
+    n_states
+        Number of HMM states.  ``2`` returns the legacy 2-state
+        (Unmodified / Modified) model; ``3`` (default) adds an
+        explicit Flank state that absorbs the ±2-base signal halo.
     """
-    return HMMParams(mode="unsupervised")
+    if n_states == 2:
+        return HMMParams(
+            mode="unsupervised",
+            n_states=2,
+            init_prob=np.array([0.5, 0.5], dtype=np.float64),
+        )
+    return HMMParams(mode="unsupervised", n_states=3)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +414,7 @@ def train_semi_supervised(
 
     return HMMParams(
         mode="semi_supervised",
+        n_states=2,
         p_stay_per_base=p_stay,
         init_prob=init_prob,
         emission_transform=calibrator,
@@ -547,6 +575,7 @@ def train_supervised(
 
     return HMMParams(
         mode="supervised",
+        n_states=2,
         p_stay_per_base=p_stay,
         init_prob=init_prob,
         emission_transform=emission_kde,
@@ -914,11 +943,15 @@ def save_hmm_params(params: HMMParams, path: str | Path) -> None:
     """Serialize trained HMM parameters to JSON."""
     data = {
         "mode": params.mode,
+        "n_states": params.n_states,
         "p_stay_per_base": params.p_stay_per_base,
         "init_prob": params.init_prob.tolist(),
         "emission_transform": _serialize_emission_transform(
             params.emission_transform
         ),
+        "unmod_emission_beta": list(params.unmod_emission_beta),
+        "flank_emission_beta": list(params.flank_emission_beta),
+        "mod_emission_beta": list(params.mod_emission_beta),
         "training_species": params.training_species,
         "n_training_positions": params.n_training_positions,
         "n_training_reads": params.n_training_reads,
@@ -927,15 +960,22 @@ def save_hmm_params(params: HMMParams, path: str | Path) -> None:
 
 
 def load_hmm_params(path: str | Path) -> HMMParams:
-    """Load previously trained HMM parameters from JSON."""
+    """Load previously trained HMM parameters from JSON.
+
+    Backward-compatible: files without ``n_states`` default to 2-state.
+    """
     data = json.loads(Path(path).read_text())
     return HMMParams(
         mode=data["mode"],
+        n_states=data.get("n_states", 2),
         p_stay_per_base=data["p_stay_per_base"],
         init_prob=np.array(data["init_prob"], dtype=np.float64),
         emission_transform=_deserialize_emission_transform(
             data["emission_transform"]
         ),
+        unmod_emission_beta=tuple(data.get("unmod_emission_beta", (2.0, 8.0))),
+        flank_emission_beta=tuple(data.get("flank_emission_beta", (3.0, 3.0))),
+        mod_emission_beta=tuple(data.get("mod_emission_beta", (8.0, 2.0))),
         training_species=data.get("training_species", []),
         n_training_positions=data.get("n_training_positions", 0),
         n_training_reads=data.get("n_training_reads", 0),

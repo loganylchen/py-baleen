@@ -26,6 +26,7 @@ _shrink_parameters = hier._shrink_parameters
 _anchored_mixture_em = hier._anchored_mixture_em
 _build_read_trajectories = hier._build_read_trajectories
 _gap_transition_matrix = hier._gap_transition_matrix
+_gap_transition_matrix_3state = hier._gap_transition_matrix_3state
 _forward_backward = hier._forward_backward
 _run_hmm_on_trajectories = hier._run_hmm_on_trajectories
 compute_sequential_modification_probabilities = (
@@ -769,3 +770,133 @@ class TestImprovedV1Scoring:
         scores = _extract_ivt_distances(dm, 10, 10)
         # Native scores should be well above IVT scores
         assert np.mean(scores[:10]) > np.mean(scores[10:]) * 1.2
+
+
+# ---------------------------------------------------------------------------
+# Tests — _gap_transition_matrix_3state
+# ---------------------------------------------------------------------------
+
+
+class TestGapTransitionMatrix3State:
+    def test_row_stochastic(self):
+        for gap in [1, 5, 50, 1000]:
+            mat = _gap_transition_matrix_3state(gap)
+            row_sums = mat.sum(axis=1)
+            np.testing.assert_allclose(row_sums, [1.0, 1.0, 1.0], atol=1e-10)
+
+    def test_shape(self):
+        mat = _gap_transition_matrix_3state(1)
+        assert mat.shape == (3, 3)
+
+    def test_forbidden_transitions(self):
+        """U→M and M→U should be zero."""
+        for gap in [1, 10, 100]:
+            mat = _gap_transition_matrix_3state(gap)
+            assert mat[0, 2] == pytest.approx(0.0, abs=1e-15)  # U → M
+            assert mat[2, 0] == pytest.approx(0.0, abs=1e-15)  # M → U
+
+    def test_larger_gap_more_switching(self):
+        mat_small = _gap_transition_matrix_3state(1)
+        mat_large = _gap_transition_matrix_3state(100)
+        # Diagonal (stay) should decrease with larger gaps
+        assert mat_large[0, 0] < mat_small[0, 0]
+        assert mat_large[1, 1] < mat_small[1, 1]
+        assert mat_large[2, 2] < mat_small[2, 2]
+
+    def test_gap_one_matches_p_stay(self):
+        mat = _gap_transition_matrix_3state(1, p_stay_per_base=0.95)
+        assert mat[0, 0] == pytest.approx(0.95, abs=1e-10)
+        assert mat[2, 2] == pytest.approx(0.95, abs=1e-10)
+
+    def test_flank_asymmetric_split(self):
+        """Flank should split leaving probability 40% toward U, 60% toward M."""
+        mat = _gap_transition_matrix_3state(1, p_stay_per_base=0.9)
+        p_leave = 1.0 - 0.9
+        assert mat[1, 0] == pytest.approx(0.4 * p_leave, abs=1e-10)
+        assert mat[1, 2] == pytest.approx(0.6 * p_leave, abs=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Tests — _forward_backward with 3 states
+# ---------------------------------------------------------------------------
+
+
+class TestForwardBackward3State:
+    def test_strong_modified_signal(self):
+        """Strong modified emissions → high P(Modified) posteriors."""
+        # State 0=Unmod, 1=Flank, 2=Modified
+        emissions = np.array([
+            [0.1, 0.2, 0.9],  # modified
+            [0.1, 0.2, 0.9],
+            [0.1, 0.2, 0.9],
+            [0.1, 0.2, 0.9],
+            [0.1, 0.2, 0.9],
+        ], dtype=np.float64)
+        positions = [100, 101, 102, 103, 104]
+        posteriors = _forward_backward(
+            emissions, positions,
+            init_prob=np.array([0.7, 0.2, 0.1]),
+        )
+        assert posteriors.shape == (5,)
+        assert np.all(posteriors > 0.3)
+
+    def test_strong_unmodified_signal(self):
+        """Strong unmodified emissions → low P(Modified) posteriors."""
+        emissions = np.array([
+            [0.9, 0.2, 0.1],
+            [0.9, 0.2, 0.1],
+            [0.9, 0.2, 0.1],
+            [0.9, 0.2, 0.1],
+            [0.9, 0.2, 0.1],
+        ], dtype=np.float64)
+        positions = [100, 101, 102, 103, 104]
+        posteriors = _forward_backward(
+            emissions, positions,
+            init_prob=np.array([0.7, 0.2, 0.1]),
+        )
+        assert np.all(posteriors < 0.2)
+
+    def test_flank_absorbs_moderate_signal(self):
+        """Moderate emissions surrounded by unmodified should go to Flank, not Modified."""
+        emissions = np.array([
+            [0.9, 0.2, 0.05],   # unmodified
+            [0.9, 0.2, 0.05],   # unmodified
+            [0.3, 0.8, 0.3],    # moderate — should go to Flank
+            [0.9, 0.2, 0.05],   # unmodified
+            [0.9, 0.2, 0.05],   # unmodified
+        ], dtype=np.float64)
+        positions = [100, 101, 102, 103, 104]
+        posteriors = _forward_backward(
+            emissions, positions,
+            init_prob=np.array([0.7, 0.2, 0.1]),
+        )
+        # Position 2 should have LOW P(Modified) because Flank absorbs it
+        assert posteriors[2] < 0.3
+
+    def test_posteriors_bounded(self):
+        rng = np.random.RandomState(42)
+        emissions = rng.uniform(0.01, 0.99, size=(20, 3))
+        positions = list(range(100, 120))
+        posteriors = _forward_backward(
+            emissions, positions,
+            init_prob=np.array([0.7, 0.2, 0.1]),
+        )
+        assert np.all(posteriors >= 0.0)
+        assert np.all(posteriors <= 1.0)
+
+    def test_empty_3state(self):
+        emissions = np.zeros((0, 3), dtype=np.float64)
+        posteriors = _forward_backward(emissions, [])
+        assert posteriors.shape == (0,)
+
+    def test_single_observation_3state(self):
+        emissions = np.array([[0.1, 0.2, 0.9]], dtype=np.float64)
+        positions = [100]
+        posteriors = _forward_backward(
+            emissions, positions,
+            init_prob=np.array([0.7, 0.2, 0.1]),
+        )
+        assert posteriors.shape == (1,)
+        # With init=[0.7,0.2,0.1] and emission=[0.1,0.2,0.9]:
+        # unnormed: [0.07, 0.04, 0.09] → P(mod) = 0.09/0.20 = 0.45
+        assert posteriors[0] > 0.2

@@ -688,6 +688,48 @@ def _gap_transition_matrix(
     ], dtype=np.float64)
 
 
+def _gap_transition_matrix_3state(
+    gap_bases: int,
+    p_stay_per_base: float = 0.98,
+) -> NDArray[np.float64]:
+    """Compute 3×3 transition matrix with forbidden U↔M direct transitions.
+
+    States: 0 = Unmodified, 1 = Flank, 2 = Modified.
+
+    Forbidden transitions (zero probability):
+    - U → M (must pass through Flank)
+    - M → U (must pass through Flank)
+
+    The Flank state splits its leaving probability asymmetrically:
+    40% toward U, 60% toward M (flanking positions are slightly more
+    likely to adjoin a true modification).
+
+    ::
+
+            U              F              M
+    U  [ p_stay       p_leave          0         ]
+    F  [ .4*p_leave   p_stay       .6*p_leave    ]
+    M  [ 0            p_leave      p_stay        ]
+
+    Returns shape (3, 3) row-stochastic matrix.
+    """
+    p_stay = p_stay_per_base ** max(gap_bases, 1)
+    p_stay = max(min(p_stay, 1.0 - _EPS), _EPS)
+    p_leave = 1.0 - p_stay
+
+    mat = np.array([
+        [p_stay,          p_leave,        0.0],
+        [0.4 * p_leave,   p_stay,         0.6 * p_leave],
+        [0.0,             p_leave,        p_stay],
+    ], dtype=np.float64)
+
+    # Row-normalize for safety
+    row_sums = mat.sum(axis=1, keepdims=True)
+    mat /= row_sums
+
+    return mat
+
+
 def _forward_backward(
     emissions: NDArray[np.float64],
     positions: list[int],
@@ -695,30 +737,41 @@ def _forward_backward(
     init_prob: NDArray[np.float64] | None = None,
     p_stay_per_base: float = 0.98,
 ) -> NDArray[np.float64]:
-    """Two-state forward-backward on a read trajectory.
+    """N-state forward-backward on a read trajectory.
 
     Parameters
     ----------
-    emissions : shape (T, 2)
-        emissions[t, 0] = P(observation | unmodified)
-        emissions[t, 1] = P(observation | modified)
+    emissions : shape (T, N)
+        emissions[t, k] = P(observation_t | state k).
+        N=2 for Unmodified/Modified; N=3 for Unmodified/Flank/Modified.
     positions : length T, sorted genomic positions
-    init_prob : shape (2,), initial state distribution (default: [0.5, 0.5])
+    init_prob : shape (N,), initial state distribution
     p_stay_per_base : per-base probability of staying in the same state
 
     Returns
     -------
-    posteriors : shape (T,) — P(modified | all observations)
+    posteriors : shape (T,) — P(state = last state | all observations).
+        For N=2 this is P(Modified); for N=3 this is P(Modified),
+        with the Flank state absorbed.
     """
     T = emissions.shape[0]
     if T == 0:
         return np.array([], dtype=np.float64)
 
+    N = emissions.shape[1]
+    uniform = np.full(N, 1.0 / N, dtype=np.float64)
+
     if init_prob is None:
-        init_prob = np.array([0.5, 0.5], dtype=np.float64)
+        init_prob = uniform.copy()
+
+    # Select transition function based on N
+    if N == 3:
+        _trans_fn = _gap_transition_matrix_3state
+    else:
+        _trans_fn = _gap_transition_matrix
 
     # Forward pass
-    alpha = np.zeros((T, 2), dtype=np.float64)
+    alpha = np.zeros((T, N), dtype=np.float64)
     scale = np.zeros(T, dtype=np.float64)
 
     alpha[0] = init_prob * emissions[0]
@@ -726,33 +779,33 @@ def _forward_backward(
     if scale[0] > 0:
         alpha[0] /= scale[0]
     else:
-        alpha[0] = np.array([0.5, 0.5])
+        alpha[0] = uniform.copy()
         scale[0] = _EPS
 
     for t in range(1, T):
         gap = positions[t] - positions[t - 1]
-        trans = _gap_transition_matrix(gap, p_stay_per_base)
+        trans = _trans_fn(gap, p_stay_per_base)
         alpha[t] = (alpha[t - 1] @ trans) * emissions[t]
         scale[t] = alpha[t].sum()
         if scale[t] > 0:
             alpha[t] /= scale[t]
         else:
-            alpha[t] = np.array([0.5, 0.5])
+            alpha[t] = uniform.copy()
             scale[t] = _EPS
 
     # Backward pass
-    beta = np.zeros((T, 2), dtype=np.float64)
-    beta[T - 1] = np.array([1.0, 1.0])
+    beta = np.zeros((T, N), dtype=np.float64)
+    beta[T - 1] = np.ones(N, dtype=np.float64)
 
     for t in range(T - 2, -1, -1):
         gap = positions[t + 1] - positions[t]
-        trans = _gap_transition_matrix(gap, p_stay_per_base)
+        trans = _trans_fn(gap, p_stay_per_base)
         beta[t] = trans @ (emissions[t + 1] * beta[t + 1])
         bt_sum = beta[t].sum()
         if bt_sum > 0:
             beta[t] /= bt_sum
         else:
-            beta[t] = np.array([1.0, 1.0])
+            beta[t] = np.ones(N, dtype=np.float64)
 
     # Posterior
     gamma = alpha * beta
@@ -760,7 +813,7 @@ def _forward_backward(
     gamma_sum = np.maximum(gamma_sum, _EPS)
     gamma /= gamma_sum
 
-    return gamma[:, 1]  # P(state=modified)
+    return gamma[:, N - 1]  # P(state=Modified) — last column for both 2 and 3 state
 
 
 def _run_hmm_on_trajectories(
@@ -783,17 +836,33 @@ def _run_hmm_on_trajectories(
     When *hmm_params* is provided, its ``p_stay_per_base``, ``init_prob``,
     and ``emission_transform`` override the defaults.
     """
+    from scipy.stats import beta as _beta_dist
+
     # Resolve HMM parameters
     effective_p_stay = hmm_params.p_stay_per_base if hmm_params else p_stay_per_base
     effective_init = hmm_params.init_prob if hmm_params else None
     emission_transform = hmm_params.emission_transform if hmm_params else None
+    n_states = hmm_params.n_states if hmm_params else 2
+
+    # Precompute Beta PDF lookup grids for 3-state unsupervised mode
+    beta_grids = None
+    if n_states == 3 and emission_transform is None and hmm_params is not None:
+        n_grid = 1000
+        grid_x = np.linspace(1e-6, 1.0 - 1e-6, n_grid)
+        a_u, b_u = hmm_params.unmod_emission_beta
+        a_f, b_f = hmm_params.flank_emission_beta
+        a_m, b_m = hmm_params.mod_emission_beta
+        grid_unmod = _beta_dist.pdf(grid_x, a_u, b_u)
+        grid_flank = _beta_dist.pdf(grid_x, a_f, b_f)
+        grid_mod = _beta_dist.pdf(grid_x, a_m, b_m)
+        beta_grids = (grid_x, grid_unmod, grid_flank, grid_mod)
 
     for traj in trajectories:
         if len(traj.positions) < min_positions:
             continue
 
         T = len(traj.positions)
-        emissions = np.zeros((T, 2), dtype=np.float64)
+        emissions = np.zeros((T, n_states), dtype=np.float64)
 
         for t_idx, (pos, read_idx) in enumerate(
             zip(traj.positions, traj.indices)
@@ -801,13 +870,51 @@ def _run_hmm_on_trajectories(
             ps = position_stats[pos]
             p_mod = getattr(ps, emission_source)[read_idx]
 
-            if emission_transform is None:
-                # Default: use raw p_mod directly
+            if n_states == 3 and emission_transform is None:
+                # Unsupervised 3-state: Beta PDF emissions via lookup
+                if beta_grids is not None:
+                    gx, g_u, g_f, g_m = beta_grids
+                    p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                    emissions[t_idx, 0] = max(np.interp(p_mod_clamped, gx, g_u), 1e-10)
+                    emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
+                    emissions[t_idx, 2] = max(np.interp(p_mod_clamped, gx, g_m), 1e-10)
+            elif n_states == 3 and emission_transform is not None:
+                # Trained model with 3 states: use calibrator/KDE for
+                # states 0 (unmod) and 2 (mod), Beta PDF for state 1 (flank)
+                from baleen.eventalign._hmm_training import (
+                    EmissionCalibrator,
+                    EmissionKDE,
+                )
+
+                if isinstance(emission_transform, EmissionCalibrator):
+                    calibrated = emission_transform.transform(np.array([p_mod]))[0]
+                    calibrated = max(min(calibrated, 1.0 - 1e-10), 1e-10)
+                    emissions[t_idx, 0] = 1.0 - calibrated
+                    emissions[t_idx, 2] = calibrated
+                elif isinstance(emission_transform, EmissionKDE):
+                    p_unmod, p_mod_kde = emission_transform.emission_probs(
+                        np.array([p_mod])
+                    )
+                    emissions[t_idx, 0] = p_unmod[0]
+                    emissions[t_idx, 2] = p_mod_kde[0]
+
+                # Flank from Beta PDF
+                p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                if beta_grids is not None:
+                    gx, _, g_f, _ = beta_grids
+                    emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
+                else:
+                    a_f, b_f = hmm_params.flank_emission_beta if hmm_params else (3.0, 3.0)
+                    emissions[t_idx, 1] = max(
+                        float(_beta_dist.pdf(p_mod_clamped, a_f, b_f)), 1e-10
+                    )
+            elif emission_transform is None:
+                # Default 2-state: use raw p_mod directly
                 p_mod_safe = max(min(p_mod, 1.0 - 1e-10), 1e-10)
                 emissions[t_idx, 0] = 1.0 - p_mod_safe
                 emissions[t_idx, 1] = p_mod_safe
             else:
-                # Lazy import to resolve type at runtime
+                # Trained 2-state with calibrator/KDE
                 from baleen.eventalign._hmm_training import (
                     EmissionCalibrator,
                     EmissionKDE,
@@ -860,7 +967,7 @@ def compute_sequential_modification_probabilities(
     hmm_p_stay_per_base: float = 0.98,
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
-    emission_source: str = "p_mod_raw",
+    emission_source: str = "p_mod_knn",
 ) -> ContigModificationResult:
     """Run the full V1→V2→V3 hierarchical pipeline on a contig.
 
@@ -890,8 +997,8 @@ def compute_sequential_modification_probabilities(
         and initial state probabilities.
     emission_source : str
         Which per-read score field to use as HMM emissions.
-        ``"p_mod_raw"`` (default) uses V2 mixture posteriors;
-        ``"p_mod_knn"`` uses kNN IVT-purity scores.
+        ``"p_mod_knn"`` (default) uses kNN IVT-purity scores;
+        ``"p_mod_raw"`` uses V2 mixture posteriors.
 
     Returns
     -------
