@@ -1,0 +1,47 @@
+# --- Build stage ---
+FROM python:3.11-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git wget build-essential zlib1g-dev libhdf5-dev \
+    autoconf automake libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build f5c v1.6 from source
+RUN git clone --branch v1.6 --depth 1 https://github.com/hasindu2008/f5c.git /tmp/f5c \
+    && cd /tmp/f5c \
+    && autoreconf -i \
+    && ./configure --disable-cuda \
+    && make -j"$(nproc)" \
+    && cp f5c /usr/local/bin/f5c \
+    && rm -rf /tmp/f5c
+
+# Build slow5tools v1.4.0 (needed by f5c for BLOW5 indexing)
+RUN git clone --branch v1.4.0 --depth 1 https://github.com/hasindu2008/slow5tools.git /tmp/slow5tools \
+    && cd /tmp/slow5tools \
+    && autoreconf -i || true \
+    && ./configure \
+    && make -j"$(nproc)" \
+    && cp slow5tools /usr/local/bin/slow5tools \
+    && rm -rf /tmp/slow5tools
+
+# Install baleen (CPU only)
+WORKDIR /app
+COPY . .
+ENV BALEEN_NO_CUDA=1
+RUN pip install --no-cache-dir .
+
+# --- Runtime stage ---
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libhdf5-103-1 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
+COPY --from=builder /usr/local/bin/slow5tools /usr/local/bin/slow5tools
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+
+WORKDIR /data
+ENTRYPOINT ["python3", "-m", "baleen"]
