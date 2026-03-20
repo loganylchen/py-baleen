@@ -4,27 +4,15 @@ FROM python:3.11-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git wget build-essential zlib1g-dev libhdf5-dev \
-    autoconf automake libtool \
+    wget build-essential zlib1g-dev libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build f5c v1.6 from source
-RUN git clone --branch v1.6 --depth 1 https://github.com/hasindu2008/f5c.git /tmp/f5c \
-    && cd /tmp/f5c \
-    && autoreconf -i \
-    && ./configure --disable-cuda \
-    && make -j"$(nproc)" \
-    && cp f5c /usr/local/bin/f5c \
-    && rm -rf /tmp/f5c
-
-# Build slow5tools v1.4.0 (needed by f5c for BLOW5 indexing)
-RUN git clone --branch v1.4.0 --depth 1 https://github.com/hasindu2008/slow5tools.git /tmp/slow5tools \
-    && cd /tmp/slow5tools \
-    && autoreconf -i || true \
-    && ./configure \
-    && make -j"$(nproc)" \
-    && cp slow5tools /usr/local/bin/slow5tools \
-    && rm -rf /tmp/slow5tools
+# Install f5c v1.6 from pre-built binaries (CPU)
+RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
+    && tar xf f5c-v1.6-binaries.tar.gz \
+    && cp f5c-v1.6/f5c_x86_64_linux /usr/local/bin/f5c \
+    && chmod +x /usr/local/bin/f5c \
+    && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
 # Install baleen (CPU only)
 WORKDIR /app
@@ -40,7 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
-COPY --from=builder /usr/local/bin/slow5tools /usr/local/bin/slow5tools
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 
 WORKDIR /data
