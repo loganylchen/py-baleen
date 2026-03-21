@@ -979,6 +979,168 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
     return (PyObject *)distance_matrix;
 }
 
+static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyArrayObject *sequences_array;
+    PyArrayObject *lengths_array;
+    PyArrayObject *counts_array;
+    int use_open_start = 0;
+    int use_open_end = 0;
+    int num_cuda_streams = 16;
+
+    static char *kwlist[] = {
+        (char *)"sequences", (char *)"lengths", (char *)"counts",
+        (char *)"use_open_start", (char *)"use_open_end",
+        (char *)"num_cuda_streams", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iii", kwlist,
+                                     &PyArray_Type, &sequences_array,
+                                     &PyArray_Type, &lengths_array,
+                                     &PyArray_Type, &counts_array,
+                                     &use_open_start, &use_open_end,
+                                     &num_cuda_streams))
+    {
+        return NULL;
+    }
+
+    // Validate sequences array: 2D float32
+    if (PyArray_NDIM(sequences_array) != 2)
+    {
+        PyErr_SetString(PyExc_ValueError,
+                        "sequences must be a 2D array (total_sequences, global_max_length)");
+        return NULL;
+    }
+    if (PyArray_TYPE(sequences_array) != NPY_FLOAT32)
+    {
+        PyErr_SetString(PyExc_TypeError, "sequences must be float32 dtype");
+        return NULL;
+    }
+
+    // Validate lengths array: 1D int64
+    if (PyArray_NDIM(lengths_array) != 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "lengths must be a 1D array");
+        return NULL;
+    }
+
+    // Validate counts array: 1D int64
+    if (PyArray_NDIM(counts_array) != 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "counts must be a 1D array");
+        return NULL;
+    }
+
+    npy_intp *seq_dims = PyArray_DIMS(sequences_array);
+    size_t total_sequences = (size_t)seq_dims[0];
+    size_t global_max_length = (size_t)seq_dims[1];
+    size_t num_positions = (size_t)PyArray_DIM(counts_array, 0);
+
+    if ((size_t)PyArray_DIM(lengths_array, 0) != total_sequences)
+    {
+        PyErr_SetString(PyExc_ValueError,
+                        "lengths array size must match total number of sequences");
+        return NULL;
+    }
+
+    // Convert lengths to size_t array
+    size_t *h_lengths = new size_t[total_sequences];
+    for (size_t i = 0; i < total_sequences; i++)
+    {
+        long long val;
+        if (PyArray_TYPE(lengths_array) == NPY_INT64)
+            val = *((long long *)PyArray_GETPTR1(lengths_array, i));
+        else if (PyArray_TYPE(lengths_array) == NPY_INT32)
+            val = *((int *)PyArray_GETPTR1(lengths_array, i));
+        else
+        {
+            delete[] h_lengths;
+            PyErr_SetString(PyExc_TypeError, "lengths must be int32 or int64 dtype");
+            return NULL;
+        }
+        if (val <= 0 || (size_t)val > global_max_length)
+        {
+            delete[] h_lengths;
+            PyErr_Format(PyExc_ValueError,
+                         "length[%zu]=%lld out of range (1..%zu)", i, val, global_max_length);
+            return NULL;
+        }
+        h_lengths[i] = (size_t)val;
+    }
+
+    // Convert counts to size_t array
+    size_t *h_counts = new size_t[num_positions];
+    size_t check_total = 0;
+    for (size_t p = 0; p < num_positions; p++)
+    {
+        long long val;
+        if (PyArray_TYPE(counts_array) == NPY_INT64)
+            val = *((long long *)PyArray_GETPTR1(counts_array, p));
+        else if (PyArray_TYPE(counts_array) == NPY_INT32)
+            val = *((int *)PyArray_GETPTR1(counts_array, p));
+        else
+        {
+            delete[] h_lengths;
+            delete[] h_counts;
+            PyErr_SetString(PyExc_TypeError, "counts must be int32 or int64 dtype");
+            return NULL;
+        }
+        if (val < 0)
+        {
+            delete[] h_lengths;
+            delete[] h_counts;
+            PyErr_Format(PyExc_ValueError, "counts[%zu]=%lld must be non-negative", p, val);
+            return NULL;
+        }
+        h_counts[p] = (size_t)val;
+        check_total += (size_t)val;
+    }
+
+    if (check_total != total_sequences)
+    {
+        delete[] h_lengths;
+        delete[] h_counts;
+        PyErr_Format(PyExc_ValueError,
+                     "sum(counts)=%zu != total sequences=%zu", check_total, total_sequences);
+        return NULL;
+    }
+
+    // Compute total output size
+    size_t total_out_floats = 0;
+    for (size_t p = 0; p < num_positions; p++)
+        total_out_floats += h_counts[p] * h_counts[p];
+
+    // Allocate output as flat 1D array
+    npy_intp out_dim = (npy_intp)total_out_floats;
+    PyArrayObject *out_array = (PyArrayObject *)PyArray_ZEROS(1, &out_dim, NPY_FLOAT32, 0);
+    if (out_array == NULL)
+    {
+        delete[] h_lengths;
+        delete[] h_counts;
+        return NULL;
+    }
+
+    float *sequences_data = (float *)PyArray_DATA(sequences_array);
+    float *out_data = (float *)PyArray_DATA(out_array);
+
+    int result = opendba_dtw_multi_position_pairwise(
+        sequences_data, h_lengths, h_counts,
+        num_positions, global_max_length,
+        use_open_start, use_open_end,
+        out_data, num_cuda_streams);
+
+    delete[] h_lengths;
+    delete[] h_counts;
+
+    if (result != 0)
+    {
+        Py_DECREF(out_array);
+        PyErr_SetString(PyExc_RuntimeError, "CUDA multi-position batch DTW failed");
+        return NULL;
+    }
+
+    return (PyObject *)out_array;
+}
+
 /**
  * Python wrapper for opendba_dtw_cleanup
  */
@@ -1040,6 +1202,27 @@ static PyMethodDef DtwMethods[] = {
      "-------\n"
      "np.ndarray\n"
      "    Distance matrix (num_sequences, num_sequences) with DTW distances\n"},
+    {"dtw_multi_position_pairwise", (PyCFunction)py_dtw_multi_position_pairwise,
+     METH_VARARGS | METH_KEYWORDS,
+     "Compute pairwise DTW distances for multiple positions in one batched GPU call.\n\n"
+     "Parameters\n"
+     "----------\n"
+     "sequences : np.ndarray\n"
+     "    2D padded array (total_sequences, global_max_length) in float32\n"
+     "lengths : np.ndarray\n"
+     "    1D array of actual sequence lengths (int64)\n"
+     "counts : np.ndarray\n"
+     "    1D array of sequence counts per position (int64)\n"
+     "use_open_start : int, optional\n"
+     "    Enable open start boundary (default: 0)\n"
+     "use_open_end : int, optional\n"
+     "    Enable open end boundary (default: 0)\n"
+     "num_cuda_streams : int, optional\n"
+     "    Number of CUDA streams (default: 16)\n\n"
+     "Returns\n"
+     "-------\n"
+     "np.ndarray\n"
+     "    Flat 1D array of concatenated distance matrices (float32)\n"},
     {"cleanup", py_dtw_cleanup, METH_NOARGS,
      "Reset CUDA device and free all resources.\n\n"
      "This should be called when done using CUDA DTW to free GPU resources.\n"},
