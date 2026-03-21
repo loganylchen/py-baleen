@@ -19,6 +19,23 @@
         }                                                                         \
     } while (0)
 
+// ============================================================================
+// Cached Device Properties
+// ============================================================================
+
+static int g_max_threads = 0;
+static bool g_props_cached = false;
+
+static int ensure_device_props() {
+    if (!g_props_cached) {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        g_max_threads = prop.maxThreadsPerBlock;
+        g_props_cached = true;
+    }
+    return 0;
+}
+
 // 复用 OpenDBA 的核函数启动逻辑，仅适配单对序列计算
 int opendba_dtw_cuda(
     const float *seq1, size_t len1,
@@ -62,9 +79,8 @@ int opendba_dtw_cuda(
 
     // 4. 启动 OpenDBA 原版 DTW 核函数（参数严格对齐）
     // Get device properties to determine thread count
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float); // 复用 OpenDBA 的共享内存计算
@@ -129,6 +145,8 @@ int opendba_dtw_cuda(
 
 void opendba_dtw_cleanup()
 {
+    g_props_cached = false;
+    g_max_threads = 0;
     cudaDeviceReset();
 }
 
@@ -175,9 +193,8 @@ int opendba_dtw_pairwise_batch(
     delete[] h_seq_lengths;
 
     // Allocate temporary buffers for DTW computation
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     // Query available GPU memory
     size_t free_memory, total_memory;
@@ -387,9 +404,8 @@ int opendba_dtw_pairwise_varlen(
     CUDA_CHECK(cudaMemcpy(d_sequences, sequences, total_seq_size, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_seq_lengths, seq_lengths, num_sequences * sizeof(size_t), cudaMemcpyHostToDevice));
 
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     size_t max_pairs_parallel = num_sequences - 1;
 
