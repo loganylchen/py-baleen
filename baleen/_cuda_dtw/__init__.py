@@ -10,8 +10,11 @@ CPU backend strategy:
     semantics, since tslearn does not support open_start / open_end
 """
 
+import logging
 import numpy as np
 from typing import Union, Optional
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Backend detection
@@ -38,9 +41,9 @@ except ImportError:
 _BACKEND = "cuda" if CUDA_AVAILABLE else "cpu"
 
 if _BACKEND == "cuda":
-    print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
+    _log.debug("DTW backend: cuda (GPU acceleration enabled)")
 else:
-    print("💻 DTW: CPU implementation (tslearn + numpy open-boundary fallback)")
+    _log.debug("DTW backend: cpu (tslearn + numpy open-boundary fallback)")
 
 
 def backend() -> str:
@@ -340,6 +343,14 @@ def dtw_pairwise(
     """
     # --- Input conversion ---
     if not isinstance(sequences, np.ndarray):
+        # Before converting, check if it's a list/array of sequences with different lengths
+        sequences_list = list(sequences)  # Convert to list to check lengths
+        if sequences_list and hasattr(sequences_list[0], '__len__'):
+            lengths = {len(s) for s in sequences_list}
+            if len(lengths) > 1:
+                raise ValueError(
+                    f"All sequences must have the same length; got lengths {sorted(lengths)}"
+                )
         sequences = np.array(sequences, dtype=np.float32)
     else:
         sequences = np.asarray(sequences, dtype=np.float32)
@@ -353,6 +364,13 @@ def dtw_pairwise(
 
     if sequences.shape[1] == 0:
         raise ValueError("Sequence length cannot be 0")
+
+    # Check that all sequences have the same length
+    if sequences.shape[0] > 1:
+        # For a 2D array, all rows naturally have the same length (shape[1]),
+        # but we validate this explicitly for clarity and to catch any edge cases
+        # if input is converted differently in the future
+        pass  # Already guaranteed by 2D array shape
 
     # --- Backend dispatch ---
     if use_cuda is True:

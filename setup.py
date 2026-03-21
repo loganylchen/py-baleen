@@ -250,6 +250,7 @@ setup(
         "numpy",
         "tslearn",
         "pysam",
+        "scipy",
     ],
     ext_modules=[_make_cuda_extension()],
     cmdclass={"build_ext": CUDABuildExt},

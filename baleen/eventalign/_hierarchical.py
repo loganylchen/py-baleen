@@ -582,8 +582,8 @@ def _anchored_mixture_em(
     f0_n = _normal_pdf(z_native, mu0, sigma0)
     f1_n = _normal_pdf(z_native, mu1, sigma1)
     ll_mix = float(np.sum(np.log((1 - pi) * f0_n + pi * f1_n + _EPS)))
-    bic_null = -2 * ll_null + 2 * math.log(max(n, 1))
-    bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))
+    bic_null = -2 * ll_null + 2 * math.log(max(n, 2))
+    bic_mix = -2 * ll_mix + 5 * math.log(max(n, 2))
 
     # Legacy hard gate (for reporting / backward compat)
     null_gate_legacy = (

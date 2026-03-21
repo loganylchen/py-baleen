@@ -241,6 +241,11 @@ def _fit_platt_scaling(
         x0=np.array([1.0, 0.0]),
         method="L-BFGS-B",
     )
+    if not result.success:
+        logger.warning(
+            "Platt scaling optimization did not converge: %s",
+            result.message,
+        )
     return float(result.x[0]), float(result.x[1])
 
 

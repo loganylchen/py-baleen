@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
+import multiprocessing as mp
 import pickle
 from pathlib import Path
 import shutil
@@ -190,6 +192,196 @@ def _cleanup_paths(paths: list[Path]) -> None:
             path.unlink()
 
 
+def _process_contig(
+    contig: str,
+    contig_idx: int,
+    total_contigs: int,
+    native_bam: Path,
+    native_fastq: Path,
+    native_blow5: Path,
+    ivt_bam: Path,
+    ivt_fastq: Path,
+    ivt_blow5: Path,
+    ref_fasta: Path,
+    native_stats: dict[str, _bam.ContigStats],
+    ivt_stats: dict[str, _bam.ContigStats],
+    tmp_root: Path,
+    use_cuda: Optional[bool],
+    use_open_start: bool,
+    use_open_end: bool,
+    padding: int,
+    rna: bool,
+    kmer_model: Optional[str],
+    extra_f5c_args: Optional[list[str]],
+    min_mapq: int,
+    primary_only: bool,
+    cleanup_temp: bool,
+) -> tuple[str, ContigResult]:
+    """Process a single contig: BAM split → eventalign → signal extraction → DTW.
+
+    This function is designed to be called in parallel by multiple worker processes.
+
+    Parameters
+    ----------
+    contig : str
+        Contig name to process.
+    contig_idx : int
+        Index of this contig (1-based, for logging).
+    total_contigs : int
+        Total number of contigs (for logging).
+    ... (other params match run_pipeline)
+
+    Returns
+    -------
+    tuple[str, ContigResult]
+        (contig_name, result) tuple for aggregation.
+    """
+    contig_t0 = time.perf_counter()
+    logger.info(
+        "  [Contig %d/%d] %s  (native_depth=%.1f, ivt_depth=%.1f)",
+        contig_idx, total_contigs, contig,
+        native_stats[contig].mean_depth, ivt_stats[contig].mean_depth,
+    )
+
+    contig_tmp = tmp_root / contig
+    contig_tmp.mkdir(parents=True, exist_ok=True)
+
+    logger.info("    Splitting BAM → native contig BAM...")
+    native_contig_bam = _bam.split_bam_contig(
+        native_bam,
+        contig,
+        contig_tmp / "native",
+        primary_only=primary_only,
+        min_mapq=min_mapq,
+    )
+    logger.info("    Splitting BAM → IVT contig BAM...")
+    ivt_contig_bam = _bam.split_bam_contig(
+        ivt_bam,
+        contig,
+        contig_tmp / "ivt",
+        primary_only=primary_only,
+        min_mapq=min_mapq,
+    )
+
+    native_tsv = contig_tmp / "native.eventalign.tsv"
+    ivt_tsv = contig_tmp / "ivt.eventalign.tsv"
+
+    logger.info("    Running f5c eventalign (native)...")
+    ea_t0 = time.perf_counter()
+    _ = _f5c.run_eventalign(
+        native_contig_bam,
+        ref_fasta,
+        native_fastq,
+        native_blow5,
+        native_tsv,
+        rna=rna,
+        kmer_model=kmer_model,
+        extra_args=extra_f5c_args,
+    )
+    logger.info("    Running f5c eventalign (IVT)...")
+    _ = _f5c.run_eventalign(
+        ivt_contig_bam,
+        ref_fasta,
+        ivt_fastq,
+        ivt_blow5,
+        ivt_tsv,
+        rna=rna,
+        kmer_model=kmer_model,
+        extra_args=extra_f5c_args,
+    )
+    logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
+
+    logger.info("    Parsing signals and finding common positions...")
+    native_by_pos = _signal.group_signals_by_position(native_tsv)
+    ivt_by_pos = _signal.group_signals_by_position(ivt_tsv)
+    common_positions = _signal.get_common_positions(native_by_pos, ivt_by_pos)
+    logger.info("    %d common positions found", len(common_positions))
+
+    position_results: dict[int, PositionResult] = {}
+    n_skipped = 0
+    dtw_t0 = time.perf_counter()
+    for pos_idx, pos in enumerate(common_positions, 1):
+        native_pos = native_by_pos[pos]
+        ivt_pos = ivt_by_pos[pos]
+
+        if padding > 0:
+            native_read_names, native_signals = _signal.extract_signals_for_dtw_padded(
+                native_by_pos, pos, padding,
+            )
+            ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw_padded(
+                ivt_by_pos, pos, padding,
+            )
+        else:
+            native_read_names, native_signals = _signal.extract_signals_for_dtw(native_pos)
+            ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw(ivt_pos)
+
+        if not native_signals or not ivt_signals:
+            logger.debug(
+                "    Skipping pos=%d: empty signals (native=%d, ivt=%d)",
+                pos, len(native_signals), len(ivt_signals),
+            )
+            n_skipped += 1
+            continue
+
+        all_signals = native_signals + ivt_signals
+        n_total = len(all_signals)
+        logger.debug(
+            "    [Position %d/%d] pos=%d kmer=%s  %d signals (%d native + %d ivt)",
+            pos_idx, len(common_positions), pos, native_pos.reference_kmer,
+            n_total, len(native_signals), len(ivt_signals),
+        )
+        matrix = _compute_pairwise_distances(
+            all_signals,
+            use_cuda=use_cuda,
+            use_open_start=use_open_start,
+            use_open_end=use_open_end,
+        )
+
+        position_results[pos] = PositionResult(
+            position=pos,
+            reference_kmer=native_pos.reference_kmer,
+            n_native_reads=len(native_read_names),
+            n_ivt_reads=len(ivt_read_names),
+            native_read_names=native_read_names,
+            ivt_read_names=ivt_read_names,
+            distance_matrix=matrix,
+        )
+    dtw_elapsed = _fmt_elapsed(time.perf_counter() - dtw_t0)
+
+    native_depth = native_stats[contig].mean_depth
+    ivt_depth = ivt_stats[contig].mean_depth
+    result = ContigResult(
+        contig=contig,
+        native_depth=native_depth,
+        ivt_depth=ivt_depth,
+        positions=position_results,
+    )
+    contig_elapsed = _fmt_elapsed(time.perf_counter() - contig_t0)
+    logger.info(
+        "  [Contig %d/%d] %s done: %d positions (%d skipped), DTW in %s, total %s",
+        contig_idx, total_contigs, contig,
+        len(position_results), n_skipped, dtw_elapsed, contig_elapsed,
+    )
+
+    if cleanup_temp:
+        files_to_remove = [
+            native_contig_bam,
+            Path(f"{native_contig_bam}.bai"),
+            native_contig_bam.with_suffix(".bai"),
+            ivt_contig_bam,
+            Path(f"{ivt_contig_bam}.bai"),
+            ivt_contig_bam.with_suffix(".bai"),
+            native_tsv,
+            ivt_tsv,
+        ]
+        _cleanup_paths(files_to_remove)
+        for subdir in [contig_tmp / "native", contig_tmp / "ivt", contig_tmp]:
+            if subdir.exists():
+                shutil.rmtree(subdir, ignore_errors=True)
+
+    return contig, result
+
+
 def run_pipeline(
     native_bam: PathLike,
     native_fastq: PathLike,
@@ -211,6 +403,7 @@ def run_pipeline(
     extra_f5c_args: Optional[list[str]] = None,
     min_mapq: int = 0,
     primary_only: bool = True,
+    threads: int = 1,
 ) -> tuple[dict[str, ContigResult], PipelineMetadata]:
     pipeline_t0 = time.perf_counter()
     logger.info("=" * 60)
@@ -222,10 +415,15 @@ def run_pipeline(
     logger.info("  ivt_fastq:    %s", ivt_fastq)
     logger.info("  ivt_blow5:    %s", ivt_blow5)
     logger.info("  ref_fasta:    %s", ref_fasta)
-    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d", min_depth, use_cuda, rna, padding)
+    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
+                min_depth, use_cuda, rna, padding, threads)
     logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s",
                 use_open_start, use_open_end, min_mapq, primary_only)
     logger.info("=" * 60)
+
+    # Validate threads parameter
+    if threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
 
     native_bam = Path(native_bam)
     native_fastq = Path(native_fastq)
@@ -320,149 +518,72 @@ def run_pipeline(
     logger.debug("  Temporary directory: %s", tmp_root)
 
     try:
-        for contig_idx, contig in enumerate(passed_contigs, 1):
-            contig_t0 = time.perf_counter()
-            logger.info(
-                "  [Contig %d/%d] %s  (native_depth=%.1f, ivt_depth=%.1f)",
-                contig_idx, len(passed_contigs), contig,
-                native_stats[contig].mean_depth, ivt_stats[contig].mean_depth,
-            )
-
-            contig_tmp = tmp_root / contig
-            contig_tmp.mkdir(parents=True, exist_ok=True)
-
-            logger.info("    Splitting BAM → native contig BAM...")
-            native_contig_bam = _bam.split_bam_contig(
-                native_bam,
-                contig,
-                contig_tmp / "native",
-                primary_only=primary_only,
-                min_mapq=min_mapq,
-            )
-            logger.info("    Splitting BAM → IVT contig BAM...")
-            ivt_contig_bam = _bam.split_bam_contig(
-                ivt_bam,
-                contig,
-                contig_tmp / "ivt",
-                primary_only=primary_only,
-                min_mapq=min_mapq,
-            )
-
-            native_tsv = contig_tmp / "native.eventalign.tsv"
-            ivt_tsv = contig_tmp / "ivt.eventalign.tsv"
-
-            logger.info("    Running f5c eventalign (native)...")
-            ea_t0 = time.perf_counter()
-            _ = _f5c.run_eventalign(
-                native_contig_bam,
-                ref_fasta,
-                native_fastq,
-                native_blow5,
-                native_tsv,
-                rna=rna,
-                kmer_model=kmer_model,
-                extra_args=extra_f5c_args,
-            )
-            logger.info("    Running f5c eventalign (IVT)...")
-            _ = _f5c.run_eventalign(
-                ivt_contig_bam,
-                ref_fasta,
-                ivt_fastq,
-                ivt_blow5,
-                ivt_tsv,
-                rna=rna,
-                kmer_model=kmer_model,
-                extra_args=extra_f5c_args,
-            )
-            logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
-
-            logger.info("    Parsing signals and finding common positions...")
-            native_by_pos = _signal.group_signals_by_position(native_tsv)
-            ivt_by_pos = _signal.group_signals_by_position(ivt_tsv)
-            common_positions = _signal.get_common_positions(native_by_pos, ivt_by_pos)
-            logger.info("    %d common positions found", len(common_positions))
-
-            position_results: dict[int, PositionResult] = {}
-            n_skipped = 0
-            dtw_t0 = time.perf_counter()
-            for pos_idx, pos in enumerate(common_positions, 1):
-                native_pos = native_by_pos[pos]
-                ivt_pos = ivt_by_pos[pos]
-
-                if padding > 0:
-                    native_read_names, native_signals = _signal.extract_signals_for_dtw_padded(
-                        native_by_pos, pos, padding,
-                    )
-                    ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw_padded(
-                        ivt_by_pos, pos, padding,
-                    )
-                else:
-                    native_read_names, native_signals = _signal.extract_signals_for_dtw(native_pos)
-                    ivt_read_names, ivt_signals = _signal.extract_signals_for_dtw(ivt_pos)
-
-                if not native_signals or not ivt_signals:
-                    logger.debug(
-                        "    Skipping pos=%d: empty signals (native=%d, ivt=%d)",
-                        pos, len(native_signals), len(ivt_signals),
-                    )
-                    n_skipped += 1
-                    continue
-
-                all_signals = native_signals + ivt_signals
-                n_total = len(all_signals)
-                logger.debug(
-                    "    [Position %d/%d] pos=%d kmer=%s  %d signals (%d native + %d ivt)",
-                    pos_idx, len(common_positions), pos, native_pos.reference_kmer,
-                    n_total, len(native_signals), len(ivt_signals),
-                )
-                matrix = _compute_pairwise_distances(
-                    all_signals,
+        if threads > 1:
+            # Parallel processing with multiprocessing
+            logger.info("  Using %d parallel workers (spawn context)", threads)
+            ctx = mp.get_context('spawn')
+            with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
+                futures = {
+                    executor.submit(
+                        _process_contig,
+                        contig=contig,
+                        contig_idx=idx,
+                        total_contigs=len(passed_contigs),
+                        native_bam=native_bam,
+                        native_fastq=native_fastq,
+                        native_blow5=native_blow5,
+                        ivt_bam=ivt_bam,
+                        ivt_fastq=ivt_fastq,
+                        ivt_blow5=ivt_blow5,
+                        ref_fasta=ref_fasta,
+                        native_stats=native_stats,
+                        ivt_stats=ivt_stats,
+                        tmp_root=tmp_root,
+                        use_cuda=use_cuda,
+                        use_open_start=use_open_start,
+                        use_open_end=use_open_end,
+                        padding=padding,
+                        rna=rna,
+                        kmer_model=kmer_model,
+                        extra_f5c_args=extra_f5c_args,
+                        min_mapq=min_mapq,
+                        primary_only=primary_only,
+                        cleanup_temp=cleanup_temp,
+                    ): contig
+                    for idx, contig in enumerate(passed_contigs, 1)
+                }
+                for future in as_completed(futures):
+                    contig_name, contig_result = future.result()
+                    results[contig_name] = contig_result
+        else:
+            # Sequential processing (original behavior)
+            for contig_idx, contig in enumerate(passed_contigs, 1):
+                contig_name, contig_result = _process_contig(
+                    contig=contig,
+                    contig_idx=contig_idx,
+                    total_contigs=len(passed_contigs),
+                    native_bam=native_bam,
+                    native_fastq=native_fastq,
+                    native_blow5=native_blow5,
+                    ivt_bam=ivt_bam,
+                    ivt_fastq=ivt_fastq,
+                    ivt_blow5=ivt_blow5,
+                    ref_fasta=ref_fasta,
+                    native_stats=native_stats,
+                    ivt_stats=ivt_stats,
+                    tmp_root=tmp_root,
                     use_cuda=use_cuda,
                     use_open_start=use_open_start,
                     use_open_end=use_open_end,
+                    padding=padding,
+                    rna=rna,
+                    kmer_model=kmer_model,
+                    extra_f5c_args=extra_f5c_args,
+                    min_mapq=min_mapq,
+                    primary_only=primary_only,
+                    cleanup_temp=cleanup_temp,
                 )
-
-                position_results[pos] = PositionResult(
-                    position=pos,
-                    reference_kmer=native_pos.reference_kmer,
-                    n_native_reads=len(native_read_names),
-                    n_ivt_reads=len(ivt_read_names),
-                    native_read_names=native_read_names,
-                    ivt_read_names=ivt_read_names,
-                    distance_matrix=matrix,
-                )
-            dtw_elapsed = _fmt_elapsed(time.perf_counter() - dtw_t0)
-
-            native_depth = native_stats[contig].mean_depth
-            ivt_depth = ivt_stats[contig].mean_depth
-            results[contig] = ContigResult(
-                contig=contig,
-                native_depth=native_depth,
-                ivt_depth=ivt_depth,
-                positions=position_results,
-            )
-            contig_elapsed = _fmt_elapsed(time.perf_counter() - contig_t0)
-            logger.info(
-                "  [Contig %d/%d] %s done: %d positions (%d skipped), DTW in %s, total %s",
-                contig_idx, len(passed_contigs), contig,
-                len(position_results), n_skipped, dtw_elapsed, contig_elapsed,
-            )
-
-            if cleanup_temp:
-                files_to_remove = [
-                    native_contig_bam,
-                    Path(f"{native_contig_bam}.bai"),
-                    native_contig_bam.with_suffix(".bai"),
-                    ivt_contig_bam,
-                    Path(f"{ivt_contig_bam}.bai"),
-                    ivt_contig_bam.with_suffix(".bai"),
-                    native_tsv,
-                    ivt_tsv,
-                ]
-                _cleanup_paths(files_to_remove)
-                for subdir in [contig_tmp / "native", contig_tmp / "ivt", contig_tmp]:
-                    if subdir.exists():
-                        shutil.rmtree(subdir, ignore_errors=True)
+                results[contig_name] = contig_result
     finally:
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
