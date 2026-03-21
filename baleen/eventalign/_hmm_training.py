@@ -166,7 +166,7 @@ class HMMParams:
 
     mode: Literal["unsupervised", "semi_supervised", "supervised"] = "unsupervised"
     n_states: int = 3
-    p_stay_per_base: float = 0.98
+    p_stay_per_base: float = 0.92
     init_prob: NDArray[np.float64] = field(
         default_factory=lambda: np.array([0.7, 0.2, 0.1], dtype=np.float64)
     )

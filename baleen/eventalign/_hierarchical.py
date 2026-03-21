@@ -485,9 +485,9 @@ def _anchored_mixture_em(
     tol: float = 1e-6,
     pi_threshold: float = 0.05,
     separation_threshold: float = 0.8,
-    tau_pi: float = 0.02,
-    tau_bic: float = 5.0,
-    tau_sep: float = 0.3,
+    tau_pi: float = 0.05,
+    tau_bic: float = 10.0,
+    tau_sep: float = 0.5,
     global_mu1: float | None = None,
     global_sigma1: float | None = None,
     min_reads_for_local: int = 50,
@@ -690,15 +690,15 @@ def _gap_transition_matrix(
 
 def _gap_transition_matrix_3state(
     gap_bases: int,
-    p_stay_per_base: float = 0.98,
+    p_stay_per_base: float = 0.92,
 ) -> NDArray[np.float64]:
-    """Compute 3×3 transition matrix with forbidden U↔M direct transitions.
+    """Compute 3×3 transition matrix with small U↔M leakage.
 
     States: 0 = Unmodified, 1 = Flank, 2 = Modified.
 
-    Forbidden transitions (zero probability):
-    - U → M (must pass through Flank)
-    - M → U (must pass through Flank)
+    Most leaving probability routes through Flank, but 5% of leaving
+    probability allows direct U→M and M→U transitions so that isolated
+    modified positions can be detected without requiring adjacent flanks.
 
     The Flank state splits its leaving probability asymmetrically:
     40% toward U, 60% toward M (flanking positions are slightly more
@@ -707,9 +707,9 @@ def _gap_transition_matrix_3state(
     ::
 
             U              F              M
-    U  [ p_stay       p_leave          0         ]
-    F  [ .4*p_leave   p_stay       .6*p_leave    ]
-    M  [ 0            p_leave      p_stay        ]
+    U  [ p_stay    .95*p_leave    .05*p_leave   ]
+    F  [ .4*p_leave   p_stay     .6*p_leave     ]
+    M  [ .05*p_leave  .95*p_leave   p_stay      ]
 
     Returns shape (3, 3) row-stochastic matrix.
     """
@@ -718,9 +718,9 @@ def _gap_transition_matrix_3state(
     p_leave = 1.0 - p_stay
 
     mat = np.array([
-        [p_stay,          p_leave,        0.0],
+        [p_stay,          0.95 * p_leave, 0.05 * p_leave],
         [0.4 * p_leave,   p_stay,         0.6 * p_leave],
-        [0.0,             p_leave,        p_stay],
+        [0.05 * p_leave,  0.95 * p_leave, p_stay],
     ], dtype=np.float64)
 
     # Row-normalize for safety
@@ -872,9 +872,11 @@ def _run_hmm_on_trajectories(
 
             if n_states == 3 and emission_transform is None:
                 # Unsupervised 3-state: Beta PDF emissions via lookup
+                # Clamp to [0.02, 0.98] to avoid boundary collapse where
+                # all Beta PDFs go to zero (making emissions uninformative).
                 if beta_grids is not None:
                     gx, g_u, g_f, g_m = beta_grids
-                    p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                    p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
                     emissions[t_idx, 0] = max(np.interp(p_mod_clamped, gx, g_u), 1e-10)
                     emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
                     emissions[t_idx, 2] = max(np.interp(p_mod_clamped, gx, g_m), 1e-10)
@@ -899,7 +901,7 @@ def _run_hmm_on_trajectories(
                     emissions[t_idx, 2] = p_mod_kde[0]
 
                 # Flank from Beta PDF
-                p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
                 if beta_grids is not None:
                     gx, _, g_f, _ = beta_grids
                     emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
@@ -934,6 +936,13 @@ def _run_hmm_on_trajectories(
                     emissions[t_idx, 0] = p_unmod[0]
                     emissions[t_idx, 1] = p_mod_kde[0]
 
+        # Emission floor: prevent any state from having near-zero emission,
+        # which lets transition priors completely override observation evidence.
+        emissions = np.maximum(emissions, 0.01)
+        # Re-normalize rows
+        row_sums = emissions.sum(axis=1, keepdims=True)
+        emissions /= row_sums
+
         posteriors = _forward_backward(
             emissions,
             traj.positions,
@@ -964,7 +973,7 @@ def compute_sequential_modification_probabilities(
     mixture_pi_threshold: float = 0.05,
     mixture_separation: float = 0.8,
     hmm_min_positions: int = 3,
-    hmm_p_stay_per_base: float = 0.98,
+    hmm_p_stay_per_base: float = 0.92,
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
     emission_source: str = "p_mod_knn",
@@ -1148,11 +1157,15 @@ def compute_sequential_modification_probabilities(
     )
 
     if run_hmm:
-        # Default to 3-state unsupervised HMM when no params provided
+        # Default to 2-state unsupervised HMM when no params provided.
+        # The 2-state model (Unmodified/Modified) is more robust for
+        # detecting isolated modifications than the 3-state model, which
+        # requires transitions through a Flank state and uses Beta PDF
+        # emissions that collapse at boundary values.
         effective_hmm_params = hmm_params
         if effective_hmm_params is None:
             from baleen.eventalign._hmm_training import create_unsupervised_params
-            effective_hmm_params = create_unsupervised_params(n_states=3)
+            effective_hmm_params = create_unsupervised_params(n_states=2)
 
         _run_hmm_on_trajectories(
             native_trajs,
