@@ -216,6 +216,7 @@ def _process_contig(
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
+    num_cuda_streams: int,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -300,7 +301,10 @@ def _process_contig(
     position_results: dict[int, PositionResult] = {}
     n_skipped = 0
     dtw_t0 = time.perf_counter()
-    for pos_idx, pos in enumerate(common_positions, 1):
+
+    # Phase 1: Collect all signals (CPU)
+    position_data: list[tuple[int, str, list[str], list[str], list[NDArray[np.float32]]]] = []
+    for pos in common_positions:
         native_pos = native_by_pos[pos]
         ivt_pos = ivt_by_pos[pos]
 
@@ -324,28 +328,41 @@ def _process_contig(
             continue
 
         all_signals = native_signals + ivt_signals
-        n_total = len(all_signals)
+        kmer = native_pos.reference_kmer
         logger.debug(
             "    [Position %d/%d] pos=%d kmer=%s  %d signals (%d native + %d ivt)",
-            pos_idx, len(common_positions), pos, native_pos.reference_kmer,
-            n_total, len(native_signals), len(ivt_signals),
+            len(position_data) + 1, len(common_positions), pos,
+            kmer,
+            len(all_signals), len(native_signals), len(ivt_signals),
         )
-        matrix = _compute_pairwise_distances(
-            all_signals,
-            use_cuda=use_cuda,
+        position_data.append((
+            pos, kmer,
+            native_read_names, ivt_read_names, all_signals,
+        ))
+
+    # Phase 2: Batch DTW (single GPU call for all positions)
+    if position_data:
+        all_signal_lists = [d[4] for d in position_data]
+        all_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+            all_signal_lists,
             use_open_start=use_open_start,
             use_open_end=use_open_end,
+            use_cuda=use_cuda,
+            num_streams=num_cuda_streams,
         )
 
-        position_results[pos] = PositionResult(
-            position=pos,
-            reference_kmer=native_pos.reference_kmer,
-            n_native_reads=len(native_read_names),
-            n_ivt_reads=len(ivt_read_names),
-            native_read_names=native_read_names,
-            ivt_read_names=ivt_read_names,
-            distance_matrix=matrix,
-        )
+        # Phase 3: Package results
+        for (pos, kmer, nat_names, ivt_names, _sigs), matrix in zip(position_data, all_matrices):
+            position_results[pos] = PositionResult(
+                position=pos,
+                reference_kmer=kmer,
+                n_native_reads=len(nat_names),
+                n_ivt_reads=len(ivt_names),
+                native_read_names=nat_names,
+                ivt_read_names=ivt_names,
+                distance_matrix=matrix,
+            )
+
     dtw_elapsed = _fmt_elapsed(time.perf_counter() - dtw_t0)
 
     native_depth = native_stats[contig].mean_depth
@@ -404,6 +421,7 @@ def run_pipeline(
     min_mapq: int = 0,
     primary_only: bool = True,
     threads: int = 1,
+    num_cuda_streams: int = 16,
 ) -> tuple[dict[str, ContigResult], PipelineMetadata]:
     pipeline_t0 = time.perf_counter()
     logger.info("=" * 60)
@@ -417,8 +435,8 @@ def run_pipeline(
     logger.info("  ref_fasta:    %s", ref_fasta)
     logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
                 min_depth, use_cuda, rna, padding, threads)
-    logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s",
-                use_open_start, use_open_end, min_mapq, primary_only)
+    logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s  cuda_streams=%d",
+                use_open_start, use_open_end, min_mapq, primary_only, num_cuda_streams)
     logger.info("=" * 60)
 
     # Validate threads parameter
@@ -549,6 +567,7 @@ def run_pipeline(
                         min_mapq=min_mapq,
                         primary_only=primary_only,
                         cleanup_temp=cleanup_temp,
+                        num_cuda_streams=num_cuda_streams,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -582,6 +601,7 @@ def run_pipeline(
                     min_mapq=min_mapq,
                     primary_only=primary_only,
                     cleanup_temp=cleanup_temp,
+                    num_cuda_streams=num_cuda_streams,
                 )
                 results[contig_name] = contig_result
     finally:
