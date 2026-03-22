@@ -13,7 +13,7 @@ from typing import Optional, Protocol, TypedDict, Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from baleen import _cuda_dtw
 from baleen.eventalign import _bam
@@ -305,12 +305,16 @@ def _process_contig(
 
     # Phase 1: Collect all signals (CPU)
     position_data: list[tuple[int, str, list[str], list[str], list[NDArray[np.float32]]]] = []
-    for pos in tqdm(
-        common_positions,
-        desc=f"    {contig} signals",
+    contig_short = contig if len(contig) <= 20 else contig[:17] + "..."
+    pbar = tqdm(
+        total=len(common_positions),
+        desc=f"  {contig_short}",
         unit="pos",
         leave=False,
-    ):
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+    )
+    pbar.set_postfix_str("extracting signals")
+    for pos in common_positions:
         native_pos = native_by_pos[pos]
         ivt_pos = ivt_by_pos[pos]
 
@@ -331,6 +335,7 @@ def _process_contig(
                 pos, len(native_signals), len(ivt_signals),
             )
             n_skipped += 1
+            pbar.update(1)
             continue
 
         all_signals = native_signals + ivt_signals
@@ -345,9 +350,12 @@ def _process_contig(
             pos, kmer,
             native_read_names, ivt_read_names, all_signals,
         ))
+        pbar.update(1)
 
     # Phase 2: Batch DTW (single GPU call for all positions)
     if position_data:
+        pbar.set_postfix_str(f"DTW {len(position_data)} positions")
+        pbar.refresh()
         all_signal_lists = [d[4] for d in position_data]
         all_matrices = _cuda_dtw.dtw_multi_position_pairwise(
             all_signal_lists,
@@ -368,6 +376,9 @@ def _process_contig(
                 ivt_read_names=ivt_names,
                 distance_matrix=matrix,
             )
+
+    pbar.set_postfix_str(f"done ({len(position_results)} pos, {n_skipped} skipped)")
+    pbar.close()
 
     dtw_elapsed = _fmt_elapsed(time.perf_counter() - dtw_t0)
 
@@ -579,21 +590,19 @@ def run_pipeline(
                 }
                 with tqdm(
                     total=len(passed_contigs),
-                    desc="Contigs",
+                    desc="Pipeline",
                     unit="contig",
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} contigs [{elapsed}<{remaining}] {postfix}",
                 ) as pbar:
                     for future in as_completed(futures):
                         contig_name, contig_result = future.result()
                         results[contig_name] = contig_result
-                        pbar.set_postfix_str(contig_name)
+                        n_pos = len(contig_result.positions)
+                        pbar.set_postfix_str(f"{contig_name} ({n_pos} pos)")
                         pbar.update(1)
         else:
             # Sequential processing (original behavior)
-            for contig_idx, contig in tqdm(
-                list(enumerate(passed_contigs, 1)),
-                desc="Contigs",
-                unit="contig",
-            ):
+            for contig_idx, contig in enumerate(passed_contigs, 1):
                 contig_name, contig_result = _process_contig(
                     contig=contig,
                     contig_idx=contig_idx,

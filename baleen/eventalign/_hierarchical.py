@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import norm as _norm_dist
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from baleen.eventalign._hmm_training import HMMParams
@@ -1032,12 +1032,23 @@ def compute_sequential_modification_probabilities(
     coverages: dict[int, int] = {}
     all_scores: dict[int, NDArray[np.float64]] = {}
 
-    for pos in tqdm(
-        sorted_positions,
-        desc=f"  {contig_result.contig} V1 null",
-        unit="pos",
+    contig_short = contig_result.contig
+    if len(contig_short) > 20:
+        contig_short = contig_short[:17] + "..."
+    n_pos = len(sorted_positions)
+
+    # Single progress bar spanning V1 → V2 → kNN stages
+    # Total steps = 3 passes over positions (V1a + V2b + kNN)
+    _mod_pbar = tqdm(
+        total=n_pos * 3,
+        desc=f"  {contig_short} mod-calling",
+        unit="step",
         leave=False,
-    ):
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+    )
+    _mod_pbar.set_postfix_str("V1: null fitting")
+
+    for pos in sorted_positions:
         pr = contig_result.positions[pos]
         scores = _extract_ivt_distances(
             pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads
@@ -1048,6 +1059,7 @@ def compute_sequential_modification_probabilities(
         mu_raw, sigma_raw = _fit_robust_ivt_null(ivt_scores)
         raw_params[pos] = (mu_raw, sigma_raw)
         coverages[pos] = pr.n_ivt_reads
+        _mod_pbar.update(1)
 
     # ── V1b: Hierarchical shrinkage ──────────────────────────────────────
 
@@ -1111,12 +1123,8 @@ def compute_sequential_modification_probabilities(
 
     # ── V2b: Per-position anchored mixture with soft gating ────────────
 
-    for pos in tqdm(
-        sorted_positions,
-        desc=f"  {contig_result.contig} V2 mixture",
-        unit="pos",
-        leave=False,
-    ):
+    _mod_pbar.set_postfix_str("V2: mixture EM")
+    for pos in sorted_positions:
         ps = position_stats[pos]
         z_native = ps.z_scores[: ps.n_native]
         z_ivt = ps.z_scores[ps.n_native :]
@@ -1138,22 +1146,20 @@ def compute_sequential_modification_probabilities(
 
         # Default HMM to V2 result (will be overwritten if HMM runs)
         ps.p_mod_hmm[:] = p_mod_all
+        _mod_pbar.update(1)
 
     # ── kNN IVT-purity scores ─────────────────────────────────────────────
 
     from baleen.eventalign._probability import _score_knn_ivt_purity, _calibrate_beta
 
-    for pos in tqdm(
-        sorted_positions,
-        desc=f"  {contig_result.contig} kNN",
-        unit="pos",
-        leave=False,
-    ):
+    _mod_pbar.set_postfix_str("kNN scoring")
+    for pos in sorted_positions:
         pr = contig_result.positions[pos]
         ps = position_stats[pos]
         n_total = pr.n_native_reads + pr.n_ivt_reads
 
         if n_total < 3:
+            _mod_pbar.update(1)
             continue
 
         raw_knn = _score_knn_ivt_purity(
@@ -1165,6 +1171,10 @@ def compute_sequential_modification_probabilities(
 
         cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
         ps.p_mod_knn[:] = cal.probabilities
+        _mod_pbar.update(1)
+
+    _mod_pbar.set_postfix_str("V3: HMM smoothing")
+    _mod_pbar.close()
 
     # ── V3: HMM smoothing ────────────────────────────────────────────────
 
