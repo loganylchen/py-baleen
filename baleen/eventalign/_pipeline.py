@@ -13,6 +13,7 @@ from typing import Optional, Protocol, TypedDict, Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
+from tqdm import tqdm
 
 from baleen import _cuda_dtw
 from baleen.eventalign import _bam
@@ -304,7 +305,12 @@ def _process_contig(
 
     # Phase 1: Collect all signals (CPU)
     position_data: list[tuple[int, str, list[str], list[str], list[NDArray[np.float32]]]] = []
-    for pos in common_positions:
+    for pos in tqdm(
+        common_positions,
+        desc=f"    {contig} signals",
+        unit="pos",
+        leave=False,
+    ):
         native_pos = native_by_pos[pos]
         ivt_pos = ivt_by_pos[pos]
 
@@ -571,12 +577,23 @@ def run_pipeline(
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
-                for future in as_completed(futures):
-                    contig_name, contig_result = future.result()
-                    results[contig_name] = contig_result
+                with tqdm(
+                    total=len(passed_contigs),
+                    desc="Contigs",
+                    unit="contig",
+                ) as pbar:
+                    for future in as_completed(futures):
+                        contig_name, contig_result = future.result()
+                        results[contig_name] = contig_result
+                        pbar.set_postfix_str(contig_name)
+                        pbar.update(1)
         else:
             # Sequential processing (original behavior)
-            for contig_idx, contig in enumerate(passed_contigs, 1):
+            for contig_idx, contig in tqdm(
+                list(enumerate(passed_contigs, 1)),
+                desc="Contigs",
+                unit="contig",
+            ):
                 contig_name, contig_result = _process_contig(
                     contig=contig,
                     contig_idx=contig_idx,

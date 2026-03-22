@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import norm as _norm_dist
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from baleen.eventalign._hmm_training import HMMParams
@@ -1031,7 +1032,12 @@ def compute_sequential_modification_probabilities(
     coverages: dict[int, int] = {}
     all_scores: dict[int, NDArray[np.float64]] = {}
 
-    for pos in sorted_positions:
+    for pos in tqdm(
+        sorted_positions,
+        desc=f"  {contig_result.contig} V1 null",
+        unit="pos",
+        leave=False,
+    ):
         pr = contig_result.positions[pos]
         scores = _extract_ivt_distances(
             pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads
@@ -1105,7 +1111,12 @@ def compute_sequential_modification_probabilities(
 
     # ── V2b: Per-position anchored mixture with soft gating ────────────
 
-    for pos in sorted_positions:
+    for pos in tqdm(
+        sorted_positions,
+        desc=f"  {contig_result.contig} V2 mixture",
+        unit="pos",
+        leave=False,
+    ):
         ps = position_stats[pos]
         z_native = ps.z_scores[: ps.n_native]
         z_ivt = ps.z_scores[ps.n_native :]
@@ -1132,7 +1143,12 @@ def compute_sequential_modification_probabilities(
 
     from baleen.eventalign._probability import _score_knn_ivt_purity, _calibrate_beta
 
-    for pos in sorted_positions:
+    for pos in tqdm(
+        sorted_positions,
+        desc=f"  {contig_result.contig} kNN",
+        unit="pos",
+        leave=False,
+    ):
         pr = contig_result.positions[pos]
         ps = position_stats[pos]
         n_total = pr.n_native_reads + pr.n_ivt_reads
