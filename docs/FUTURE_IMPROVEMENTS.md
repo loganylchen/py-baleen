@@ -1,6 +1,7 @@
 # Baleen Future Improvements Roadmap
 
 **Generated:** 2026-03-21
+**Updated:** 2026-03-22
 **Status:** Ideas for future development
 
 ---
@@ -10,10 +11,10 @@
 | # | Category | Improvement | Description | Estimated Effort |
 |---|----------|-------------|-------------|-----------------|
 | 1 | Memory | Float32 distance matrices | Use float32 instead of float64 for distance matrices → 50% memory reduction | 1 line |
-| 2 | UX | Progress bars | Add tqdm progress bars to contig/position loops | 30 min |
+| 2 | UX | Progress bars | Stage-aware tqdm bars for pipeline, per-contig DTW, and mod-calling | Done |
 | 3 | Speed | Pre-compute IVT-IVT distances | IVT pairwise distances don't change per position → O(n_ivt²) saved per position | 1-2 hours |
 | 4 | Speed | Sakoe-Chiba band DTW | Restrict warping path to diagonal band → 2-5x speedup, ~1% accuracy loss | 2-3 hours |
-| 5 | Stats | FDR correction | Add Benjamini-Hochberg q-values to output | 1 hour |
+| 5 | Stats | FDR correction | Add Benjamini-Hochberg q-values to output (already in `_aggregation.py`) | Done |
 | 6 | Storage | HDF5 output | Alternative to pickle with compression → 5-10x storage reduction | 4 hours |
 | 7 | UX | Checkpointing | Resume interrupted runs | 4-6 hours |
 
@@ -47,7 +48,7 @@
 - [ ] **Pruned DTW (Sakoe-Chiba band)**: 2-5x faster
 - [ ] **FastDTW approximation**: 10-100x faster with multi-resolution
 - [ ] **Sparse distance matrix**: Only compute distances within threshold
-- [ ] **Batch GPU DTW**: Process all positions together for better GPU utilization
+- [x] **Batch GPU DTW**: Process all positions together for better GPU utilization — *Implemented via `dtw_multi_position_pairwise` with CUDA streams (16 concurrent positions by default). Reduces cudaMalloc calls from 5000/contig to ~37, enables 75-100% GPU occupancy on H100/3090.*
 
 ### 2.2 Memory Optimizations
 - [ ] **Streaming DTW results**: Write to disk immediately → O(1) memory per contig
@@ -56,9 +57,11 @@
 - [ ] **Lazy signal loading**: Load on-demand for low-memory systems
 
 ### 2.3 Parallelization
-- [ ] **GPU kNN**: Move kNN computation to CUDA → 10-50x faster
-- [ ] **GPU HMM forward-backward**: 5-20x faster
-- [ ] **Position-level parallelism**: Process multiple positions in parallel
+- [ ] ~~**GPU kNN**~~: *Low value — kNN operates on the already-computed N×N distance matrix using `np.argpartition` (O(N) partial sort). For N=100 reads, total kNN time is ~10-50ms per contig (<1% of pipeline time). GPU kernel launch overhead would negate any speedup.*
+- [ ] ~~**GPU HMM forward-backward**~~: *Low value — HMM uses 2-3 states with tiny matrices (2×2 or 3×3). Per-read forward-backward is microseconds. GPU launch overhead dominates for such small problems.*
+- [x] **Position-level parallelism**: Process multiple positions in parallel — *Implemented via CUDA streams in `opendba_dtw_multi_position_pairwise`. Positions are assigned round-robin across streams for concurrent GPU execution.*
+- [ ] **CPU-GPU overlap**: Parse/extract signals for next batch while GPU computes current batch — *Would hide CPU-side signal extraction latency behind GPU DTW computation.*
+- [ ] **f5c parallelism**: Run f5c eventalign for multiple contigs concurrently — *f5c is often the actual wall-clock bottleneck, not DTW. Multiple concurrent f5c subprocesses could saturate I/O.*
 - [ ] **Distributed processing**: Ray/Dask for multi-node scaling
 
 ---
@@ -78,7 +81,7 @@
 - [ ] **Ensemble calibrators**: Combine Beta + Platt + Isotonic
 
 ### 3.3 Multiple Testing
-- [ ] **Benjamini-Hochberg FDR**: Control false discovery rate
+- [x] **Benjamini-Hochberg FDR**: Control false discovery rate — *Implemented in `_aggregation.py`*
 - [ ] **Storey's q-value**: Adaptive FDR with π₀ estimation
 - [ ] **Independent hypothesis weighting**: Weight by coverage
 - [ ] **Spatial FDR**: Account for nearby position correlation
@@ -108,7 +111,7 @@
 ## Category 5: User Experience
 
 ### 5.1 CLI
-- [ ] Progress bars (tqdm)
+- [x] Progress bars (tqdm) — *Implemented: stage-aware bars for pipeline contigs, per-contig DTW, and V1/V2/kNN mod-calling stages*
 - [ ] Checkpointing / resume
 - [ ] Dry-run mode
 - [ ] YAML config file support
@@ -133,19 +136,24 @@
                          │
     ┌────────────────────┼────────────────────┐
     │                    │                    │
-    │  GPU kNN/HMM       │  Modification      │
-    │  Sakoe-Chiba DTW   │  classification    │
-    │  Float32 storage   │  Stoichiometry     │
+    │  Sakoe-Chiba DTW   │  Modification      │
+    │  Float32 storage   │  classification    │
+    │  f5c parallelism   │  Stoichiometry     │
+    │  CPU-GPU overlap   │                    │
     │                    │                    │
 LOW │────────────────────┼────────────────────│ HIGH
     │                    │                    │ EFFORT
     │  Progress bars     │  Hierarchical HMM  │
-    │  FDR correction    │  Full Bayesian     │
-    │  HDF5 output       │  Distributed       │
+    │  HDF5 output       │  Full Bayesian     │
+    │                    │  Distributed       │
     │                    │                    │
     └────────────────────┼────────────────────┘
                          │
                     LOW IMPACT
+
+  DONE: Batch GPU DTW, Position-level parallelism, FDR correction,
+        Progress bars
+  DEPRIORITIZED: GPU kNN, GPU HMM (both <1% of pipeline time)
 ```
 
 ---
