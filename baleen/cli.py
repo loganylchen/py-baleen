@@ -25,6 +25,17 @@ import sys
 import time
 from pathlib import Path
 
+from baleen.eventalign import (
+    aggregate_all,
+    compute_sequential_modification_probabilities,
+    load_hmm_params,
+    load_results,
+    run_pipeline,
+    save_results,
+    write_site_tsv,
+)
+from baleen.eventalign._read_bam import write_read_bam
+
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments for the ``run`` sub-command."""
@@ -116,6 +127,10 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--keep-temp", action="store_true", default=False,
         help="Do not clean up temporary files",
     )
+    misc.add_argument(
+        "--no-read-bam", action="store_true", default=False,
+        help="Skip writing per-read BAM output (read_results.bam)",
+    )
 
 
 def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
@@ -136,6 +151,14 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--hmm-params", type=str, default=None,
         help="Path to trained HMM parameters JSON (re-run HMM before aggregation)",
+    )
+    parser.add_argument(
+        "--no-read-bam", action="store_true", default=False,
+        help="Skip writing per-read BAM output",
+    )
+    parser.add_argument(
+        "--ref", type=str, default=None,
+        help="Reference FASTA (required for per-read BAM output)",
     )
 
 
@@ -158,15 +181,6 @@ def _validate_input_files(args: argparse.Namespace) -> None:
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the ``run`` sub-command."""
-    from baleen.eventalign import (
-        aggregate_all,
-        compute_sequential_modification_probabilities,
-        load_hmm_params,
-        run_pipeline,
-        save_results,
-        write_site_tsv,
-    )
-
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -182,7 +196,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     # Step 1: Run DTW pipeline
     logger = logging.getLogger("baleen")
-    logger.info("Step 1/3: Running DTW pipeline...")
+    logger.info("Step 1/4: Running DTW pipeline...")
     t0 = time.perf_counter()
 
     contig_results, metadata = run_pipeline(
@@ -216,14 +230,14 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     # Step 2: HMM smoothing
     if args.no_hmm:
-        logger.info("Step 2/3: HMM skipped (--no-hmm)")
+        logger.info("Step 2/4: HMM skipped (--no-hmm)")
         hmm_results = {}
         for contig, cr in contig_results.items():
             hmm_results[contig] = compute_sequential_modification_probabilities(
                 cr, run_hmm=False,
             )
     else:
-        logger.info("Step 2/3: Running HMM pipeline...")
+        logger.info("Step 2/4: Running HMM pipeline...")
         t0 = time.perf_counter()
 
         hmm_params = None
@@ -242,7 +256,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         logger.info("HMM pipeline done in %.1fs", hmm_time)
 
     # Step 3: Site-level aggregation
-    logger.info("Step 3/3: Aggregating site-level results...")
+    logger.info("Step 3/4: Aggregating site-level results...")
     t0 = time.perf_counter()
 
     sites = aggregate_all(hmm_results)
@@ -251,6 +265,17 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     agg_time = time.perf_counter() - t0
     logger.info("Aggregation done in %.1fs", agg_time)
+
+    # Step 4: Write per-read BAM
+    if not args.no_read_bam:
+        logger.info("Step 4/4: Writing per-read BAM...")
+        t0 = time.perf_counter()
+        bam_path = output_dir / "read_results.bam"
+        write_read_bam(hmm_results, contig_results, args.ref, bam_path)
+        bam_time = time.perf_counter() - t0
+        logger.info("Per-read BAM done in %.1fs", bam_time)
+    else:
+        bam_path = None
 
     # Summary
     n_sig = sum(1 for s in sites if s.padj < 0.05)
@@ -261,24 +286,22 @@ def _cmd_run(args: argparse.Namespace) -> None:
     logger.info("  Significant sites: %d (padj < 0.05)", n_sig)
     logger.info("  Output directory:  %s", output_dir)
     logger.info("  Site results:      %s", tsv_path)
+    if bam_path:
+        logger.info("  Read results:      %s", bam_path)
     logger.info("  Raw results:       %s", pkl_path)
     logger.info("=" * 60)
 
 
 def _cmd_aggregate(args: argparse.Namespace) -> None:
     """Execute the ``aggregate`` sub-command."""
-    from baleen.eventalign import (
-        aggregate_all,
-        compute_sequential_modification_probabilities,
-        load_hmm_params,
-        load_results,
-        write_site_tsv,
-    )
-
     logger = logging.getLogger("baleen")
 
     logger.info("Loading pipeline results from %s ...", args.input)
-    contig_results, metadata = load_results(args.input)
+    loaded = load_results(args.input)
+    if isinstance(loaded, tuple):
+        contig_results, metadata = loaded
+    else:
+        contig_results = loaded
     logger.info("Loaded %d contigs", len(contig_results))
 
     # Run HMM
@@ -299,6 +322,14 @@ def _cmd_aggregate(args: argparse.Namespace) -> None:
     logger.info("Aggregating site-level results...")
     sites = aggregate_all(hmm_results, score_field=args.score_field)
     write_site_tsv(sites, args.output)
+
+    if not args.no_read_bam:
+        if args.ref is None:
+            logger.warning("Skipping read-level BAM: --ref not provided")
+        else:
+            bam_path = Path(args.output).parent / "read_results.bam"
+            write_read_bam(hmm_results, contig_results, args.ref, bam_path)
+            logger.info("Wrote per-read BAM to %s", bam_path)
 
     n_sig = sum(1 for s in sites if s.padj < 0.05)
     logger.info("Wrote %d sites (%d significant) to %s", len(sites), n_sig, args.output)
