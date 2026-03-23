@@ -4,6 +4,8 @@ from baleen.eventalign import (
     aggregate_all,
     compute_sequential_modification_probabilities,
     load_hmm_params,
+    load_read_results,
+    load_read_results_iter,
     load_results,
     run_pipeline,
     save_hmm_params,
@@ -20,4 +22,6 @@ __all__ = [
     "write_site_tsv",
     "load_hmm_params",
     "save_hmm_params",
+    "load_read_results",
+    "load_read_results_iter",
 ]
