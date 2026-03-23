@@ -327,7 +327,8 @@ def _cmd_aggregate(args: argparse.Namespace) -> None:
         if args.ref is None:
             logger.warning("Skipping read-level BAM: --ref not provided")
         else:
-            bam_path = Path(args.output).parent / "read_results.bam"
+            output_parent = Path(args.output).parent.resolve()
+            bam_path = output_parent / "read_results.bam"
             write_read_bam(hmm_results, contig_results, args.ref, bam_path)
             logger.info("Wrote per-read BAM to %s", bam_path)
 
