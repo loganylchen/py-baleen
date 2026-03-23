@@ -225,6 +225,95 @@ def test_load_read_results_round_trip():
     assert set(ivt_df["read_name"].tolist()) == {"ivt_0", "ivt_1"}
 
 
+def test_write_read_bam_multi_contig():
+    """BAM correctly handles multiple contigs sorted by (contig, position)."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    n = 3  # reads per group
+
+    def _make_pos(pos, kmer="ACGTA"):
+        mat = np.ones((n + n, n + n), dtype=np.float64)
+        np.fill_diagonal(mat, 0.0)
+        return PositionResult(
+            position=pos, reference_kmer=kmer,
+            n_native_reads=n, n_ivt_reads=n,
+            native_read_names=[f"nat_{pos}_{i}" for i in range(n)],
+            ivt_read_names=[f"ivt_{pos}_{i}" for i in range(n)],
+            distance_matrix=mat,
+        )
+
+    def _make_ps(pos):
+        return hier.PositionStats(
+            position=pos, reference_kmer="ACGTA",
+            coverage_class=hier.CoverageClass.HIGH,
+            n_ivt=n, n_native=n,
+            mu_raw=1.0, sigma_raw=0.5, mu_shrunk=1.0, sigma_shrunk=0.5,
+            scores=np.zeros(2 * n), z_scores=np.zeros(2 * n),
+            p_null=np.ones(2 * n),
+            p_mod_raw=np.full(2 * n, 0.5),
+            mixture_pi=0.5, mixture_null_gate=False, gate_weight=1.0,
+            p_mod_knn=np.full(2 * n, 0.5),
+            p_mod_hmm=np.full(2 * n, 0.5),
+        )
+
+    contig_results = {
+        "chrB": ContigResult("chrB", 30, 20, {200: _make_pos(200), 300: _make_pos(300)}),
+        "chrA": ContigResult("chrA", 30, 20, {100: _make_pos(100)}),
+    }
+    hmm_results = {
+        "chrB": hier.ContigModificationResult("chrB", {200: _make_ps(200), 300: _make_ps(300)}, [], [], 1.0, 0.5),
+        "chrA": hier.ContigModificationResult("chrA", {100: _make_ps(100)}, [], [], 1.0, 0.5),
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ref_path = Path(tmp) / "ref.fa"
+        ref_path.write_text(">chrA\n" + "A" * 1000 + "\n>chrB\n" + "A" * 1000 + "\n")
+
+        bam_path = Path(tmp) / "read_results.bam"
+        read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
+
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            records = list(bam.fetch())
+
+        # 3 positions × (3 native + 3 ivt) = 18 records
+        assert len(records) == 18
+
+        # Verify sorted by (contig, position)
+        prev_contig, prev_pos = "", -1
+        for r in records:
+            if r.reference_name == prev_contig:
+                assert r.reference_start >= prev_pos
+            prev_contig = r.reference_name
+            prev_pos = r.reference_start
+
+        # Region query should work
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            chrA_records = list(bam.fetch("chrA"))
+        assert len(chrA_records) == 6  # 1 position × 6 reads
+
+
+def test_write_read_bam_no_fasta_fallback():
+    """When ref_fasta doesn't exist, header is built from result contig names."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    contig_results, hmm_results = _make_synthetic_data()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Use a non-existent FASTA path
+        ref_path = Path(tmp) / "nonexistent.fa"
+
+        bam_path = Path(tmp) / "read_results.bam"
+        read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
+
+        # Should still write a valid BAM (with LN:0 in header)
+        assert bam_path.exists()
+        assert Path(str(bam_path) + ".bai").exists()
+
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            records = list(bam.fetch())
+
+        assert len(records) == 5
+
+
 def test_public_api_exports():
     """load_read_results and load_read_results_iter are importable from baleen.eventalign."""
     from baleen.eventalign import load_read_results, load_read_results_iter
