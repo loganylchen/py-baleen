@@ -223,3 +223,11 @@ def test_load_read_results_round_trip():
     ivt_df = df[~df["is_native"]]
     assert len(ivt_df) == 2
     assert set(ivt_df["read_name"].tolist()) == {"ivt_0", "ivt_1"}
+
+
+def test_public_api_exports():
+    """load_read_results and load_read_results_iter are importable from baleen.eventalign."""
+    from baleen.eventalign import load_read_results, load_read_results_iter
+
+    assert callable(load_read_results)
+    assert callable(load_read_results_iter)

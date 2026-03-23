@@ -73,6 +73,7 @@ from baleen.eventalign._aggregation import (
     write_site_tsv,
 )
 from baleen.eventalign._signal import PositionSignals
+from baleen.eventalign._read_bam import load_read_results, load_read_results_iter
 
 __all__ = [
     "run_pipeline",
@@ -106,4 +107,6 @@ __all__ = [
     "aggregate_contig",
     "aggregate_all",
     "write_site_tsv",
+    "load_read_results",
+    "load_read_results_iter",
 ]
