@@ -41,8 +41,10 @@ def sample_args_run():
         no_hmm=False,
         no_rna=False,
         kmer_model=None,
+        threads=1,
         no_primary_only=False,
         keep_temp=False,
+        no_read_bam=True,
     )
     return args
 
@@ -55,6 +57,8 @@ def sample_args_aggregate():
         output="sites.tsv",
         score_field="p_mod_hmm",
         hmm_params=None,
+        no_read_bam=True,
+        ref=None,
     )
     return args
 
@@ -64,10 +68,11 @@ class TestValidateInputFiles:
 
     def test_all_files_exist(self, sample_args_run, tmp_path):
         """Test validation passes when all files exist."""
-        # Create all required files
+        # Create all required files and update args to use tmp_path
         for attr in ["native_bam", "native_fastq", "native_blow5", "ivt_bam", "ivt_fastq", "ivt_blow5", "ref"]:
             path = tmp_path / getattr(sample_args_run, attr)
             path.touch()
+            setattr(sample_args_run, attr, str(path))
 
         # Should not raise
         _validate_input_files(sample_args_run)
@@ -101,7 +106,6 @@ class TestAddRunArgs:
         # Test parsing with required args
         args = parser.parse_args(
             [
-                "run",
                 "--native-bam", "n.bam",
                 "--native-fastq", "n.fq",
                 "--native-blow5", "n.blow5",
@@ -148,7 +152,7 @@ class TestAddAggregateArgs:
         parser = argparse.ArgumentParser()
         _add_aggregate_args(parser)
 
-        args = parser.parse_args(["aggregate", "-i", "in.pkl", "-o", "out.tsv"])
+        args = parser.parse_args(["-i", "in.pkl", "-o", "out.tsv"])
 
         assert args.input == "in.pkl"
         assert args.output == "out.tsv"
@@ -160,7 +164,7 @@ class TestAddAggregateArgs:
         _add_aggregate_args(parser)
 
         for field in ["p_mod_hmm", "p_mod_knn", "p_mod_raw"]:
-            args = parser.parse_args(["aggregate", "-i", "in.pkl", "-o", "out.tsv", "--score-field", field])
+            args = parser.parse_args(["-i", "in.pkl", "-o", "out.tsv", "--score-field", field])
             assert args.score_field == field
 
     def test_score_field_invalid_choice(self):
@@ -169,7 +173,7 @@ class TestAddAggregateArgs:
         _add_aggregate_args(parser)
 
         with pytest.raises(SystemExit):
-            parser.parse_args(["aggregate", "-i", "in.pkl", "-o", "out.tsv", "--score-field", "invalid"])
+            parser.parse_args(["-i", "in.pkl", "-o", "out.tsv", "--score-field", "invalid"])
 
 
 class TestCmdRun:
@@ -212,7 +216,21 @@ class TestCmdRun:
 
     @patch("baleen.cli.run_pipeline")
     @patch("baleen.cli._validate_input_files")
-    def test_run_creates_output_dir(self, mock_validate, mock_pipeline, sample_args_run, tmp_path):
+    @patch("baleen.cli.compute_sequential_modification_probabilities")
+    @patch("baleen.cli.aggregate_all")
+    @patch("baleen.cli.write_site_tsv")
+    @patch("baleen.cli.save_results")
+    def test_run_creates_output_dir(
+        self,
+        mock_save,
+        mock_write,
+        mock_agg,
+        mock_hmm,
+        mock_validate,
+        mock_pipeline,
+        sample_args_run,
+        tmp_path,
+    ):
         """Test that output directory is created if it doesn't exist."""
         output_path = tmp_path / "new_output"
         sample_args_run.output_dir = str(output_path)
@@ -226,7 +244,21 @@ class TestCmdRun:
 
     @patch("baleen.cli.run_pipeline")
     @patch("baleen.cli._validate_input_files")
-    def test_run_cuda_flag_handling(self, mock_validate, mock_pipeline, sample_args_run, tmp_path):
+    @patch("baleen.cli.compute_sequential_modification_probabilities")
+    @patch("baleen.cli.aggregate_all")
+    @patch("baleen.cli.write_site_tsv")
+    @patch("baleen.cli.save_results")
+    def test_run_cuda_flag_handling(
+        self,
+        mock_save,
+        mock_write,
+        mock_agg,
+        mock_hmm,
+        mock_validate,
+        mock_pipeline,
+        sample_args_run,
+        tmp_path,
+    ):
         """Test that CUDA flag is handled correctly."""
         sample_args_run.output_dir = str(tmp_path)
         sample_args_run.cuda = True
@@ -244,10 +276,11 @@ class TestCmdAggregate:
     """Tests for _cmd_aggregate function."""
 
     @patch("baleen.cli.load_results")
+    @patch("baleen.cli.compute_sequential_modification_probabilities")
     @patch("baleen.cli.aggregate_all")
     @patch("baleen.cli.write_site_tsv")
     def test_aggregate_with_valid_input(
-        self, mock_write, mock_agg, mock_load, sample_args_aggregate, tmp_path
+        self, mock_write, mock_agg, mock_hmm, mock_load, sample_args_aggregate, tmp_path
     ):
         """Test aggregate command with valid input."""
         # Create mock results
@@ -257,6 +290,7 @@ class TestCmdAggregate:
         mock_results = {"chr1": mock_result}
         mock_load.return_value = mock_results
 
+        mock_hmm.return_value = Mock()
         mock_agg.return_value = []
         mock_write.return_value = None
 
@@ -286,7 +320,8 @@ class TestMain:
                 main()
         captured = capsys.readouterr()
         # Should contain usage information
-        assert "usage:" in captured.stderr.lower() or "usage:" in captured.stdout.lower()
+        output = (captured.err + captured.out).lower()
+        assert "usage:" in output
 
     @patch("baleen.cli._cmd_run")
     def test_main_dispatches_run(self, mock_cmd_run):
