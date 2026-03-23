@@ -142,3 +142,84 @@ def test_write_read_bam_skips_nan():
         assert len(records) == 4
         names = [r.query_name for r in records]
         assert "nat_1" not in names
+
+
+def _write_test_bam(tmp_dir):
+    """Helper: write a test BAM and return its path."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    contig_results, hmm_results = _make_synthetic_data()
+
+    ref_path = Path(tmp_dir) / "ref.fa"
+    ref_path.write_text(">ecoli23S\n" + "A" * 3000 + "\n")
+
+    bam_path = Path(tmp_dir) / "read_results.bam"
+    read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
+    return bam_path
+
+
+def test_load_read_results_full():
+    """load_read_results returns a DataFrame with all records."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bam_path = _write_test_bam(tmp)
+        df = read_bam.load_read_results(bam_path)
+
+    assert len(df) == 5
+    assert set(df.columns) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+    assert df["is_native"].sum() == 3
+    assert (~df["is_native"]).sum() == 2
+    assert df["contig"].iloc[0] == "ecoli23S"
+    assert df["kmer"].iloc[0] == "AACGU"  # Original RNA kmer from KM tag
+
+
+def test_load_read_results_region_filter():
+    """load_read_results with region filter returns subset."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bam_path = _write_test_bam(tmp)
+
+        # Query region that includes position 100
+        df = read_bam.load_read_results(bam_path, contig="ecoli23S", start=99, end=105)
+        assert len(df) == 5
+
+        # Query region that excludes position 100
+        df_empty = read_bam.load_read_results(bam_path, contig="ecoli23S", start=200, end=300)
+        assert len(df_empty) == 0
+        # Empty DataFrame must have correct columns
+        assert set(df_empty.columns) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+
+
+def test_load_read_results_iter():
+    """load_read_results_iter yields dicts with correct keys."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bam_path = _write_test_bam(tmp)
+        records = list(read_bam.load_read_results_iter(bam_path))
+
+    assert len(records) == 5
+    r0 = records[0]
+    assert set(r0.keys()) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+    assert isinstance(r0["p_mod_hmm"], float)
+    assert isinstance(r0["is_native"], bool)
+
+
+def test_load_read_results_round_trip():
+    """Values written by write_read_bam are preserved through load_read_results."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bam_path = _write_test_bam(tmp)
+        df = read_bam.load_read_results(bam_path)
+
+    # Check native reads have expected p_mod_hmm values
+    native_df = df[df["is_native"]].sort_values("read_name").reset_index(drop=True)
+    assert abs(native_df.loc[native_df["read_name"] == "nat_0", "p_mod_hmm"].values[0] - 0.85) < 1e-5
+    assert abs(native_df.loc[native_df["read_name"] == "nat_1", "p_mod_hmm"].values[0] - 0.92) < 1e-5
+
+    # Check IVT reads
+    ivt_df = df[~df["is_native"]]
+    assert len(ivt_df) == 2
+    assert set(ivt_df["read_name"].tolist()) == {"ivt_0", "ivt_1"}
