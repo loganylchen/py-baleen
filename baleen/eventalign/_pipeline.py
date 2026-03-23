@@ -429,7 +429,7 @@ def run_pipeline(
     use_cuda: Optional[bool] = None,
     use_open_start: bool = False,
     use_open_end: bool = False,
-    padding: int = 0,
+    padding: int = 1,
     output_dir: Optional[PathLike] = None,
     cleanup_temp: bool = True,
     rna: bool = True,

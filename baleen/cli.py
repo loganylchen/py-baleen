@@ -59,8 +59,8 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     # Pipeline parameters
     pipe = parser.add_argument_group("pipeline parameters")
     pipe.add_argument(
-        "--padding", type=int, default=0,
-        help="Flanking positions for DTW signal concatenation (default: 0)",
+        "--padding", type=int, default=1,
+        help="Flanking positions for DTW signal concatenation (default: 1)",
     )
     pipe.add_argument(
         "--min-depth", type=int, default=15,
