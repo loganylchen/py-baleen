@@ -103,8 +103,12 @@ def write_read_bam(
                         n_records += 1
 
                     # IVT reads: indices n_native..n_total-1
+                    # Use len(pr.native_read_names) as offset to stay consistent
+                    # with the same PositionResult being iterated (avoids drift
+                    # between ps.n_native and the actual name list length).
+                    n_native_offset = len(pr.native_read_names)
                     for j, name in enumerate(pr.ivt_read_names):
-                        p_mod = float(ps.p_mod_hmm[ps.n_native + j])
+                        p_mod = float(ps.p_mod_hmm[n_native_offset + j])
                         if math.isnan(p_mod):
                             continue
                         a = _make_record(
@@ -115,7 +119,10 @@ def write_read_bam(
                         n_records += 1
 
         # Sort and index
-        pysam.sort("-o", str(out), str(tmp_unsorted))
+        try:
+            pysam.sort("-o", str(out), str(tmp_unsorted))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to sort BAM file {out}.") from exc
         try:
             pysam.index(str(out))
         except Exception as exc:
