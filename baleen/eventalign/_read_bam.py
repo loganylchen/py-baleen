@@ -116,7 +116,13 @@ def write_read_bam(
 
         # Sort and index
         pysam.sort("-o", str(out), str(tmp_unsorted))
-        pysam.index(str(out))
+        try:
+            pysam.index(str(out))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to index BAM file {out}. "
+                "Records may not be properly sorted."
+            ) from exc
 
         logger.info(
             "Wrote %d read-level records to %s", n_records, out,
@@ -137,9 +143,15 @@ def _build_header(
 
     ref_path = Path(ref_fasta)
     if ref_path.exists():
+        fasta_contigs: set[str] = set()
         with pysam.FastaFile(str(ref_path)) as fa:
             for name in fa.references:
                 sq_lines.append({"SN": name, "LN": fa.get_reference_length(name)})
+                fasta_contigs.add(name)
+        # Also include result contigs not present in the FASTA
+        for contig in sorted(hierarchical_results.keys()):
+            if contig not in fasta_contigs:
+                sq_lines.append({"SN": contig, "LN": 0})
     else:
         # Fallback: use contig names from results with length 0
         for contig in sorted(hierarchical_results.keys()):
