@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from typing import Union
 
 import numpy as np
+import pytest
 
 from baleen.eventalign._signal import (
     PositionSignals,
@@ -193,46 +194,31 @@ class TestGroupSignalsByPosition:
         )
 
     def test_concatenate_mixed_start_idx_none(self, tmp_path: Path) -> None:
-        """When some events lack start_idx, fall back to file order for those."""
-        # Need to manually write rows since _base_row converts None to "None" string
+        """Events missing start_idx raise RuntimeError (f5c must be run with --signal-index)."""
         header = EVENTALIGN_HEADER
         path = tmp_path / "mixed.tsv"
         with path.open("w", encoding="utf-8") as handle:
             handle.write(header + "\n")
-            # Row with start_idx=20
             handle.write("chr1\t100\tACGTA\tread_001\t+\t0\t75.1\t1.2\t0.004\t74.9\t1.1\t4,5,6\t20\t26\n")
             # Row with no start_idx (empty)
             handle.write("chr1\t100\tACGTA\tread_001\t+\t1\t75.1\t1.2\t0.004\t74.9\t1.1\t7,8\t\t\n")
-            # Row with start_idx=10
             handle.write("chr1\t100\tACGTA\tread_001\t+\t2\t75.1\t1.2\t0.004\t74.9\t1.1\t1,2,3\t10\t16\n")
 
-        grouped = group_signals_by_position(path)
-
-        # Sorted by start_idx (10, 20) + no-index at end (file order: 7,8)
-        np.testing.assert_array_almost_equal(
-            grouped[100].read_signals["read_001"],
-            np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32),
-        )
+        with pytest.raises(RuntimeError, match="start_idx"):
+            group_signals_by_position(path)
 
     def test_concatenate_all_start_idx_none(self, tmp_path: Path) -> None:
-        """When all events lack start_idx. use file order (backward compat)."""
-        # Need to manually write rows since _base_row converts None to "None" string
+        """All events missing start_idx raise RuntimeError."""
         header = EVENTALIGN_HEADER
         path = tmp_path / "all_none.tsv"
         with path.open("w", encoding="utf-8") as handle:
             handle.write(header + "\n")
-            # Rows with no start_idx (empty)
             handle.write("chr1\t100\tACGTA\tread_001\t+\t0\t75.1\t1.2\t0.004\t74.9\t1.1\t7,8,9\t\t\n")
             handle.write("chr1\t100\tACGTA\tread_001\t+\t1\t75.1\t1.2\t0.004\t74.9\t1.1\t1,2,3\t\t\n")
             handle.write("chr1\t100\tACGTA\tread_001\t+\t2\t75.1\t1.2\t0.004\t74.9\t1.1\t4,5,6\t\t\n")
 
-        grouped = group_signals_by_position(path)
-
-        # All None: file order
-        np.testing.assert_array_almost_equal(
-            grouped[100].read_signals["read_001"],
-            np.array([7, 8, 9, 1, 2, 3, 4, 5, 6], dtype=np.float32),
-        )
+        with pytest.raises(RuntimeError, match="start_idx"):
+            group_signals_by_position(path)
 
     def test_read_order_preserved(self, tmp_path: Path) -> None:
         rows = [
@@ -376,44 +362,48 @@ class TestExtractSignalsForDTWPadded:
             np.testing.assert_array_equal(a, b)
 
     def test_padding_one_concatenates_neighbors(self) -> None:
+        # Descending position order (RNA temporal order): 102 → 101 → 100
         positions = self._make_positions()
         names, sigs = extract_signals_for_dtw_padded(positions, 101, padding=1)
         assert names == ["r1", "r2"]
         np.testing.assert_array_almost_equal(
-            sigs[0], np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+            sigs[0], np.array([5.0, 3.0, 4.0, 1.0, 2.0], dtype=np.float32),
         )
         np.testing.assert_array_almost_equal(
-            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+            sigs[1], np.array([20.0, 30.0, 10.0], dtype=np.float32),
         )
 
     def test_padding_skips_missing_neighbor(self) -> None:
+        # target=100, padding=1 → window 101 → 100 → 99 (99 missing)
         positions = self._make_positions()
         names, sigs = extract_signals_for_dtw_padded(positions, 100, padding=1)
         assert names == ["r1", "r2"]
         np.testing.assert_array_almost_equal(
-            sigs[0], np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+            sigs[0], np.array([3.0, 4.0, 1.0, 2.0], dtype=np.float32),
         )
         np.testing.assert_array_almost_equal(
-            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+            sigs[1], np.array([20.0, 30.0, 10.0], dtype=np.float32),
         )
 
     def test_padding_read_absent_in_neighbor(self) -> None:
+        # target=102, padding=1 → window 103 → 102 → 101; r2 absent at center
         positions = self._make_positions()
         names, sigs = extract_signals_for_dtw_padded(positions, 102, padding=1)
         assert names == ["r1"]
         np.testing.assert_array_almost_equal(
-            sigs[0], np.array([3.0, 4.0, 5.0], dtype=np.float32),
+            sigs[0], np.array([5.0, 3.0, 4.0], dtype=np.float32),
         )
 
     def test_padding_large_window(self) -> None:
+        # Large padding; only positions 100/101/102 exist, descending: 102 → 101 → 100
         positions = self._make_positions()
         names, sigs = extract_signals_for_dtw_padded(positions, 101, padding=5)
         assert names == ["r1", "r2"]
         np.testing.assert_array_almost_equal(
-            sigs[0], np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+            sigs[0], np.array([5.0, 3.0, 4.0, 1.0, 2.0], dtype=np.float32),
         )
         np.testing.assert_array_almost_equal(
-            sigs[1], np.array([10.0, 20.0, 30.0], dtype=np.float32),
+            sigs[1], np.array([20.0, 30.0, 10.0], dtype=np.float32),
         )
 
     def test_padding_negative_raises(self) -> None:

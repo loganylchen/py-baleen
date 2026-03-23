@@ -90,13 +90,17 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
     Notes
     -----
     Events for the same ``(read_name, position)`` are concatenated in
-    ``start_idx`` order to ensure correct signal temporal ordering.
-    If ``start_idx`` is ``None`` (when ``--signal-index`` not used),
-    events are concatenated in file order.
+    ascending ``start_idx`` order (= temporal order in the raw signal).
 
-    RNA nanopore signal is generated in 3'→5' direction, i.e. reversed relative
-    to the reference/transcript 5'→3' sequence direction. Any sequence-direction
-    reversal is intentionally left to downstream callers/pipeline steps.
+    For RNA nanopore, f5c eventalign writes events in ascending
+    ``event_index`` order within a position, which is the *reverse* of
+    temporal order (lower ``start_idx`` = earlier in time, but higher
+    ``event_index`` for RNA because the strand threads 3'→5').  Sorting
+    by ``start_idx`` corrects this.
+
+    ``start_idx`` is always present because ``run_eventalign`` calls f5c
+    with ``--signal-index`` unconditionally.  A missing ``start_idx``
+    raises ``RuntimeError``.
     """
 
     grouped: dict[int, PositionSignals] = {}
@@ -131,19 +135,16 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
                 grouped[position].read_signals[read_name] = np.array([], dtype=np.float32)
                 continue
 
-            # Separate events with and without start_idx
-            with_idx: list[tuple[int, NDArray[np.float32]]] = [
-                (idx, s) for idx, s in chunks if idx is not None
-            ]
-            without_idx: list[NDArray[np.float32]] = [
-                s for idx, s in chunks if idx is None
-            ]
-
-            # Sort events with start_idx by index
-            with_idx.sort(key=lambda x: x[0])
-
-            # Concatenate: sorted events first, then events without index (file order)
-            sorted_signals: list[NDArray[np.float32]] = [s for _, s in with_idx] + without_idx
+            # start_idx is always present (f5c is called with --signal-index).
+            # Sorting ascending = temporal order; for RNA, file order (event_index
+            # ascending) is the *reverse* of temporal order.
+            if any(idx is None for idx, _ in chunks):
+                raise RuntimeError(
+                    f"Events at position {position} for read '{read_name}' are missing "
+                    "start_idx. Ensure f5c was run with --signal-index."
+                )
+            chunks.sort(key=lambda x: x[0])
+            sorted_signals: list[NDArray[np.float32]] = [s for _, s in chunks]
             grouped[position].read_signals[read_name] = np.concatenate(sorted_signals).astype(np.float32, copy=False)
 
     total_pairs = sum(len(ps.read_names) for ps in grouped.values())
@@ -176,9 +177,11 @@ def extract_signals_for_dtw_padded(
     """Extract per-read signals with neighboring-position padding.
 
     For each read present at *target_position*, concatenate the signal from
-    positions ``[target - padding, ..., target, ..., target + padding]`` (in
-    ascending position order).  Neighbor positions where the read has no signal
-    are simply skipped — no zero-fill is applied.
+    positions ``[target + padding, ..., target, ..., target - padding]`` (in
+    descending genomic-position order = temporal order for RNA).  For RNA
+    nanopore (3'→5'), higher genomic position is encountered earlier in the
+    raw signal.  Neighbor positions where the read has no signal are simply
+    skipped — no zero-fill is applied.
 
     Parameters
     ----------
@@ -207,7 +210,9 @@ def extract_signals_for_dtw_padded(
     if padding == 0:
         return extract_signals_for_dtw(center)
 
-    window_positions = list(range(target_position - padding, target_position + padding + 1))
+    # For RNA nanopore (3'→5'), higher genomic position = earlier in time.
+    # Iterate descending so the concatenated signal is in temporal order.
+    window_positions = list(range(target_position + padding, target_position - padding - 1, -1))
 
     signals: list[NDArray[np.float32]] = []
     for read_name in read_names:
