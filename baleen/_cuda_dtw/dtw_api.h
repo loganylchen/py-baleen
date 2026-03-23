@@ -68,6 +68,34 @@ extern "C"
         float *out_distances);
 
     /**
+     * @brief Compute pairwise DTW for multiple positions in one batched GPU call.
+     *
+     * All positions' padded signals are concatenated into a single flat array.
+     * CUDA streams enable concurrent processing of different positions.
+     *
+     * @param all_sequences        Concatenated padded signals: sum(n_i) * global_max_length floats
+     * @param all_seq_lengths      Actual lengths for all sequences: sum(n_i) values
+     * @param position_seq_counts  Number of sequences per position: num_positions values
+     * @param num_positions        Number of genomic positions
+     * @param global_max_length    Max signal length across all positions (padding width)
+     * @param use_open_start       Open start boundary
+     * @param use_open_end         Open end boundary
+     * @param out_distances        Output: concatenated full distance matrices (sum(n_i^2) floats)
+     * @param num_cuda_streams     Number of CUDA streams for concurrency
+     * @return 0=success, non-zero=error
+     */
+    int opendba_dtw_multi_position_pairwise(
+        const float *all_sequences,
+        const size_t *all_seq_lengths,
+        const size_t *position_seq_counts,
+        size_t num_positions,
+        size_t global_max_length,
+        int use_open_start,
+        int use_open_end,
+        float *out_distances,
+        int num_cuda_streams);
+
+    /**
      * @brief 清理 CUDA 资源
      */
     void opendba_dtw_cleanup();

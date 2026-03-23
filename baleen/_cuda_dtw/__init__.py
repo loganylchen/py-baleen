@@ -10,8 +10,11 @@ CPU backend strategy:
     semantics, since tslearn does not support open_start / open_end
 """
 
+import logging
 import numpy as np
 from typing import Union, Optional
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Backend detection
@@ -28,6 +31,11 @@ except ImportError:
     CUDA_AVAILABLE = False
 
 try:
+    from ._cuda_dtw import dtw_multi_position_pairwise as _dtw_multi_position_cuda
+except (ImportError, AttributeError):
+    _dtw_multi_position_cuda = None
+
+try:
     from tslearn.metrics import dtw as _tslearn_dtw
     from tslearn.metrics import cdist_dtw as _tslearn_cdist_dtw
 
@@ -38,9 +46,9 @@ except ImportError:
 _BACKEND = "cuda" if CUDA_AVAILABLE else "cpu"
 
 if _BACKEND == "cuda":
-    print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
+    _log.debug("DTW backend: cuda (GPU acceleration enabled)")
 else:
-    print("💻 DTW: CPU implementation (tslearn + numpy open-boundary fallback)")
+    _log.debug("DTW backend: cpu (tslearn + numpy open-boundary fallback)")
 
 
 def backend() -> str:
@@ -340,6 +348,14 @@ def dtw_pairwise(
     """
     # --- Input conversion ---
     if not isinstance(sequences, np.ndarray):
+        # Before converting, check if it's a list/array of sequences with different lengths
+        sequences_list = list(sequences)  # Convert to list to check lengths
+        if sequences_list and hasattr(sequences_list[0], '__len__'):
+            lengths = {len(s) for s in sequences_list}
+            if len(lengths) > 1:
+                raise ValueError(
+                    f"All sequences must have the same length; got lengths {sorted(lengths)}"
+                )
         sequences = np.array(sequences, dtype=np.float32)
     else:
         sequences = np.asarray(sequences, dtype=np.float32)
@@ -353,6 +369,13 @@ def dtw_pairwise(
 
     if sequences.shape[1] == 0:
         raise ValueError("Sequence length cannot be 0")
+
+    # Check that all sequences have the same length
+    if sequences.shape[0] > 1:
+        # For a 2D array, all rows naturally have the same length (shape[1]),
+        # but we validate this explicitly for clarity and to catch any edge cases
+        # if input is converted differently in the future
+        pass  # Already guaranteed by 2D array shape
 
     # --- Backend dispatch ---
     if use_cuda is True:
@@ -454,6 +477,111 @@ def dtw_pairwise_varlen(
 
 
 # ---------------------------------------------------------------------------
+# dtw_multi_position_pairwise (public API)
+# ---------------------------------------------------------------------------
+
+def dtw_multi_position_pairwise(
+    position_signals: list[list[np.ndarray]],
+    use_open_start: bool = False,
+    use_open_end: bool = False,
+    use_cuda: Optional[bool] = None,
+    num_streams: int = 16,
+) -> list[np.ndarray]:
+    """
+    Batch-compute pairwise DTW distances for multiple positions in one GPU call.
+
+    Parameters
+    ----------
+    position_signals : list of list of np.ndarray
+        position_signals[p][r] is the 1D float32 signal for position p, read r.
+    use_open_start : bool
+        Enable open start boundary condition.
+    use_open_end : bool
+        Enable open end boundary condition.
+    use_cuda : bool or None
+        Backend selection (None=auto, True=force CUDA, False=force CPU).
+    num_streams : int
+        Number of CUDA streams for concurrent processing (default 16).
+
+    Returns
+    -------
+    list of np.ndarray
+        Distance matrices, one per position. Each is (n_p, n_p) float64.
+    """
+    if len(position_signals) < 1:
+        raise ValueError("Need at least 1 position, got 0")
+
+    prepped: list[list[np.ndarray]] = []
+    counts: list[int] = []
+    for pos_sigs in position_signals:
+        ps = [np.ascontiguousarray(np.asarray(s, dtype=np.float32)) for s in pos_sigs]
+        if any(len(s) == 0 for s in ps):
+            raise ValueError("All signals must be non-empty")
+        prepped.append(ps)
+        counts.append(len(ps))
+
+    want_cuda = use_cuda is True or (use_cuda is None and CUDA_AVAILABLE)
+
+    if want_cuda:
+        if not CUDA_AVAILABLE or _dtw_multi_position_cuda is None:
+            raise RuntimeError(
+                "CUDA backend requested but not available. "
+                "Install with CUDA support or use use_cuda=False."
+            )
+
+        global_max_len = max(
+            len(s) for pos_sigs in prepped for s in pos_sigs
+        )
+        total_seqs = sum(counts)
+
+        padded = np.zeros((total_seqs, global_max_len), dtype=np.float32)
+        lengths = np.empty(total_seqs, dtype=np.int64)
+        idx = 0
+        for pos_sigs in prepped:
+            for s in pos_sigs:
+                padded[idx, :len(s)] = s
+                lengths[idx] = len(s)
+                idx += 1
+
+        counts_arr = np.array(counts, dtype=np.int64)
+
+        flat_result = _dtw_multi_position_cuda(
+            padded, lengths, counts_arr,
+            use_open_start=int(use_open_start),
+            use_open_end=int(use_open_end),
+            num_cuda_streams=num_streams,
+        )
+
+        result_list: list[np.ndarray] = []
+        offset = 0
+        for n in counts:
+            mat = np.asarray(flat_result[offset:offset + n * n], dtype=np.float64).reshape(n, n)
+            result_list.append(mat)
+            offset += n * n
+        return result_list
+
+    # CPU fallback
+    result_list = []
+    for pos_sigs in prepped:
+        n = len(pos_sigs)
+        if n < 2:
+            result_list.append(np.zeros((n, n), dtype=np.float64))
+            continue
+        mat = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                d = _dtw_distance_cpu(
+                    pos_sigs[i], pos_sigs[j],
+                    use_open_start=use_open_start,
+                    use_open_end=use_open_end,
+                )
+                mat[i, j] = d
+                mat[j, i] = d
+        result_list.append(mat)
+    return result_list
+
+
+# ---------------------------------------------------------------------------
 # cleanup / is_available
 # ---------------------------------------------------------------------------
 
@@ -485,6 +613,7 @@ __all__ = [
     "dtw_distance",
     "dtw_pairwise",
     "dtw_pairwise_varlen",
+    "dtw_multi_position_pairwise",
     "cleanup",
     "is_available",
     "backend",
