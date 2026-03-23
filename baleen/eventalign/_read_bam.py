@@ -118,18 +118,24 @@ def write_read_bam(
                         bam_out.write(a)
                         n_records += 1
 
-        # Sort and index
+        # Sort and index; clean up output on failure to avoid corrupt files
+        success = False
         try:
-            pysam.sort("-o", str(out), str(tmp_unsorted))
-        except Exception as exc:
-            raise RuntimeError(f"Failed to sort BAM file {out}.") from exc
-        try:
-            pysam.index(str(out))
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to index BAM file {out}. "
-                "Records may not be properly sorted."
-            ) from exc
+            try:
+                pysam.sort("-o", str(out), str(tmp_unsorted))
+            except Exception as exc:
+                raise RuntimeError(f"Failed to sort BAM file {out}.") from exc
+            try:
+                pysam.index(str(out))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to index BAM file {out}. "
+                    "Records may not be properly sorted."
+                ) from exc
+            success = True
+        finally:
+            if not success and out.exists():
+                out.unlink()
 
         logger.info(
             "Wrote %d read-level records to %s", n_records, out,
@@ -151,7 +157,14 @@ def _build_header(
     ref_path = Path(ref_fasta)
     if ref_path.exists():
         fasta_contigs: set[str] = set()
-        with pysam.FastaFile(str(ref_path)) as fa:
+        try:
+            fa_handle = pysam.FastaFile(str(ref_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot open reference FASTA {ref_path}. "
+                "Ensure the file is indexed (run: samtools faidx <ref.fa>)."
+            ) from exc
+        with fa_handle as fa:
             for name in fa.references:
                 sq_lines.append({"SN": name, "LN": fa.get_reference_length(name)})
                 fasta_contigs.add(name)
