@@ -357,6 +357,75 @@ class TestMdsGmm:
 # ---------------------------------------------------------------------------
 
 
+class TestKnnScoreSpread:
+    """Verify kNN scores have good spread for clearly separated data."""
+
+    def test_modified_reads_score_high(self):
+        """With strong block structure (native far from IVT), native kNN
+        scores should be > 0.7 on average."""
+        rng = np.random.RandomState(42)
+        dm = _make_block_distance_matrix(
+            20, 20, within_native=1.0, within_ivt=1.0,
+            between=5.0, noise=0.1, rng=rng,
+        )
+        scores = _score_knn_ivt_purity(dm, 20, 20)
+        native_mean = float(np.mean(scores[:20]))
+        assert native_mean > 0.7, (
+            f"Native kNN scores too low for strong block structure: {native_mean:.3f}"
+        )
+
+    def test_unmodified_reads_score_low(self):
+        """With homogeneous matrix, all scores should be moderate (near 0.5)."""
+        rng = np.random.RandomState(42)
+        n_native, n_ivt = 20, 20
+        n = n_native + n_ivt
+        mat = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                d = 1.0 + rng.normal(0, 0.05)
+                mat[i, j] = max(d, 0)
+                mat[j, i] = mat[i, j]
+        scores = _score_knn_ivt_purity(mat, n_native, n_ivt)
+        ivt_mean = float(np.mean(scores[n_native:]))
+        # IVT scores should be low-to-moderate
+        assert ivt_mean < 0.6, (
+            f"IVT kNN scores too high for homogeneous data: {ivt_mean:.3f}"
+        )
+
+
+class TestPiWeightedPosteriors:
+    """Verify that calibration uses fitted pi in posterior computation."""
+
+    def test_high_pi_gives_high_posteriors(self):
+        """When most reads are clearly modified (high pi), native posteriors
+        should be > 0.7 on average."""
+        rng = np.random.RandomState(42)
+        dm = _make_block_distance_matrix(
+            30, 15, within_native=1.0, within_ivt=1.0,
+            between=5.0, noise=0.1, rng=rng,
+        )
+        result = knn_ivt_purity(dm, 30, 15)
+        native_probs = result.native_probabilities
+        native_mean = float(np.mean(native_probs))
+        assert native_mean > 0.7, (
+            f"Native posteriors too low when modification is clear: {native_mean:.3f}"
+        )
+
+    def test_ivt_posteriors_stay_low(self):
+        """IVT read posteriors should remain low regardless of pi weighting."""
+        rng = np.random.RandomState(42)
+        dm = _make_block_distance_matrix(
+            30, 15, within_native=1.0, within_ivt=1.0,
+            between=5.0, noise=0.1, rng=rng,
+        )
+        result = knn_ivt_purity(dm, 30, 15)
+        ivt_probs = result.ivt_probabilities
+        ivt_mean = float(np.mean(ivt_probs))
+        assert ivt_mean < 0.3, (
+            f"IVT posteriors too high: {ivt_mean:.3f}"
+        )
+
+
 class TestComputeModificationProbabilities:
     def test_all_algorithms(self) -> None:
         mat = _make_block_distance_matrix(10, 10, between=8.0)

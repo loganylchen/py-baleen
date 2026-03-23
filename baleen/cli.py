@@ -59,14 +59,19 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--min-mapq", type=int, default=0,
         help="Minimum mapping quality (default: 0)",
     )
+    pipe.add_argument(
+        "--threads", type=int, default=1,
+        help="Number of parallel workers for contig processing (default: 1)",
+    )
 
     # DTW options
     dtw = parser.add_argument_group("DTW options")
-    dtw.add_argument(
+    cuda_group = dtw.add_mutually_exclusive_group()
+    cuda_group.add_argument(
         "--cuda", action="store_true", default=False,
         help="Force CUDA for DTW computation",
     )
-    dtw.add_argument(
+    cuda_group.add_argument(
         "--no-cuda", action="store_true", default=False,
         help="Force CPU for DTW computation",
     )
@@ -134,6 +139,23 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _validate_input_files(args: argparse.Namespace) -> None:
+    """Validate that all required input files exist."""
+    files_to_check = [
+        ("native_bam", "--native-bam"),
+        ("native_fastq", "--native-fastq"),
+        ("native_blow5", "--native-blow5"),
+        ("ivt_bam", "--ivt-bam"),
+        ("ivt_fastq", "--ivt-fastq"),
+        ("ivt_blow5", "--ivt-blow5"),
+        ("ref", "--ref"),
+    ]
+    for attr, arg_name in files_to_check:
+        path = Path(getattr(args, attr))
+        if not path.exists():
+            raise SystemExit(f"error: {arg_name} file not found: {path}")
+
+
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the ``run`` sub-command."""
     from baleen.eventalign import (
@@ -147,6 +169,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate input files exist
+    _validate_input_files(args)
 
     # Resolve CUDA option
     use_cuda: bool | None = None
@@ -179,6 +204,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         kmer_model=args.kmer_model,
         min_mapq=args.min_mapq,
         primary_only=not args.no_primary_only,
+        threads=args.threads,
     )
 
     dtw_time = time.perf_counter() - t0

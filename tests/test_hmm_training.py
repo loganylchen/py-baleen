@@ -171,7 +171,7 @@ def test_create_unsupervised_params():
     params = hmm.create_unsupervised_params()
     assert params.mode == "unsupervised"
     assert params.n_states == 3
-    assert params.p_stay_per_base == 0.98
+    assert params.p_stay_per_base == 0.92
     np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
     assert params.emission_transform is None
 
@@ -442,8 +442,8 @@ def test_hmm_params_in_pipeline():
     assert max(diffs) > 1e-6
 
 
-def test_default_uses_3state_unsupervised():
-    """Default (hmm_params=None) should produce same results as explicit 3-state unsupervised."""
+def test_default_uses_2state_unsupervised():
+    """Default (hmm_params=None) should produce same results as explicit 2-state unsupervised."""
     cr = _make_contig_result(
         n_positions=9,
         n_native=10,
@@ -453,14 +453,14 @@ def test_default_uses_3state_unsupervised():
         contig_name="chrY",
     )
     default = hier.compute_sequential_modification_probabilities(cr)
-    unsup_3s = hier.compute_sequential_modification_probabilities(
+    unsup_2s = hier.compute_sequential_modification_probabilities(
         cr,
-        hmm_params=hmm.create_unsupervised_params(n_states=3),
+        hmm_params=hmm.create_unsupervised_params(n_states=2),
     )
     for pos in default.position_stats:
         np.testing.assert_allclose(
             default.position_stats[pos].p_mod_hmm,
-            unsup_3s.position_stats[pos].p_mod_hmm,
+            unsup_2s.position_stats[pos].p_mod_hmm,
             atol=1e-10,
         )
 
@@ -474,7 +474,7 @@ def test_create_unsupervised_params_3state():
     params = hmm.create_unsupervised_params(n_states=3)
     assert params.mode == "unsupervised"
     assert params.n_states == 3
-    assert params.p_stay_per_base == 0.98
+    assert params.p_stay_per_base == 0.92
     np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
     assert params.emission_transform is None
     assert params.unmod_emission_beta == (2.0, 8.0)

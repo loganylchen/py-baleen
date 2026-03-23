@@ -788,12 +788,14 @@ class TestGapTransitionMatrix3State:
         mat = _gap_transition_matrix_3state(1)
         assert mat.shape == (3, 3)
 
-    def test_forbidden_transitions(self):
-        """U→M and M→U should be zero."""
+    def test_small_direct_transitions(self):
+        """U→M and M→U should have small but nonzero leakage (5% of p_leave)."""
         for gap in [1, 10, 100]:
             mat = _gap_transition_matrix_3state(gap)
-            assert mat[0, 2] == pytest.approx(0.0, abs=1e-15)  # U → M
-            assert mat[2, 0] == pytest.approx(0.0, abs=1e-15)  # M → U
+            p_stay = 0.92 ** max(gap, 1)
+            p_leave = 1.0 - p_stay
+            assert mat[0, 2] == pytest.approx(0.05 * p_leave, abs=1e-10)  # U → M
+            assert mat[2, 0] == pytest.approx(0.05 * p_leave, abs=1e-10)  # M → U
 
     def test_larger_gap_more_switching(self):
         mat_small = _gap_transition_matrix_3state(1)
@@ -814,6 +816,15 @@ class TestGapTransitionMatrix3State:
         p_leave = 1.0 - 0.9
         assert mat[1, 0] == pytest.approx(0.4 * p_leave, abs=1e-10)
         assert mat[1, 2] == pytest.approx(0.6 * p_leave, abs=1e-10)
+
+    def test_direct_transition_leakage(self):
+        """U and M states should route 5% of leaving probability directly."""
+        mat = _gap_transition_matrix_3state(1, p_stay_per_base=0.9)
+        p_leave = 1.0 - 0.9
+        assert mat[0, 2] == pytest.approx(0.05 * p_leave, abs=1e-10)  # U → M
+        assert mat[2, 0] == pytest.approx(0.05 * p_leave, abs=1e-10)  # M → U
+        assert mat[0, 1] == pytest.approx(0.95 * p_leave, abs=1e-10)  # U → F
+        assert mat[2, 1] == pytest.approx(0.95 * p_leave, abs=1e-10)  # M → F
 
 
 # ---------------------------------------------------------------------------
@@ -900,3 +911,54 @@ class TestForwardBackward3State:
         # With init=[0.7,0.2,0.1] and emission=[0.1,0.2,0.9]:
         # unnormed: [0.07, 0.04, 0.09] → P(mod) = 0.09/0.20 = 0.45
         assert posteriors[0] > 0.2
+
+
+# ---------------------------------------------------------------------------
+# Tests — HMM preserves strong modification signal
+# ---------------------------------------------------------------------------
+
+
+class TestHMMPreservesStrongSignal:
+    """Verify that the HMM does not crush strong modification signals."""
+
+    def test_isolated_modified_position_preserved(self):
+        """A single modified position surrounded by unmodified should retain
+        a high HMM probability (>0.5) for native reads."""
+        # 20 positions, only position index 10 is modified
+        cr = _make_contig_result(
+            n_positions=20,
+            n_native=15,
+            n_ivt=10,
+            modified_positions={10},
+            position_start=100,
+            position_step=1,
+            seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr)
+        pos = 110  # position_start + 10
+        ps = result.position_stats[pos]
+        mean_hmm_native = float(np.mean(ps.native_p_mod_hmm))
+        # Must be > 0.5 — the data clearly shows modification
+        assert mean_hmm_native > 0.5, (
+            f"HMM crushed strong modification signal: mean_hmm_native={mean_hmm_native:.3f}"
+        )
+
+    def test_unmodified_positions_stay_low(self):
+        """Unmodified positions should remain low even with reduced smoothing."""
+        cr = _make_contig_result(
+            n_positions=20,
+            n_native=15,
+            n_ivt=10,
+            modified_positions={10},
+            position_start=100,
+            position_step=1,
+            seed=42,
+        )
+        result = compute_sequential_modification_probabilities(cr)
+        # Check an unmodified position far from the modified one
+        unmod_pos = 100  # index 0
+        ps = result.position_stats[unmod_pos]
+        mean_hmm_native = float(np.mean(ps.native_p_mod_hmm))
+        assert mean_hmm_native < 0.3, (
+            f"Unmodified position has too-high HMM: {mean_hmm_native:.3f}"
+        )

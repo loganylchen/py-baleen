@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import norm as _norm_dist
+from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from baleen.eventalign._hmm_training import HMMParams
@@ -485,9 +486,9 @@ def _anchored_mixture_em(
     tol: float = 1e-6,
     pi_threshold: float = 0.05,
     separation_threshold: float = 0.8,
-    tau_pi: float = 0.02,
-    tau_bic: float = 5.0,
-    tau_sep: float = 0.3,
+    tau_pi: float = 0.05,
+    tau_bic: float = 10.0,
+    tau_sep: float = 0.5,
     global_mu1: float | None = None,
     global_sigma1: float | None = None,
     min_reads_for_local: int = 50,
@@ -582,8 +583,8 @@ def _anchored_mixture_em(
     f0_n = _normal_pdf(z_native, mu0, sigma0)
     f1_n = _normal_pdf(z_native, mu1, sigma1)
     ll_mix = float(np.sum(np.log((1 - pi) * f0_n + pi * f1_n + _EPS)))
-    bic_null = -2 * ll_null + 2 * math.log(max(n, 1))
-    bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))
+    bic_null = -2 * ll_null + 2 * math.log(max(n, 2))
+    bic_mix = -2 * ll_mix + 5 * math.log(max(n, 2))
 
     # Legacy hard gate (for reporting / backward compat)
     null_gate_legacy = (
@@ -690,15 +691,15 @@ def _gap_transition_matrix(
 
 def _gap_transition_matrix_3state(
     gap_bases: int,
-    p_stay_per_base: float = 0.98,
+    p_stay_per_base: float = 0.92,
 ) -> NDArray[np.float64]:
-    """Compute 3×3 transition matrix with forbidden U↔M direct transitions.
+    """Compute 3×3 transition matrix with small U↔M leakage.
 
     States: 0 = Unmodified, 1 = Flank, 2 = Modified.
 
-    Forbidden transitions (zero probability):
-    - U → M (must pass through Flank)
-    - M → U (must pass through Flank)
+    Most leaving probability routes through Flank, but 5% of leaving
+    probability allows direct U→M and M→U transitions so that isolated
+    modified positions can be detected without requiring adjacent flanks.
 
     The Flank state splits its leaving probability asymmetrically:
     40% toward U, 60% toward M (flanking positions are slightly more
@@ -707,9 +708,9 @@ def _gap_transition_matrix_3state(
     ::
 
             U              F              M
-    U  [ p_stay       p_leave          0         ]
-    F  [ .4*p_leave   p_stay       .6*p_leave    ]
-    M  [ 0            p_leave      p_stay        ]
+    U  [ p_stay    .95*p_leave    .05*p_leave   ]
+    F  [ .4*p_leave   p_stay     .6*p_leave     ]
+    M  [ .05*p_leave  .95*p_leave   p_stay      ]
 
     Returns shape (3, 3) row-stochastic matrix.
     """
@@ -718,9 +719,9 @@ def _gap_transition_matrix_3state(
     p_leave = 1.0 - p_stay
 
     mat = np.array([
-        [p_stay,          p_leave,        0.0],
+        [p_stay,          0.95 * p_leave, 0.05 * p_leave],
         [0.4 * p_leave,   p_stay,         0.6 * p_leave],
-        [0.0,             p_leave,        p_stay],
+        [0.05 * p_leave,  0.95 * p_leave, p_stay],
     ], dtype=np.float64)
 
     # Row-normalize for safety
@@ -872,9 +873,11 @@ def _run_hmm_on_trajectories(
 
             if n_states == 3 and emission_transform is None:
                 # Unsupervised 3-state: Beta PDF emissions via lookup
+                # Clamp to [0.02, 0.98] to avoid boundary collapse where
+                # all Beta PDFs go to zero (making emissions uninformative).
                 if beta_grids is not None:
                     gx, g_u, g_f, g_m = beta_grids
-                    p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                    p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
                     emissions[t_idx, 0] = max(np.interp(p_mod_clamped, gx, g_u), 1e-10)
                     emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
                     emissions[t_idx, 2] = max(np.interp(p_mod_clamped, gx, g_m), 1e-10)
@@ -899,7 +902,7 @@ def _run_hmm_on_trajectories(
                     emissions[t_idx, 2] = p_mod_kde[0]
 
                 # Flank from Beta PDF
-                p_mod_clamped = max(min(float(p_mod), 1.0 - 1e-6), 1e-6)
+                p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
                 if beta_grids is not None:
                     gx, _, g_f, _ = beta_grids
                     emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
@@ -934,6 +937,13 @@ def _run_hmm_on_trajectories(
                     emissions[t_idx, 0] = p_unmod[0]
                     emissions[t_idx, 1] = p_mod_kde[0]
 
+        # Emission floor: prevent any state from having near-zero emission,
+        # which lets transition priors completely override observation evidence.
+        emissions = np.maximum(emissions, 0.01)
+        # Re-normalize rows
+        row_sums = emissions.sum(axis=1, keepdims=True)
+        emissions /= row_sums
+
         posteriors = _forward_backward(
             emissions,
             traj.positions,
@@ -964,7 +974,7 @@ def compute_sequential_modification_probabilities(
     mixture_pi_threshold: float = 0.05,
     mixture_separation: float = 0.8,
     hmm_min_positions: int = 3,
-    hmm_p_stay_per_base: float = 0.98,
+    hmm_p_stay_per_base: float = 0.92,
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
     emission_source: str = "p_mod_knn",
@@ -1022,6 +1032,22 @@ def compute_sequential_modification_probabilities(
     coverages: dict[int, int] = {}
     all_scores: dict[int, NDArray[np.float64]] = {}
 
+    contig_short = contig_result.contig
+    if len(contig_short) > 20:
+        contig_short = contig_short[:17] + "..."
+    n_pos = len(sorted_positions)
+
+    # Single progress bar spanning V1 → V2 → kNN stages
+    # Total steps = 3 passes over positions (V1a + V2b + kNN)
+    _mod_pbar = tqdm(
+        total=n_pos * 3,
+        desc=f"  {contig_short} mod-calling",
+        unit="step",
+        leave=False,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+    )
+    _mod_pbar.set_postfix_str("V1: null fitting")
+
     for pos in sorted_positions:
         pr = contig_result.positions[pos]
         scores = _extract_ivt_distances(
@@ -1033,6 +1059,7 @@ def compute_sequential_modification_probabilities(
         mu_raw, sigma_raw = _fit_robust_ivt_null(ivt_scores)
         raw_params[pos] = (mu_raw, sigma_raw)
         coverages[pos] = pr.n_ivt_reads
+        _mod_pbar.update(1)
 
     # ── V1b: Hierarchical shrinkage ──────────────────────────────────────
 
@@ -1096,6 +1123,7 @@ def compute_sequential_modification_probabilities(
 
     # ── V2b: Per-position anchored mixture with soft gating ────────────
 
+    _mod_pbar.set_postfix_str("V2: mixture EM")
     for pos in sorted_positions:
         ps = position_stats[pos]
         z_native = ps.z_scores[: ps.n_native]
@@ -1118,17 +1146,20 @@ def compute_sequential_modification_probabilities(
 
         # Default HMM to V2 result (will be overwritten if HMM runs)
         ps.p_mod_hmm[:] = p_mod_all
+        _mod_pbar.update(1)
 
     # ── kNN IVT-purity scores ─────────────────────────────────────────────
 
     from baleen.eventalign._probability import _score_knn_ivt_purity, _calibrate_beta
 
+    _mod_pbar.set_postfix_str("kNN scoring")
     for pos in sorted_positions:
         pr = contig_result.positions[pos]
         ps = position_stats[pos]
         n_total = pr.n_native_reads + pr.n_ivt_reads
 
         if n_total < 3:
+            _mod_pbar.update(1)
             continue
 
         raw_knn = _score_knn_ivt_purity(
@@ -1140,6 +1171,10 @@ def compute_sequential_modification_probabilities(
 
         cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
         ps.p_mod_knn[:] = cal.probabilities
+        _mod_pbar.update(1)
+
+    _mod_pbar.set_postfix_str("V3: HMM smoothing")
+    _mod_pbar.close()
 
     # ── V3: HMM smoothing ────────────────────────────────────────────────
 
@@ -1148,11 +1183,15 @@ def compute_sequential_modification_probabilities(
     )
 
     if run_hmm:
-        # Default to 3-state unsupervised HMM when no params provided
+        # Default to 2-state unsupervised HMM when no params provided.
+        # The 2-state model (Unmodified/Modified) is more robust for
+        # detecting isolated modifications than the 3-state model, which
+        # requires transitions through a Flank state and uses Beta PDF
+        # emissions that collapse at boundary values.
         effective_hmm_params = hmm_params
         if effective_hmm_params is None:
             from baleen.eventalign._hmm_training import create_unsupervised_params
-            effective_hmm_params = create_unsupervised_params(n_states=3)
+            effective_hmm_params = create_unsupervised_params(n_states=2)
 
         _run_hmm_on_trajectories(
             native_trajs,

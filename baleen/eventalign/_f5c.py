@@ -119,6 +119,32 @@ def is_blow5_indexed(blow5: PathLike) -> bool:
     return idx_path.exists() and idx_path.stat().st_size > 0
 
 
+def _run_f5c_index(cmd: list[str], error_msg: str) -> None:
+    """Run an indexing command (f5c or slow5tools) with error handling.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command to execute.
+    error_msg : str
+        Prefix for error messages on failure.
+
+    Raises
+    ------
+    RuntimeError
+        If the indexing command fails.
+    """
+    logger.debug("Running command: %s", " ".join(cmd))
+    t0 = time.perf_counter()
+    try:
+        _ = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = cast(Optional[str], exc.stderr)
+        stderr_text = (stderr or "").strip()
+        raise RuntimeError(f"{error_msg}: {stderr_text}") from exc
+    logger.debug("Indexing completed in %.1fs", time.perf_counter() - t0)
+
+
 def index_fastq_blow5(fastq: PathLike, blow5: PathLike) -> None:
     """Index FASTQ against BLOW5 using f5c.
 
@@ -142,16 +168,7 @@ def index_fastq_blow5(fastq: PathLike, blow5: PathLike) -> None:
         return
 
     cmd = ["f5c", "index", "--slow5", str(blow5_path), str(fastq_path)]
-    logger.debug("Running command: %s", " ".join(cmd))
-
-    t0 = time.perf_counter()
-    try:
-        _ = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        stderr = cast(Optional[str], exc.stderr)
-        stderr_text = (stderr or "").strip()
-        raise RuntimeError(f"f5c index failed: {stderr_text}") from exc
-    logger.debug("f5c index completed in %.1fs: %s", time.perf_counter() - t0, fastq_path)
+    _run_f5c_index(cmd, "f5c index failed")
 
 
 def index_blow5(blow5: PathLike) -> None:
@@ -174,16 +191,7 @@ def index_blow5(blow5: PathLike) -> None:
         return
 
     cmd = ["slow5tools", "index", str(blow5_path)]
-    logger.debug("Running command: %s", " ".join(cmd))
-
-    t0 = time.perf_counter()
-    try:
-        _ = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        stderr = cast(Optional[str], exc.stderr)
-        stderr_text = (stderr or "").strip()
-        raise RuntimeError(f"slow5tools index failed: {stderr_text}") from exc
-    logger.debug("slow5tools index completed in %.1fs: %s", time.perf_counter() - t0, blow5_path)
+    _run_f5c_index(cmd, "slow5tools index failed")
 
 
 def run_eventalign(
@@ -260,9 +268,11 @@ def run_eventalign(
 
     logger.debug("Running command: %s", " ".join(cmd))
 
+    # Write to a temporary file, then rename atomically on success
+    tmp_path = output_path.with_suffix(".tmp")
     t0 = time.perf_counter()
     try:
-        with output_path.open("w", encoding="utf-8") as output_file:
+        with tmp_path.open("w", encoding="utf-8") as output_file:
             _ = subprocess.run(
                 cmd,
                 check=True,
@@ -270,10 +280,18 @@ def run_eventalign(
                 stderr=subprocess.PIPE,
                 text=True,
             )
+        # Atomic rename on success
+        tmp_path.replace(output_path)
     except subprocess.CalledProcessError as exc:
         stderr = cast(Optional[str], exc.stderr)
         stderr_text = (stderr or "").strip()
+        # Clean up temporary file on failure
+        tmp_path.unlink(missing_ok=True)
         raise RuntimeError(f"f5c eventalign failed: {stderr_text}") from exc
+    except BaseException:
+        # Clean up temporary file on any other exception
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     elapsed = time.perf_counter() - t0
     size_kb = output_path.stat().st_size / 1024

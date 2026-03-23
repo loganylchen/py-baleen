@@ -531,3 +531,161 @@ class TestDTWPairwiseVarlenCPU:
         result = dtw_pairwise_varlen([sig, sig.copy()], use_cuda=False)
         assert result.shape == (2, 2)
         np.testing.assert_allclose(result, 0.0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# dtw_multi_position_pairwise on CPU
+# ---------------------------------------------------------------------------
+
+class TestMultiPositionBatchCPU:
+    """dtw_multi_position_pairwise must produce same results as per-position calls."""
+
+    def test_batch_matches_individual(self):
+        """Batch result must match individual dtw_pairwise_varlen calls."""
+        from baleen._cuda_dtw import dtw_multi_position_pairwise, dtw_pairwise_varlen
+
+        rng = np.random.default_rng(42)
+        position_signals = [
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(4)],
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(6)],
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(3)],
+        ]
+
+        batch_results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+
+        assert len(batch_results) == 3
+        for p, signals in enumerate(position_signals):
+            expected = dtw_pairwise_varlen(signals, use_cuda=False)
+            np.testing.assert_allclose(
+                batch_results[p], expected, rtol=1e-5,
+                err_msg=f"Position {p} mismatch",
+            )
+
+    def test_single_position(self):
+        from baleen._cuda_dtw import dtw_multi_position_pairwise, dtw_pairwise_varlen
+
+        signals = [
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            np.array([4.0, 5.0], dtype=np.float32),
+        ]
+        batch_results = dtw_multi_position_pairwise([signals], use_cuda=False)
+        expected = dtw_pairwise_varlen(signals, use_cuda=False)
+        np.testing.assert_allclose(batch_results[0], expected, rtol=1e-5)
+
+    def test_position_with_one_signal(self):
+        """Position with n=1 should produce a 1x1 zero matrix."""
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        position_signals = [
+            [np.array([1.0, 2.0], dtype=np.float32)],  # n=1
+            [np.array([1.0, 2.0], dtype=np.float32),
+             np.array([3.0, 4.0], dtype=np.float32)],  # n=2
+        ]
+        results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+        assert results[0].shape == (1, 1)
+        assert results[0][0, 0] == 0.0
+        assert results[1].shape == (2, 2)
+
+    def test_many_positions(self):
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        rng = np.random.default_rng(99)
+        position_signals = [
+            [rng.standard_normal(rng.integers(3, 15)).astype(np.float32)
+             for _ in range(rng.integers(2, 8))]
+            for _ in range(20)
+        ]
+        results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+        assert len(results) == 20
+        for p, (matrix, signals) in enumerate(zip(results, position_signals)):
+            n = len(signals)
+            assert matrix.shape == (n, n)
+            np.testing.assert_allclose(np.diag(matrix), 0.0, atol=1e-6)
+            assert np.allclose(matrix, matrix.T)
+
+    def test_empty_list_raises(self):
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        with pytest.raises(ValueError, match="at least 1"):
+            dtw_multi_position_pairwise([], use_cuda=False)
+
+    def test_use_cuda_true_raises_without_gpu(self):
+        from baleen._cuda_dtw import CUDA_AVAILABLE, dtw_multi_position_pairwise
+
+        if not CUDA_AVAILABLE:
+            signals = [[np.array([1.0, 2.0], dtype=np.float32),
+                         np.array([3.0, 4.0], dtype=np.float32)]]
+            with pytest.raises(RuntimeError, match="CUDA"):
+                dtw_multi_position_pairwise(signals, use_cuda=True)
+
+
+# ---------------------------------------------------------------------------
+# dtw_multi_position_pairwise on GPU (conditional)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not __import__("baleen._cuda_dtw", fromlist=["CUDA_AVAILABLE"]).CUDA_AVAILABLE,
+    reason="CUDA not available",
+)
+class TestMultiPositionBatchGPU:
+    """GPU batch DTW must produce same results as CPU."""
+
+    def test_gpu_matches_cpu(self):
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        rng = np.random.default_rng(42)
+        position_signals = [
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(4)],
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(6)],
+            [rng.standard_normal(rng.integers(5, 20)).astype(np.float32) for _ in range(3)],
+        ]
+
+        cpu_results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+        gpu_results = dtw_multi_position_pairwise(position_signals, use_cuda=True)
+
+        for p in range(3):
+            np.testing.assert_allclose(
+                gpu_results[p], cpu_results[p], rtol=1e-4,
+                err_msg=f"Position {p}: GPU != CPU",
+            )
+
+    def test_gpu_many_positions(self):
+        """Stress test: 50 positions to verify stream concurrency works."""
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        rng = np.random.default_rng(123)
+        position_signals = [
+            [rng.standard_normal(rng.integers(5, 30)).astype(np.float32)
+             for _ in range(rng.integers(3, 15))]
+            for _ in range(50)
+        ]
+
+        gpu_results = dtw_multi_position_pairwise(position_signals, use_cuda=True, num_streams=16)
+        cpu_results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+
+        for p in range(50):
+            np.testing.assert_allclose(
+                gpu_results[p], cpu_results[p], rtol=1e-4,
+                err_msg=f"Position {p}: GPU != CPU",
+            )
+
+    def test_gpu_different_stream_counts(self):
+        """Verify correctness with different numbers of streams."""
+        from baleen._cuda_dtw import dtw_multi_position_pairwise
+
+        rng = np.random.default_rng(77)
+        position_signals = [
+            [rng.standard_normal(rng.integers(5, 15)).astype(np.float32) for _ in range(5)]
+            for _ in range(10)
+        ]
+
+        cpu_results = dtw_multi_position_pairwise(position_signals, use_cuda=False)
+        for nstreams in [1, 4, 8, 16, 32]:
+            gpu_results = dtw_multi_position_pairwise(
+                position_signals, use_cuda=True, num_streams=nstreams,
+            )
+            for p in range(10):
+                np.testing.assert_allclose(
+                    gpu_results[p], cpu_results[p], rtol=1e-4,
+                    err_msg=f"Position {p}, streams={nstreams}: GPU != CPU",
+                )

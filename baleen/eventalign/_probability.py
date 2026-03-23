@@ -220,13 +220,14 @@ def _calibrate_normal(
             null_gate_active=True,
         )
 
-    # Compute posteriors for ALL reads using likelihood ratio (not pi-weighted).
-    # This avoids the problem where pi→1 makes all posteriors approach 1.
-    # We use a fixed 50/50 prior so posteriors reflect pure likelihood evidence.
+    # Pi-weighted Bayesian posteriors — the BIC gate already protects
+    # against false positives, so we use the fitted pi as prior.
+    # Clamp pi to prevent degenerate posteriors when pi→1.
+    pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _normal_pdf(scores_all, mu0, sigma0)
     f1_all = _normal_pdf(scores_all, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
+    probs = (pi_post * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
@@ -314,10 +315,12 @@ def _calibrate_beta(
             null_gate_active=True,
         )
 
+    # Clamp pi to prevent degenerate posteriors when pi→1.
+    pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _beta_pdf(scores_all, a0, b0)
     f1_all = _beta_pdf(scores_all, a1, b1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
+    probs = (pi_post * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
@@ -404,36 +407,39 @@ def _score_knn_ivt_purity(
 ) -> NDArray[np.float64]:
     """Compute per-read kNN IVT-purity scores.
 
-    Score = 1 - (weighted IVT fraction among k nearest neighbors).
+    Score = 1 - (IVT fraction among k nearest neighbors).
     Higher score = fewer IVT neighbors = more likely modified.
     Returns values in [0, 1].
+
+    Uses unweighted neighbor counting for better score spread,
+    then applies rank-based normalization to ensure scores span [0, 1].
     """
     n_total = n_native + n_ivt
     if k is None:
-        k = int(_clip(round(math.sqrt(n_total)), 3, 10))
-    k = min(k, n_total - 1)  # can't have more neighbors than other reads
-
-    # Bandwidth for weighting
-    off_diag = distance_matrix[np.triu_indices(n_total, k=1)]
-    eta = float(np.median(off_diag)) if len(off_diag) > 0 else 1.0
-    eta = max(eta, _MIN_SIGMA)
+        k = int(_clip(round(math.sqrt(n_total)), 3, 15))
+    k = min(k, n_total - 1)
 
     is_ivt = np.zeros(n_total, dtype=bool)
     is_ivt[n_native:] = True
 
-    scores = np.empty(n_total, dtype=np.float64)
+    raw_scores = np.empty(n_total, dtype=np.float64)
 
     for i in range(n_total):
         dists = distance_matrix[i].copy()
         dists[i] = np.inf  # exclude self
-        neighbor_idx = np.argsort(dists)[:k]
+        neighbor_idx = np.argpartition(dists, k)[:k]
 
-        weights = np.exp(-dists[neighbor_idx] / eta)
-        ivt_weight = float(np.sum(weights[is_ivt[neighbor_idx]]))
-        total_weight = float(np.sum(weights)) + _EPS
+        # Unweighted IVT fraction among k neighbors
+        ivt_count = int(np.sum(is_ivt[neighbor_idx]))
+        raw_scores[i] = 1.0 - ivt_count / k
 
-        a_i = ivt_weight / total_weight  # IVT affinity
-        scores[i] = 1.0 - a_i  # high = few IVT neighbors
+    # Rank-based normalization: map to [0, 1] using ranks
+    # This ensures good spread regardless of the raw score distribution
+    ranks = np.argsort(np.argsort(raw_scores)).astype(np.float64)
+    scores = ranks / max(n_total - 1, 1)
+
+    # Blend: 70% rank-based + 30% raw to preserve some absolute signal
+    scores = 0.7 * scores + 0.3 * raw_scores
 
     return scores
 
@@ -653,10 +659,12 @@ def mds_gmm(
             mixing_proportion=pi,
         )
 
+    # Clamp pi to prevent degenerate posteriors when pi→1.
+    pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _mvn_pdf(coords, mu0, sigma0)
     f1_all = _mvn_pdf(coords, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    probs = f1_all / denom_all
+    denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
+    probs = (pi_post * f1_all) / denom_all
     probs = np.clip(probs, 0.0, 1.0)
 
     return ModificationProbabilities(

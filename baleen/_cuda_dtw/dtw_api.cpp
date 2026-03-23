@@ -19,6 +19,23 @@
         }                                                                         \
     } while (0)
 
+// ============================================================================
+// Cached Device Properties
+// ============================================================================
+
+static int g_max_threads = 0;
+static bool g_props_cached = false;
+
+static int ensure_device_props() {
+    if (!g_props_cached) {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        g_max_threads = prop.maxThreadsPerBlock;
+        g_props_cached = true;
+    }
+    return 0;
+}
+
 // 复用 OpenDBA 的核函数启动逻辑，仅适配单对序列计算
 int opendba_dtw_cuda(
     const float *seq1, size_t len1,
@@ -62,9 +79,8 @@ int opendba_dtw_cuda(
 
     // 4. 启动 OpenDBA 原版 DTW 核函数（参数严格对齐）
     // Get device properties to determine thread count
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float); // 复用 OpenDBA 的共享内存计算
@@ -129,6 +145,8 @@ int opendba_dtw_cuda(
 
 void opendba_dtw_cleanup()
 {
+    g_props_cached = false;
+    g_max_threads = 0;
     cudaDeviceReset();
 }
 
@@ -175,9 +193,8 @@ int opendba_dtw_pairwise_batch(
     delete[] h_seq_lengths;
 
     // Allocate temporary buffers for DTW computation
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     // Query available GPU memory
     size_t free_memory, total_memory;
@@ -387,9 +404,8 @@ int opendba_dtw_pairwise_varlen(
     CUDA_CHECK(cudaMemcpy(d_sequences, sequences, total_seq_size, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_seq_lengths, seq_lengths, num_sequences * sizeof(size_t), cudaMemcpyHostToDevice));
 
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    int max_threads = deviceProp.maxThreadsPerBlock;
+    ensure_device_props();
+    int max_threads = g_max_threads;
 
     size_t max_pairs_parallel = num_sequences - 1;
 
@@ -465,6 +481,240 @@ int opendba_dtw_pairwise_varlen(
     CUDA_CHECK(cudaFree(d_distances));
     CUDA_CHECK(cudaFree(d_dtw_cost));
     CUDA_CHECK(cudaFree(d_new_dtw_cost));
+
+    return 0;
+}
+
+// ============================================================================
+// Multi-Position Batched Pairwise DTW (CUDA Streams)
+// ============================================================================
+
+int opendba_dtw_multi_position_pairwise(
+    const float *all_sequences,
+    const size_t *all_seq_lengths,
+    const size_t *position_seq_counts,
+    size_t num_positions,
+    size_t global_max_length,
+    int use_open_start,
+    int use_open_end,
+    float *out_distances,
+    int num_cuda_streams)
+{
+    if (!all_sequences || !all_seq_lengths || !position_seq_counts ||
+        !out_distances || num_positions == 0 || global_max_length == 0)
+    {
+        fprintf(stderr, "Invalid input parameters for multi-position batch DTW\n");
+        return -1;
+    }
+
+    ensure_device_props();
+    int max_threads = g_max_threads;
+
+    // Compute offsets and sizes
+    size_t total_sequences = 0;
+    size_t total_out_floats = 0;
+    size_t max_n = 0;
+    for (size_t p = 0; p < num_positions; p++)
+    {
+        size_t n = position_seq_counts[p];
+        total_sequences += n;
+        total_out_floats += n * n;  // full matrix per position
+        if (n > max_n) max_n = n;
+    }
+
+    // Compute per-position offsets
+    size_t *seq_offsets = new size_t[num_positions];
+    size_t *dist_offsets = new size_t[num_positions];  // into upper-triangle buffer
+    size_t *out_offsets = new size_t[num_positions];   // into output full-matrix buffer
+    {
+        size_t seq_off = 0, dist_off = 0, out_off = 0;
+        for (size_t p = 0; p < num_positions; p++)
+        {
+            seq_offsets[p] = seq_off;
+            dist_offsets[p] = dist_off;
+            out_offsets[p] = out_off;
+            size_t n = position_seq_counts[p];
+            seq_off += n;
+            dist_off += (n * (n - 1)) / 2;
+            out_off += n * n;
+        }
+    }
+
+    size_t total_pairs = 0;
+    for (size_t p = 0; p < num_positions; p++)
+    {
+        size_t n = position_seq_counts[p];
+        total_pairs += (n * (n - 1)) / 2;
+    }
+
+    // Allocate GPU memory — all at once
+    float *d_sequences = nullptr;
+    size_t *d_seq_lengths = nullptr;
+    float *d_distances = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_sequences, total_sequences * global_max_length * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_seq_lengths, total_sequences * sizeof(size_t)));
+    if (total_pairs > 0)
+    {
+        CUDA_CHECK(cudaMalloc(&d_distances, total_pairs * sizeof(float)));
+    }
+
+    // Upload all data in one transfer
+    CUDA_CHECK(cudaMemcpy(d_sequences, all_sequences,
+                          total_sequences * global_max_length * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_seq_lengths, all_seq_lengths,
+                          total_sequences * sizeof(size_t),
+                          cudaMemcpyHostToDevice));
+
+    // Create streams
+    if (num_cuda_streams < 1) num_cuda_streams = 1;
+    if (num_cuda_streams > 256) num_cuda_streams = 256;
+
+    cudaStream_t *streams = new cudaStream_t[num_cuda_streams];
+    for (int s = 0; s < num_cuda_streams; s++)
+    {
+        CUDA_CHECK(cudaStreamCreate(&streams[s]));
+    }
+
+    // Allocate per-stream cost buffers
+    size_t max_comparisons = (max_n > 0) ? max_n - 1 : 0;
+    size_t cost_buf_size = max_comparisons * global_max_length * sizeof(float);
+
+    float **d_cost_a = new float*[num_cuda_streams];
+    float **d_cost_b = new float*[num_cuda_streams];
+    for (int s = 0; s < num_cuda_streams; s++)
+    {
+        d_cost_a[s] = nullptr;
+        d_cost_b[s] = nullptr;
+        if (cost_buf_size > 0)
+        {
+            CUDA_CHECK(cudaMalloc(&d_cost_a[s], cost_buf_size));
+            CUDA_CHECK(cudaMalloc(&d_cost_b[s], cost_buf_size));
+        }
+    }
+
+    // Kernel launch config
+    dim3 thread_block(max_threads, 1, 1);
+    size_t shared_mem = thread_block.x * 3 * sizeof(float);
+
+    // Process all positions across streams
+    for (size_t p = 0; p < num_positions; p++)
+    {
+        size_t n = position_seq_counts[p];
+        if (n < 2) continue;
+
+        int s = p % num_cuda_streams;
+        size_t seq_offset = seq_offsets[p];
+
+        for (size_t i = 0; i < n - 1; i++)
+        {
+            size_t num_comparisons = n - i - 1;
+
+            // Reset cost buffers before each reference sequence
+            cudaMemsetAsync(d_cost_a[s], 0,
+                            num_comparisons * global_max_length * sizeof(float),
+                            streams[s]);
+            cudaMemsetAsync(d_cost_b[s], 0,
+                            num_comparisons * global_max_length * sizeof(float),
+                            streams[s]);
+
+            float *d_current_cost = d_cost_a[s];
+            float *d_next_cost = d_cost_b[s];
+
+            for (size_t offset = 0; offset < global_max_length; offset += max_threads)
+            {
+                DTWDistance<float><<<num_comparisons, thread_block, shared_mem, streams[s]>>>(
+                    nullptr, global_max_length,
+                    nullptr, global_max_length,
+                    i, offset,
+                    &d_sequences[seq_offset * global_max_length],
+                    global_max_length, n,
+                    &d_seq_lengths[seq_offset],
+                    d_current_cost,
+                    d_next_cost,
+                    (unsigned char *)nullptr, 0,  // no path matrix
+                    &d_distances[dist_offsets[p]],
+                    use_open_start,
+                    use_open_end);
+                CUDA_CHECK(cudaGetLastError());
+
+                float *tmp = d_current_cost;
+                d_current_cost = d_next_cost;
+                d_next_cost = tmp;
+            }
+        }
+    }
+
+    // Sync all streams
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy results back and convert upper-triangle to full matrices
+    if (total_pairs > 0)
+    {
+        float *h_upper_triangle = new float[total_pairs];
+        CUDA_CHECK(cudaMemcpy(h_upper_triangle, d_distances,
+                              total_pairs * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+
+        for (size_t p = 0; p < num_positions; p++)
+        {
+            size_t n = position_seq_counts[p];
+            size_t out_off = out_offsets[p];
+            size_t pair_off = dist_offsets[p];
+
+            // Fill full symmetric matrix
+            size_t pair_idx = 0;
+            for (size_t i = 0; i < n; i++)
+            {
+                out_distances[out_off + i * n + i] = 0.0f;  // diagonal
+                for (size_t j = i + 1; j < n; j++)
+                {
+                    float dist = h_upper_triangle[pair_off + pair_idx];
+                    out_distances[out_off + i * n + j] = dist;
+                    out_distances[out_off + j * n + i] = dist;
+                    pair_idx++;
+                }
+            }
+        }
+
+        delete[] h_upper_triangle;
+    }
+    else
+    {
+        // Handle positions with n <= 1 (fill diagonal zeros)
+        for (size_t p = 0; p < num_positions; p++)
+        {
+            size_t n = position_seq_counts[p];
+            size_t out_off = out_offsets[p];
+            for (size_t i = 0; i < n; i++)
+            {
+                for (size_t j = 0; j < n; j++)
+                {
+                    out_distances[out_off + i * n + j] = (i == j) ? 0.0f : 0.0f;
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    for (int s = 0; s < num_cuda_streams; s++)
+    {
+        if (d_cost_a[s]) cudaFree(d_cost_a[s]);
+        if (d_cost_b[s]) cudaFree(d_cost_b[s]);
+        cudaStreamDestroy(streams[s]);
+    }
+    delete[] d_cost_a;
+    delete[] d_cost_b;
+    delete[] streams;
+
+    cudaFree(d_sequences);
+    cudaFree(d_seq_lengths);
+    if (d_distances) cudaFree(d_distances);
+
+    delete[] seq_offsets;
+    delete[] dist_offsets;
+    delete[] out_offsets;
 
     return 0;
 }
@@ -729,6 +979,168 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
     return (PyObject *)distance_matrix;
 }
 
+static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyArrayObject *sequences_array;
+    PyArrayObject *lengths_array;
+    PyArrayObject *counts_array;
+    int use_open_start = 0;
+    int use_open_end = 0;
+    int num_cuda_streams = 16;
+
+    static char *kwlist[] = {
+        (char *)"sequences", (char *)"lengths", (char *)"counts",
+        (char *)"use_open_start", (char *)"use_open_end",
+        (char *)"num_cuda_streams", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iii", kwlist,
+                                     &PyArray_Type, &sequences_array,
+                                     &PyArray_Type, &lengths_array,
+                                     &PyArray_Type, &counts_array,
+                                     &use_open_start, &use_open_end,
+                                     &num_cuda_streams))
+    {
+        return NULL;
+    }
+
+    // Validate sequences array: 2D float32
+    if (PyArray_NDIM(sequences_array) != 2)
+    {
+        PyErr_SetString(PyExc_ValueError,
+                        "sequences must be a 2D array (total_sequences, global_max_length)");
+        return NULL;
+    }
+    if (PyArray_TYPE(sequences_array) != NPY_FLOAT32)
+    {
+        PyErr_SetString(PyExc_TypeError, "sequences must be float32 dtype");
+        return NULL;
+    }
+
+    // Validate lengths array: 1D int64
+    if (PyArray_NDIM(lengths_array) != 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "lengths must be a 1D array");
+        return NULL;
+    }
+
+    // Validate counts array: 1D int64
+    if (PyArray_NDIM(counts_array) != 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "counts must be a 1D array");
+        return NULL;
+    }
+
+    npy_intp *seq_dims = PyArray_DIMS(sequences_array);
+    size_t total_sequences = (size_t)seq_dims[0];
+    size_t global_max_length = (size_t)seq_dims[1];
+    size_t num_positions = (size_t)PyArray_DIM(counts_array, 0);
+
+    if ((size_t)PyArray_DIM(lengths_array, 0) != total_sequences)
+    {
+        PyErr_SetString(PyExc_ValueError,
+                        "lengths array size must match total number of sequences");
+        return NULL;
+    }
+
+    // Convert lengths to size_t array
+    size_t *h_lengths = new size_t[total_sequences];
+    for (size_t i = 0; i < total_sequences; i++)
+    {
+        long long val;
+        if (PyArray_TYPE(lengths_array) == NPY_INT64)
+            val = *((long long *)PyArray_GETPTR1(lengths_array, i));
+        else if (PyArray_TYPE(lengths_array) == NPY_INT32)
+            val = *((int *)PyArray_GETPTR1(lengths_array, i));
+        else
+        {
+            delete[] h_lengths;
+            PyErr_SetString(PyExc_TypeError, "lengths must be int32 or int64 dtype");
+            return NULL;
+        }
+        if (val <= 0 || (size_t)val > global_max_length)
+        {
+            delete[] h_lengths;
+            PyErr_Format(PyExc_ValueError,
+                         "length[%zu]=%lld out of range (1..%zu)", i, val, global_max_length);
+            return NULL;
+        }
+        h_lengths[i] = (size_t)val;
+    }
+
+    // Convert counts to size_t array
+    size_t *h_counts = new size_t[num_positions];
+    size_t check_total = 0;
+    for (size_t p = 0; p < num_positions; p++)
+    {
+        long long val;
+        if (PyArray_TYPE(counts_array) == NPY_INT64)
+            val = *((long long *)PyArray_GETPTR1(counts_array, p));
+        else if (PyArray_TYPE(counts_array) == NPY_INT32)
+            val = *((int *)PyArray_GETPTR1(counts_array, p));
+        else
+        {
+            delete[] h_lengths;
+            delete[] h_counts;
+            PyErr_SetString(PyExc_TypeError, "counts must be int32 or int64 dtype");
+            return NULL;
+        }
+        if (val < 0)
+        {
+            delete[] h_lengths;
+            delete[] h_counts;
+            PyErr_Format(PyExc_ValueError, "counts[%zu]=%lld must be non-negative", p, val);
+            return NULL;
+        }
+        h_counts[p] = (size_t)val;
+        check_total += (size_t)val;
+    }
+
+    if (check_total != total_sequences)
+    {
+        delete[] h_lengths;
+        delete[] h_counts;
+        PyErr_Format(PyExc_ValueError,
+                     "sum(counts)=%zu != total sequences=%zu", check_total, total_sequences);
+        return NULL;
+    }
+
+    // Compute total output size
+    size_t total_out_floats = 0;
+    for (size_t p = 0; p < num_positions; p++)
+        total_out_floats += h_counts[p] * h_counts[p];
+
+    // Allocate output as flat 1D array
+    npy_intp out_dim = (npy_intp)total_out_floats;
+    PyArrayObject *out_array = (PyArrayObject *)PyArray_ZEROS(1, &out_dim, NPY_FLOAT32, 0);
+    if (out_array == NULL)
+    {
+        delete[] h_lengths;
+        delete[] h_counts;
+        return NULL;
+    }
+
+    float *sequences_data = (float *)PyArray_DATA(sequences_array);
+    float *out_data = (float *)PyArray_DATA(out_array);
+
+    int result = opendba_dtw_multi_position_pairwise(
+        sequences_data, h_lengths, h_counts,
+        num_positions, global_max_length,
+        use_open_start, use_open_end,
+        out_data, num_cuda_streams);
+
+    delete[] h_lengths;
+    delete[] h_counts;
+
+    if (result != 0)
+    {
+        Py_DECREF(out_array);
+        PyErr_SetString(PyExc_RuntimeError, "CUDA multi-position batch DTW failed");
+        return NULL;
+    }
+
+    return (PyObject *)out_array;
+}
+
 /**
  * Python wrapper for opendba_dtw_cleanup
  */
@@ -790,6 +1202,27 @@ static PyMethodDef DtwMethods[] = {
      "-------\n"
      "np.ndarray\n"
      "    Distance matrix (num_sequences, num_sequences) with DTW distances\n"},
+    {"dtw_multi_position_pairwise", (PyCFunction)py_dtw_multi_position_pairwise,
+     METH_VARARGS | METH_KEYWORDS,
+     "Compute pairwise DTW distances for multiple positions in one batched GPU call.\n\n"
+     "Parameters\n"
+     "----------\n"
+     "sequences : np.ndarray\n"
+     "    2D padded array (total_sequences, global_max_length) in float32\n"
+     "lengths : np.ndarray\n"
+     "    1D array of actual sequence lengths (int64)\n"
+     "counts : np.ndarray\n"
+     "    1D array of sequence counts per position (int64)\n"
+     "use_open_start : int, optional\n"
+     "    Enable open start boundary (default: 0)\n"
+     "use_open_end : int, optional\n"
+     "    Enable open end boundary (default: 0)\n"
+     "num_cuda_streams : int, optional\n"
+     "    Number of CUDA streams (default: 16)\n\n"
+     "Returns\n"
+     "-------\n"
+     "np.ndarray\n"
+     "    Flat 1D array of concatenated distance matrices (float32)\n"},
     {"cleanup", py_dtw_cleanup, METH_NOARGS,
      "Reset CUDA device and free all resources.\n\n"
      "This should be called when done using CUDA DTW to free GPU resources.\n"},
