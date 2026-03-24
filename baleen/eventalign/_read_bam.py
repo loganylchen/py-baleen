@@ -204,7 +204,7 @@ def _make_record(
     a.query_name = read_name
     a.flag = 0
     a.reference_id = bam_out.get_tid(contig)
-    a.reference_start = position
+    a.reference_start = position - 1
     a.mapping_quality = 255
     a.cigar = [(0, cigar_len)]  # M operation
     a.query_sequence = kmer_dna
@@ -282,7 +282,7 @@ def load_read_results_iter(
         for read in iterator:
             yield {
                 "contig": read.reference_name,
-                "position": read.reference_start,
+                "position": read.reference_start + 1,
                 "kmer": read.get_tag("KM"),
                 "read_name": read.query_name,
                 "is_native": read.get_tag("RG") == "native",

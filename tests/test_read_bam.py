@@ -101,7 +101,7 @@ def test_write_read_bam_basic():
         r0 = records[0]
         assert r0.query_name == "nat_0"
         assert r0.reference_name == "ecoli23S"
-        assert r0.reference_start == 100
+        assert r0.reference_start == 99
         assert abs(r0.get_tag("MP") - 0.85) < 1e-5
         assert r0.get_tag("RG") == "native"
         assert r0.get_tag("KM") == "AACGU"
@@ -181,7 +181,7 @@ def test_load_read_results_region_filter():
         bam_path = _write_test_bam(tmp)
 
         # Query region that includes position 100
-        df = read_bam.load_read_results(bam_path, contig="ecoli23S", start=99, end=105)
+        df = read_bam.load_read_results(bam_path, contig="ecoli23S", start=98, end=104)
         assert len(df) == 5
 
         # Query region that excludes position 100
