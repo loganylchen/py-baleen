@@ -20,10 +20,10 @@ WORKDIR /app
 COPY . .
 RUN pip3 install --no-cache-dir . \
     && BALEEN_BIN="$(which baleen 2>/dev/null)" \
-    && if [ -n "$BALEEN_BIN" ]; then \
-         cp "$BALEEN_BIN" /usr/local/bin/baleen; \
-       else \
+    && if [ -z "$BALEEN_BIN" ]; then \
          printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \
+       elif [ "$BALEEN_BIN" != "/usr/local/bin/baleen" ]; then \
+         cp "$BALEEN_BIN" /usr/local/bin/baleen; \
        fi \
     && chmod +x /usr/local/bin/baleen
 
