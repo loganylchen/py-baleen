@@ -130,9 +130,9 @@ class TestGroupSignalsByPosition:
         path = write_test_eventalign(tmp_path, "single_pos.tsv", [_base_row()])
         grouped = group_signals_by_position(path)
 
-        assert list(grouped.keys()) == [100]
-        pos = grouped[100]
-        assert pos.position == 100
+        assert list(grouped.keys()) == [103]
+        pos = grouped[103]
+        assert pos.position == 103
         assert pos.read_names == ["read_001"]
         np.testing.assert_array_almost_equal(
             pos.read_signals["read_001"],
@@ -148,7 +148,7 @@ class TestGroupSignalsByPosition:
         path = write_test_eventalign(tmp_path, "same_pos_multi_reads.tsv", rows)
         grouped = group_signals_by_position(path)
 
-        pos = grouped[100]
+        pos = grouped[103]
         assert len(pos.read_signals) == 3
         assert pos.read_names == ["read_001", "read_002", "read_003"]
 
@@ -161,7 +161,7 @@ class TestGroupSignalsByPosition:
         path = write_test_eventalign(tmp_path, "multi_pos.tsv", rows)
         grouped = group_signals_by_position(path)
 
-        assert sorted(grouped.keys()) == [100, 200, 300]
+        assert sorted(grouped.keys()) == [103, 203, 303]
 
     def test_same_read_multiple_events_concatenated(self, tmp_path: Path) -> None:
         """Events are concatenated in file order when start_idx matches event_index."""
@@ -173,7 +173,7 @@ class TestGroupSignalsByPosition:
         grouped = group_signals_by_position(path)
 
         np.testing.assert_array_almost_equal(
-            grouped[100].read_signals["read_001"],
+            grouped[103].read_signals["read_001"],
             np.array([1, 2, 3, 4, 5, 6], dtype=np.float32),
         )
 
@@ -189,7 +189,7 @@ class TestGroupSignalsByPosition:
 
         # Should be sorted by start_idx: 10, 20, 30 → [1,2,3,4,5,6,7,8,9]
         np.testing.assert_array_almost_equal(
-            grouped[100].read_signals["read_001"],
+            grouped[103].read_signals["read_001"],
             np.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.float32),
         )
 
@@ -229,7 +229,7 @@ class TestGroupSignalsByPosition:
         path = write_test_eventalign(tmp_path, "read_order.tsv", rows)
         grouped = group_signals_by_position(path)
 
-        assert grouped[100].read_names == ["read_B", "read_A", "read_C"]
+        assert grouped[103].read_names == ["read_B", "read_A", "read_C"]
 
     def test_kmer_from_first_event(self, tmp_path: Path) -> None:
         rows = [
@@ -239,7 +239,7 @@ class TestGroupSignalsByPosition:
         path = write_test_eventalign(tmp_path, "kmer.tsv", rows)
         grouped = group_signals_by_position(path)
 
-        assert grouped[100].reference_kmer == "AAAAA"
+        assert grouped[103].reference_kmer == "AAAAA"
 
 
 class TestExtractSignalsForDTW:

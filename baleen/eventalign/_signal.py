@@ -113,21 +113,23 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
     n_rows = 0
     for event in parse_eventalign(tsv_path):
         n_rows += 1
-        if event.position not in grouped:
-            grouped[event.position] = PositionSignals(
+        # Shift from 0-based first-of-kmer to 1-based center-of-kmer
+        shifted = event.position + len(event.reference_kmer) // 2 + 1
+        if shifted not in grouped:
+            grouped[shifted] = PositionSignals(
                 contig=event.contig,
-                position=event.position,
+                position=shifted,
                 reference_kmer=event.reference_kmer,
                 read_signals={},
                 read_names=[],
             )
 
-        pos_signals = grouped[event.position]
+        pos_signals = grouped[shifted]
         if event.read_name not in pos_signals.read_signals:
             pos_signals.read_signals[event.read_name] = np.array([], dtype=np.float32)
             pos_signals.read_names.append(event.read_name)
 
-        pending[event.position][event.read_name].append((event.start_idx, event.samples))
+        pending[shifted][event.read_name].append((event.start_idx, event.samples))
 
     for position, per_read in pending.items():
         for read_name, chunks in per_read.items():

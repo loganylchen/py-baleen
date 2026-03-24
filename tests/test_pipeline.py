@@ -363,8 +363,8 @@ class TestRunPipeline:
         assert metadata.n_contigs_passed_filter == 1
         assert set(results.keys()) == {"ctg1"}
         contig_result = results["ctg1"]
-        assert set(contig_result.positions.keys()) == {10, 20}
-        pos10 = contig_result.positions[10]
+        assert set(contig_result.positions.keys()) == {13, 23}
+        pos10 = contig_result.positions[13]
         assert pos10.n_native_reads == 2
         assert pos10.n_ivt_reads == 2
         assert pos10.distance_matrix.shape == (4, 4)
