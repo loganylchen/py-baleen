@@ -15,12 +15,11 @@ RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
-# Install baleen with CUDA; copy console_script to a known path
+# Install baleen with CUDA
 WORKDIR /app
 COPY . .
 RUN pip3 install --no-cache-dir . \
-    && echo "=== baleen: $(which baleen 2>/dev/null || echo 'NOT IN PATH') ===" \
-    && find / -name baleen -type f 2>/dev/null || true
+    && echo "=== baleen installed to: $(which baleen 2>/dev/null || echo 'NOT IN PATH') ==="
 
 # --- Runtime stage ---
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
@@ -36,5 +35,7 @@ RUN apt-get update \
 COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=builder /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
+COPY --from=builder /usr/local/bin/baleen /usr/local/bin/baleen
+
 WORKDIR /data
-ENTRYPOINT ["python3", "-m", "baleen"]
+ENTRYPOINT ["baleen"]
