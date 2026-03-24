@@ -254,6 +254,9 @@ setup(
         "tqdm",
         "pandas",
     ],
+    entry_points={
+        "console_scripts": ["baleen=baleen.cli:main"],
+    },
     ext_modules=[_make_cuda_extension()],
     cmdclass={"build_ext": CUDABuildExt},
     zip_safe=False,
