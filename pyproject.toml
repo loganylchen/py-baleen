@@ -11,3 +11,6 @@ dependencies = ["numpy", "tslearn", "pysam", "scipy", "tqdm", "pandas"]
 
 [project.scripts]
 baleen = "baleen.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["baleen*"]
