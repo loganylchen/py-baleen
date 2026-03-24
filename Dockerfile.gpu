@@ -34,7 +34,11 @@ RUN apt-get update \
 COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=builder /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
-COPY --from=builder /usr/local/bin/baleen /usr/local/bin/baleen
+
+# Create baleen CLI wrapper (portable — works regardless of where pip
+# placed the console_script in the builder stage)
+RUN printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen \
+    && chmod +x /usr/local/bin/baleen
 
 WORKDIR /data
 ENTRYPOINT ["baleen"]
