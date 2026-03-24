@@ -239,25 +239,11 @@ def _make_cuda_extension():
 # Always include the CUDA extension; CUDABuildExt skips it if nvcc is absent
 # ---------------------------------------------------------------------------
 
+# Only specify what pyproject.toml cannot handle: the CUDA C extension
+# and the custom build command.  All metadata (name, version, deps,
+# console_scripts, etc.) lives in pyproject.toml so there is a single
+# source of truth and no risk of setup() overriding [project] fields.
 setup(
-    name="baleen",
-    version="0.1.0",
-    description="CUDA-accelerated DTW and nanopore signal analysis pipeline",
-    author="Logan",
-    python_requires=">=3.9",
-    packages=find_packages(),
-    install_requires=[
-        "numpy",
-        "tslearn",
-        "pysam",
-        "scipy",
-        "tqdm",
-        "pandas",
-    ],
-    entry_points={
-        "console_scripts": ["baleen=baleen.cli:main"],
-    },
     ext_modules=[_make_cuda_extension()],
     cmdclass={"build_ext": CUDABuildExt},
-    zip_safe=False,
 )

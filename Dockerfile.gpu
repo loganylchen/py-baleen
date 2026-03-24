@@ -18,8 +18,7 @@ RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-
 # Install baleen with CUDA
 WORKDIR /app
 COPY . .
-RUN pip3 install --no-cache-dir . \
-    && echo "=== baleen installed to: $(which baleen 2>/dev/null || echo 'NOT IN PATH') ==="
+RUN pip3 install --no-cache-dir .
 
 # --- Runtime stage ---
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
