@@ -84,6 +84,10 @@ class PositionStats:
     n_ivt: int
     n_native: int
 
+    # Read names (carried forward for streaming BAM output without ContigResult)
+    native_read_names: list[str]
+    ivt_read_names: list[str]
+
     # V1 — robust IVT null (before and after shrinkage)
     mu_raw: float
     sigma_raw: float
@@ -522,7 +526,8 @@ def _anchored_mixture_em(
         gate_weight is the continuous soft gate ∈ [0, 1].
     """
     from baleen.eventalign._probability import (
-        _normal_pdf, _normal_log_likelihood, _EPS as _PROB_EPS,
+        _normal_pdf, _normal_logpdf, _normal_log_likelihood,
+        _mixture_log_likelihood, _EPS as _PROB_EPS,
     )
 
     if len(z_ivt) < 2 or len(z_native) < 2:
@@ -580,9 +585,9 @@ def _anchored_mixture_em(
     n = len(z_native)
 
     ll_null = _normal_log_likelihood(z_native, mu0, sigma0)
-    f0_n = _normal_pdf(z_native, mu0, sigma0)
-    f1_n = _normal_pdf(z_native, mu1, sigma1)
-    ll_mix = float(np.sum(np.log((1 - pi) * f0_n + pi * f1_n + _EPS)))
+    log_f0_n = _normal_logpdf(z_native, mu0, sigma0)
+    log_f1_n = _normal_logpdf(z_native, mu1, sigma1)
+    ll_mix = _mixture_log_likelihood(log_f0_n, log_f1_n, pi)
     bic_null = -2 * ll_null + 2 * math.log(max(n, 2))
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 2))
 
@@ -599,11 +604,13 @@ def _anchored_mixture_em(
     w_sep = float(_sigmoid((separation - separation_threshold) / tau_sep))
     gate_weight = w_pi * w_bic * w_sep
 
-    # Mixture posteriors (always computed now)
+    # Mixture posteriors with pi-weighted Bayes rule
+    # Clamp pi to prevent degenerate posteriors (consistent with _calibrate_normal)
+    pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _normal_pdf(z_all, mu0, sigma0)
     f1_all = _normal_pdf(z_all, mu1, sigma1)
-    denom_all = f0_all + f1_all + _EPS
-    raw_posterior = f1_all / denom_all
+    denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
+    raw_posterior = (pi_post * f1_all) / denom_all
 
     # Fallback: z-score-based probability (always nonzero for high z)
     fallback = 1.0 - _norm_dist.cdf(-z_all)
@@ -794,21 +801,22 @@ def _forward_backward(
             alpha[t] = uniform.copy()
             scale[t] = _EPS
 
-    # Backward pass
+    # Backward pass — use forward scale factors for normalization
+    # (standard scaled forward-backward algorithm)
     beta = np.zeros((T, N), dtype=np.float64)
     beta[T - 1] = np.ones(N, dtype=np.float64)
 
     for t in range(T - 2, -1, -1):
         gap = positions[t + 1] - positions[t]
         trans = _trans_fn(gap, p_stay_per_base)
-        beta[t] = trans @ (emissions[t + 1] * beta[t + 1])
-        bt_sum = beta[t].sum()
-        if bt_sum > 0:
-            beta[t] /= bt_sum
+        beta_raw = trans @ (emissions[t + 1] * beta[t + 1])
+        # Normalize by forward scale factor at t+1 (standard scaled F-B)
+        if scale[t + 1] > _EPS:
+            beta[t] = beta_raw / scale[t + 1]
         else:
             beta[t] = np.ones(N, dtype=np.float64)
 
-    # Posterior
+    # Posterior: gamma[t] ∝ alpha[t] * beta[t] (both scaled)
     gamma = alpha * beta
     gamma_sum = gamma.sum(axis=1, keepdims=True)
     gamma_sum = np.maximum(gamma_sum, _EPS)
@@ -1100,6 +1108,8 @@ def compute_sequential_modification_probabilities(
             coverage_class=_classify_coverage(pr.n_ivt_reads),
             n_ivt=pr.n_ivt_reads,
             n_native=pr.n_native_reads,
+            native_read_names=pr.native_read_names,
+            ivt_read_names=pr.ivt_read_names,
             mu_raw=mu_r,
             sigma_raw=sigma_r,
             mu_shrunk=mu_s,

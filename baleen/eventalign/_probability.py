@@ -93,6 +93,32 @@ def _normal_pdf(x: NDArray[np.float64], mu: float, sigma: float) -> NDArray[np.f
     return np.exp(-0.5 * z * z) / (max(sigma, _MIN_SIGMA) * math.sqrt(2 * math.pi))
 
 
+def _normal_logpdf(x: NDArray[np.float64], mu: float, sigma: float) -> NDArray[np.float64]:
+    """Vectorised Normal log-PDF (avoids underflow)."""
+    sigma = max(sigma, _MIN_SIGMA)
+    z = (x - mu) / sigma
+    return -0.5 * z * z - math.log(sigma) - 0.5 * math.log(2 * math.pi)
+
+
+def _mixture_log_likelihood(
+    log_f0: NDArray[np.float64],
+    log_f1: NDArray[np.float64],
+    pi: float,
+) -> float:
+    """Compute sum(log((1-pi)*f0 + pi*f1)) in log-space via log-sum-exp.
+
+    Avoids underflow when both f0 and f1 are extremely small.
+    """
+    log_w0 = math.log(max(1.0 - pi, _EPS))
+    log_w1 = math.log(max(pi, _EPS))
+    a = log_w0 + log_f0
+    b = log_w1 + log_f1
+    # log-sum-exp per element: log(exp(a) + exp(b))
+    max_ab = np.maximum(a, b)
+    log_sum = max_ab + np.log(np.exp(a - max_ab) + np.exp(b - max_ab))
+    return float(np.sum(log_sum))
+
+
 def _normal_log_likelihood(x: NDArray[np.float64], mu: float, sigma: float) -> float:
     n = len(x)
     if n == 0:
@@ -116,10 +142,15 @@ def _beta_pdf(x: NDArray[np.float64], a: float, b: float) -> NDArray[np.float64]
     return beta_dist.pdf(x_safe, a, b)
 
 
-def _beta_log_likelihood(x: NDArray[np.float64], a: float, b: float) -> float:
+def _beta_logpdf(x: NDArray[np.float64], a: float, b: float) -> NDArray[np.float64]:
+    """Vectorised Beta log-PDF (avoids underflow)."""
     from scipy.stats import beta as beta_dist
     x_safe = np.clip(x, 1e-10, 1.0 - 1e-10)
-    return float(np.sum(beta_dist.logpdf(x_safe, a, b)))
+    return beta_dist.logpdf(x_safe, a, b)
+
+
+def _beta_log_likelihood(x: NDArray[np.float64], a: float, b: float) -> float:
+    return float(np.sum(_beta_logpdf(x, a, b)))
 
 
 def _fit_beta(x: NDArray[np.float64]) -> tuple[float, float]:
@@ -200,12 +231,12 @@ def _calibrate_normal(
             break
         pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
 
-    # BIC gate
+    # BIC gate (log-space to avoid underflow)
     n = len(native_scores)
     ll_null = _normal_log_likelihood(native_scores, mu0, sigma0)
-    f0_mix = _normal_pdf(native_scores, mu0, sigma0)
-    f1_mix = _normal_pdf(native_scores, mu1, sigma1)
-    ll_mix = float(np.sum(np.log((1 - pi) * f0_mix + pi * f1_mix + _EPS)))
+    log_f0_mix = _normal_logpdf(native_scores, mu0, sigma0)
+    log_f1_mix = _normal_logpdf(native_scores, mu1, sigma1)
+    ll_mix = _mixture_log_likelihood(log_f0_mix, log_f1_mix, pi)
     bic_null = -2 * ll_null + 2 * math.log(max(n, 1))  # 2 params (mu0, sigma0)
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))  # 3 free params (pi, mu1, sigma1)
 
@@ -294,12 +325,12 @@ def _calibrate_beta(
             break
         pi, a1, b1 = pi_new, a1_new, b1_new
 
-    # BIC gate
+    # BIC gate (log-space to avoid underflow)
     n = len(native_scores)
     ll_null = _beta_log_likelihood(native_scores, a0, b0)
-    f0_n = _beta_pdf(native_scores, a0, b0)
-    f1_n = _beta_pdf(native_scores, a1, b1)
-    ll_mix = float(np.sum(np.log((1 - pi) * f0_n + pi * f1_n + _EPS)))
+    log_f0_n = _beta_logpdf(native_scores, a0, b0)
+    log_f1_n = _beta_logpdf(native_scores, a1, b1)
+    ll_mix = _mixture_log_likelihood(log_f0_n, log_f1_n, pi)
     bic_null = -2 * ll_null + 2 * math.log(max(n, 1))
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))
 
