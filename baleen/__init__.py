@@ -8,6 +8,7 @@ from baleen.eventalign import (
     load_read_results_iter,
     load_results,
     run_pipeline,
+    run_pipeline_streaming,
     save_hmm_params,
     save_results,
     write_site_tsv,
@@ -15,6 +16,7 @@ from baleen.eventalign import (
 
 __all__ = [
     "run_pipeline",
+    "run_pipeline_streaming",
     "save_results",
     "load_results",
     "compute_sequential_modification_probabilities",
