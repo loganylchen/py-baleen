@@ -45,6 +45,8 @@ def sample_args_run():
         no_primary_only=False,
         keep_temp=False,
         no_read_bam=True,
+        target=None,
+        keep_intermediate=False,
     )
     return args
 
@@ -179,32 +181,26 @@ class TestAddAggregateArgs:
 class TestCmdRun:
     """Tests for _cmd_run function."""
 
-    @patch("baleen.cli.run_pipeline")
+    @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.compute_sequential_modification_probabilities")
-    @patch("baleen.cli.aggregate_all")
     @patch("baleen.cli.write_site_tsv")
-    @patch("baleen.cli.save_results")
     def test_run_args_forwarded_correctly(
         self,
-        mock_save,
         mock_write,
-        mock_agg,
-        mock_hmm,
         mock_validate,
         mock_pipeline,
         sample_args_run,
         tmp_path,
     ):
-        """Test that args are forwarded correctly to run_pipeline."""
+        """Test that args are forwarded correctly to run_pipeline_streaming."""
         sample_args_run.output_dir = str(tmp_path)
 
-        # Mock the pipeline to return empty results
-        mock_pipeline.return_value = ({}, Mock())
+        # Mock the streaming pipeline to return empty results
+        mock_pipeline.return_value = ({}, [], Mock())
 
         _cmd_run(sample_args_run)
 
-        # Verify run_pipeline was called with correct args
+        # Verify run_pipeline_streaming was called with correct args
         mock_pipeline.assert_called_once()
         call_kwargs = mock_pipeline.call_args[1]
 
@@ -214,18 +210,12 @@ class TestCmdRun:
         assert call_kwargs["padding"] == sample_args_run.padding
         assert call_kwargs["min_mapq"] == sample_args_run.min_mapq
 
-    @patch("baleen.cli.run_pipeline")
+    @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.compute_sequential_modification_probabilities")
-    @patch("baleen.cli.aggregate_all")
     @patch("baleen.cli.write_site_tsv")
-    @patch("baleen.cli.save_results")
     def test_run_creates_output_dir(
         self,
-        mock_save,
         mock_write,
-        mock_agg,
-        mock_hmm,
         mock_validate,
         mock_pipeline,
         sample_args_run,
@@ -235,25 +225,19 @@ class TestCmdRun:
         output_path = tmp_path / "new_output"
         sample_args_run.output_dir = str(output_path)
 
-        mock_pipeline.return_value = ({}, Mock())
+        mock_pipeline.return_value = ({}, [], Mock())
 
         _cmd_run(sample_args_run)
 
         assert output_path.exists()
         assert output_path.is_dir()
 
-    @patch("baleen.cli.run_pipeline")
+    @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.compute_sequential_modification_probabilities")
-    @patch("baleen.cli.aggregate_all")
     @patch("baleen.cli.write_site_tsv")
-    @patch("baleen.cli.save_results")
     def test_run_cuda_flag_handling(
         self,
-        mock_save,
         mock_write,
-        mock_agg,
-        mock_hmm,
         mock_validate,
         mock_pipeline,
         sample_args_run,
@@ -264,7 +248,7 @@ class TestCmdRun:
         sample_args_run.cuda = True
         sample_args_run.no_cuda = False
 
-        mock_pipeline.return_value = ({}, Mock())
+        mock_pipeline.return_value = ({}, [], Mock())
 
         _cmd_run(sample_args_run)
 

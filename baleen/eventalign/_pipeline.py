@@ -416,6 +416,109 @@ def _process_contig(
     return contig, result
 
 
+def _process_contig_streaming(
+    contig: str,
+    contig_idx: int,
+    total_contigs: int,
+    native_bam: Path,
+    native_fastq: Path,
+    native_blow5: Path,
+    ivt_bam: Path,
+    ivt_fastq: Path,
+    ivt_blow5: Path,
+    ref_fasta: Path,
+    native_stats: dict[str, _bam.ContigStats],
+    ivt_stats: dict[str, _bam.ContigStats],
+    tmp_root: Path,
+    use_cuda: Optional[bool],
+    use_open_start: bool,
+    use_open_end: bool,
+    padding: int,
+    rna: bool,
+    kmer_model: Optional[str],
+    extra_f5c_args: Optional[list[str]],
+    min_mapq: int,
+    primary_only: bool,
+    cleanup_temp: bool,
+    num_cuda_streams: int,
+    run_hmm: bool = True,
+    hmm_params: object = None,
+    keep_intermediate: bool = False,
+    intermediate_dir: Optional[Path] = None,
+) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
+    """Process a single contig end-to-end: DTW → HMM → site aggregation.
+
+    Unlike :func:`_process_contig`, this fuses all stages so distance matrices
+    can be garbage-collected before returning.  Only lightweight results are
+    returned to the caller.
+
+    Parameters
+    ----------
+    run_hmm
+        Whether to run HMM smoothing (V3).
+    hmm_params
+        Optional trained HMM parameters.
+    keep_intermediate
+        If True, save the per-contig ``ContigResult`` pickle.
+    intermediate_dir
+        Directory for intermediate files (used when *keep_intermediate* is True).
+
+    Returns
+    -------
+    tuple[str, ContigModificationResult, list[SiteResult]]
+        ``(contig_name, hmm_result, per_site_results)`` — distance matrices
+        are **not** included.
+    """
+    from baleen.eventalign._aggregation import aggregate_contig
+    from baleen.eventalign._hierarchical import compute_sequential_modification_probabilities
+
+    # Stage 1: DTW
+    contig_name, contig_result = _process_contig(
+        contig=contig,
+        contig_idx=contig_idx,
+        total_contigs=total_contigs,
+        native_bam=native_bam,
+        native_fastq=native_fastq,
+        native_blow5=native_blow5,
+        ivt_bam=ivt_bam,
+        ivt_fastq=ivt_fastq,
+        ivt_blow5=ivt_blow5,
+        ref_fasta=ref_fasta,
+        native_stats=native_stats,
+        ivt_stats=ivt_stats,
+        tmp_root=tmp_root,
+        use_cuda=use_cuda,
+        use_open_start=use_open_start,
+        use_open_end=use_open_end,
+        padding=padding,
+        rna=rna,
+        kmer_model=kmer_model,
+        extra_f5c_args=extra_f5c_args,
+        min_mapq=min_mapq,
+        primary_only=primary_only,
+        cleanup_temp=cleanup_temp,
+        num_cuda_streams=num_cuda_streams,
+    )
+
+    # Stage 2: HMM smoothing
+    cmr = compute_sequential_modification_probabilities(
+        contig_result, run_hmm=run_hmm, hmm_params=hmm_params,
+    )
+
+    # Stage 3: Site-level aggregation (no FDR — done globally later)
+    sites = aggregate_contig(cmr)
+
+    # Optionally save intermediate ContigResult
+    if keep_intermediate and intermediate_dir is not None:
+        intermediate_dir.mkdir(parents=True, exist_ok=True)
+        pkl_path = intermediate_dir / f"{contig_name}.pkl"
+        with pkl_path.open("wb") as fh:
+            pickle.dump(contig_result, fh)
+        logger.info("  Saved intermediate: %s", pkl_path)
+
+    return contig_name, cmr, sites
+
+
 def run_pipeline(
     native_bam: PathLike,
     native_fastq: PathLike,
@@ -649,3 +752,240 @@ def run_pipeline(
     logger.info("=" * 60)
 
     return results, metadata
+
+
+def run_pipeline_streaming(
+    native_bam: PathLike,
+    native_fastq: PathLike,
+    native_blow5: PathLike,
+    ivt_bam: PathLike,
+    ivt_fastq: PathLike,
+    ivt_blow5: PathLike,
+    ref_fasta: PathLike,
+    *,
+    min_depth: int = 15,
+    use_cuda: Optional[bool] = None,
+    use_open_start: bool = False,
+    use_open_end: bool = False,
+    padding: int = 1,
+    output_dir: Optional[PathLike] = None,
+    cleanup_temp: bool = True,
+    rna: bool = True,
+    kmer_model: Optional[str] = None,
+    extra_f5c_args: Optional[list[str]] = None,
+    min_mapq: int = 0,
+    primary_only: bool = True,
+    threads: int = 1,
+    num_cuda_streams: int = 16,
+    run_hmm: bool = True,
+    hmm_params: object = None,
+    target_contigs: Optional[list[str]] = None,
+    keep_intermediate: bool = False,
+) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
+    """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
+
+    Each contig is processed end-to-end in a single worker.  Distance matrices
+    are discarded after HMM scoring, so only lightweight results are kept in
+    memory.
+
+    Parameters
+    ----------
+    target_contigs
+        If given, only process these contig(s).  Contigs not passing depth
+        filters are silently skipped.
+    keep_intermediate
+        Save per-contig ``ContigResult`` pickle files under
+        ``output_dir/intermediate/``.
+    run_hmm
+        Whether to run HMM smoothing (V3).
+    hmm_params
+        Optional trained HMM parameters.
+
+    Returns
+    -------
+    tuple[dict[str, ContigModificationResult], list[SiteResult], PipelineMetadata]
+        ``(hmm_results, fdr_corrected_sites, metadata)``
+    """
+    from baleen.eventalign._aggregation import SiteResult, _benjamini_hochberg
+
+    pipeline_t0 = time.perf_counter()
+    logger.info("=" * 60)
+    logger.info("Starting baleen streaming pipeline")
+    logger.info("  native_bam:   %s", native_bam)
+    logger.info("  native_fastq: %s", native_fastq)
+    logger.info("  native_blow5: %s", native_blow5)
+    logger.info("  ivt_bam:      %s", ivt_bam)
+    logger.info("  ivt_fastq:    %s", ivt_fastq)
+    logger.info("  ivt_blow5:    %s", ivt_blow5)
+    logger.info("  ref_fasta:    %s", ref_fasta)
+    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
+                min_depth, use_cuda, rna, padding, threads)
+    logger.info("  run_hmm=%s  target_contigs=%s  keep_intermediate=%s",
+                run_hmm, target_contigs, keep_intermediate)
+    logger.info("=" * 60)
+
+    if threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
+
+    native_bam = Path(native_bam)
+    native_fastq = Path(native_fastq)
+    native_blow5 = Path(native_blow5)
+    ivt_bam = Path(ivt_bam)
+    ivt_fastq = Path(ivt_fastq)
+    ivt_blow5 = Path(ivt_blow5)
+    ref_fasta = Path(ref_fasta)
+
+    # ---- Step 1: f5c version check ----
+    logger.info("[Step 1/5] Checking f5c availability...")
+    f5c_version = _f5c.check_f5c()
+    logger.info("[Step 1/5] f5c version %s OK", f5c_version)
+
+    # ---- Step 2: Indexing ----
+    logger.info("[Step 2/5] Indexing FASTQ and BLOW5 files...")
+    step_t0 = time.perf_counter()
+    _f5c.index_fastq_blow5(native_fastq, native_blow5)
+    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
+    _f5c.index_blow5(native_blow5)
+    _f5c.index_blow5(ivt_blow5)
+    logger.info("[Step 2/5] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
+
+    # ---- Step 3: BAM validation & contig stats ----
+    logger.info("[Step 3/5] Validating BAMs and computing contig statistics...")
+    step_t0 = time.perf_counter()
+    _bam.validate_bam(native_bam)
+    _bam.validate_bam(ivt_bam)
+    native_stats = _bam.get_contig_stats(native_bam, min_mapq=min_mapq, primary_only=primary_only)
+    ivt_stats = _bam.get_contig_stats(ivt_bam, min_mapq=min_mapq, primary_only=primary_only)
+    logger.info("[Step 3/5] BAM stats complete: %d native contigs, %d IVT contigs (%s)",
+                len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
+
+    # ---- Step 4: Contig filtering ----
+    logger.info("[Step 4/5] Filtering contigs (min_depth=%d)...", min_depth)
+    passed_contigs, filter_results = _bam.filter_contigs(
+        native_stats, ivt_stats, min_depth=float(min_depth),
+    )
+
+    # Apply target contig filter
+    if target_contigs is not None:
+        target_set = set(target_contigs)
+        skipped_targets = target_set - set(passed_contigs)
+        if skipped_targets:
+            logger.warning("  Target contigs not passing filters: %s", sorted(skipped_targets))
+        passed_contigs = [c for c in passed_contigs if c in target_set]
+
+    logger.info("[Step 4/5] %d contigs to process", len(passed_contigs))
+
+    metadata = PipelineMetadata(
+        f5c_version=f5c_version,
+        min_depth=min_depth,
+        use_cuda=use_cuda,
+        padding=padding,
+        n_contigs_total=len(filter_results),
+        n_contigs_passed_filter=len(passed_contigs),
+        n_contigs_skipped=len(filter_results) - len(passed_contigs),
+        filter_results=filter_results,
+    )
+
+    hmm_results: dict[str, ContigModificationResult] = {}
+    all_sites: list[SiteResult] = []
+
+    if not passed_contigs:
+        logger.warning("[Step 5/5] No contigs to process; returning empty results.")
+        elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)
+        logger.info("Pipeline finished (no results) in %s", elapsed)
+        return hmm_results, all_sites, metadata
+
+    # ---- Step 5: Per-contig streaming (DTW → HMM → aggregation) ----
+    logger.info("[Step 5/5] Processing %d contigs (streaming: DTW → HMM → aggregation)...",
+                len(passed_contigs))
+    tmp_root = Path(tempfile.mkdtemp(prefix="baleen-streaming-"))
+
+    intermediate_dir = None
+    if keep_intermediate and output_dir is not None:
+        intermediate_dir = Path(output_dir) / "intermediate"
+
+    try:
+        worker_kwargs = dict(
+            native_bam=native_bam,
+            native_fastq=native_fastq,
+            native_blow5=native_blow5,
+            ivt_bam=ivt_bam,
+            ivt_fastq=ivt_fastq,
+            ivt_blow5=ivt_blow5,
+            ref_fasta=ref_fasta,
+            native_stats=native_stats,
+            ivt_stats=ivt_stats,
+            tmp_root=tmp_root,
+            use_cuda=use_cuda,
+            use_open_start=use_open_start,
+            use_open_end=use_open_end,
+            padding=padding,
+            rna=rna,
+            kmer_model=kmer_model,
+            extra_f5c_args=extra_f5c_args,
+            min_mapq=min_mapq,
+            primary_only=primary_only,
+            cleanup_temp=cleanup_temp,
+            num_cuda_streams=num_cuda_streams,
+            run_hmm=run_hmm,
+            hmm_params=hmm_params,
+            keep_intermediate=keep_intermediate,
+            intermediate_dir=intermediate_dir,
+        )
+
+        if threads > 1:
+            logger.info("  Using %d parallel workers (spawn context)", threads)
+            ctx = mp.get_context('spawn')
+            with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
+                futures = {
+                    executor.submit(
+                        _process_contig_streaming,
+                        contig=contig,
+                        contig_idx=idx,
+                        total_contigs=len(passed_contigs),
+                        **worker_kwargs,
+                    ): contig
+                    for idx, contig in enumerate(passed_contigs, 1)
+                }
+                with tqdm(
+                    total=len(passed_contigs),
+                    desc="Pipeline",
+                    unit="contig",
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} contigs [{elapsed}<{remaining}] {postfix}",
+                ) as pbar:
+                    for future in as_completed(futures):
+                        contig_name, cmr, sites = future.result()
+                        hmm_results[contig_name] = cmr
+                        all_sites.extend(sites)
+                        n_pos = len(cmr.position_stats)
+                        pbar.set_postfix_str(f"{contig_name} ({n_pos} pos)")
+                        pbar.update(1)
+        else:
+            for contig_idx, contig in enumerate(passed_contigs, 1):
+                contig_name, cmr, sites = _process_contig_streaming(
+                    contig=contig,
+                    contig_idx=contig_idx,
+                    total_contigs=len(passed_contigs),
+                    **worker_kwargs,
+                )
+                hmm_results[contig_name] = cmr
+                all_sites.extend(sites)
+    finally:
+        if cleanup_temp and tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # ---- FDR correction across all sites ----
+    if all_sites:
+        pvalues = np.array([s.pvalue for s in all_sites], dtype=np.float64)
+        padj = _benjamini_hochberg(pvalues)
+        for site, adj in zip(all_sites, padj):
+            site.padj = float(adj)
+
+    total_positions = sum(len(cmr.position_stats) for cmr in hmm_results.values())
+    pipeline_elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)
+    logger.info("=" * 60)
+    logger.info("Streaming pipeline complete: %d contigs, %d positions, %d sites, %s",
+                len(hmm_results), total_positions, len(all_sites), pipeline_elapsed)
+    logger.info("=" * 60)
+
+    return hmm_results, all_sites, metadata

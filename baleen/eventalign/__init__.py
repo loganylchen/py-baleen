@@ -41,6 +41,7 @@ from baleen.eventalign._pipeline import (
     PositionResult,
     load_results,
     run_pipeline,
+    run_pipeline_streaming,
     save_results,
 )
 from baleen.eventalign._hierarchical import (
@@ -77,6 +78,7 @@ from baleen.eventalign._read_bam import load_read_results, load_read_results_ite
 
 __all__ = [
     "run_pipeline",
+    "run_pipeline_streaming",
     "save_results",
     "load_results",
     "PositionResult",

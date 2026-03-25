@@ -39,7 +39,7 @@ PathLike = Union[str, Path]
 
 def write_read_bam(
     hierarchical_results: dict[str, "ContigModificationResult"],
-    contig_results: dict[str, "ContigResult"],
+    contig_results: dict[str, "ContigResult"] | None,
     ref_fasta: PathLike,
     output_path: PathLike,
 ) -> Path:
@@ -76,22 +76,30 @@ def write_read_bam(
         with pysam.AlignmentFile(str(tmp_unsorted), "wb", header=header) as bam_out:
             for contig in sorted(hierarchical_results.keys()):
                 cmr = hierarchical_results[contig]
-                cr = contig_results.get(contig)
-                if cr is None:
-                    continue
+                cr = contig_results.get(contig) if contig_results is not None else None
 
                 for pos in sorted(cmr.position_stats.keys()):
                     ps = cmr.position_stats[pos]
-                    pr = cr.positions.get(pos)
-                    if pr is None:
-                        continue
 
-                    kmer = pr.reference_kmer
+                    # Get read names and kmer from ContigResult if available,
+                    # otherwise fall back to PositionStats fields.
+                    if cr is not None:
+                        pr = cr.positions.get(pos)
+                        if pr is None:
+                            continue
+                        kmer = pr.reference_kmer
+                        native_names = pr.native_read_names
+                        ivt_names = pr.ivt_read_names
+                    else:
+                        kmer = ps.reference_kmer
+                        native_names = ps.native_read_names
+                        ivt_names = ps.ivt_read_names
+
                     kmer_dna = kmer.replace("U", "T").replace("u", "t")
                     cigar_len = len(kmer)
 
                     # Native reads: indices 0..n_native-1
-                    for i, name in enumerate(pr.native_read_names):
+                    for i, name in enumerate(native_names):
                         p_mod = float(ps.p_mod_hmm[i])
                         if math.isnan(p_mod):
                             continue
@@ -103,11 +111,8 @@ def write_read_bam(
                         n_records += 1
 
                     # IVT reads: indices n_native..n_total-1
-                    # Use len(pr.native_read_names) as offset to stay consistent
-                    # with the same PositionResult being iterated (avoids drift
-                    # between ps.n_native and the actual name list length).
-                    n_native_offset = len(pr.native_read_names)
-                    for j, name in enumerate(pr.ivt_read_names):
+                    n_native_offset = len(native_names)
+                    for j, name in enumerate(ivt_names):
                         p_mod = float(ps.p_mod_hmm[n_native_offset + j])
                         if math.isnan(p_mod):
                             continue
