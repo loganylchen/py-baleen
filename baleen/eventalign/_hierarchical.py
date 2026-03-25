@@ -1183,6 +1183,14 @@ def compute_sequential_modification_probabilities(
         ps.p_mod_knn[:] = cal.probabilities
         _mod_pbar.update(1)
 
+    # Update default p_mod_hmm to match emission_source (was V2 p_mod_raw).
+    # Reads not covered by HMM (short trajectories) keep this fallback,
+    # so it should be consistent with what long-trajectory reads are scored
+    # against.
+    for pos in sorted_positions:
+        ps = position_stats[pos]
+        ps.p_mod_hmm[:] = getattr(ps, emission_source)[:]
+
     _mod_pbar.set_postfix_str("V3: HMM smoothing")
     _mod_pbar.close()
 
