@@ -64,15 +64,26 @@ collapsing Beta to Dirac delta.
 
 ### Fix 7: `_contig_pooled_mixture_em` return type (TODO #4)
 **File:** `baleen/eventalign/_hierarchical.py`
-**Status:** ⬚ TODO
+**Fix:** Annotation corrected to `tuple[float | None, float | None]`.
+**Status:** ✅ Fixed (2026-03-25)
 
 ### Fix 8: CI has no test step (TODO #15)
 **File:** `.github/workflows/docker.yml`
-**Status:** ⬚ TODO
+**Fix:** Added `test` job (Python 3.11, CPU-only install, pytest) that gates
+both Docker builds via `needs: test`. Also fixed `latest` tag to trigger on
+`refs/heads/dev` instead of `refs/heads/main` (TODO #17).
+**Status:** ✅ Fixed (2026-03-25)
 
 ### Fix 9: Dependencies have no version constraints (TODO #18)
-**Files:** `pyproject.toml`, `setup.py`
-**Status:** ⬚ TODO
+**File:** `pyproject.toml`
+**Fix:** Added minimum versions: numpy>=1.24, scipy>=1.9, tslearn>=0.6,
+pysam>=0.21, tqdm>=4.60, pandas>=1.5. Added `[test]` extra with pytest>=7.0.
+Added `[tool.pytest.ini_options]` with `testpaths` (TODO #19).
+**Status:** ✅ Fixed (2026-03-25)
 
 ### Fix 10: No end-to-end integration test (TODO #26)
-**Status:** ⬚ TODO
+**File:** `tests/test_integration.py`
+**Fix:** 4 tests covering: single-contig pipeline, multi-contig FDR,
+BAM output without ContigResult (streaming path), and modified-vs-unmodified
+signal separation.
+**Status:** ✅ Fixed (2026-03-25)
