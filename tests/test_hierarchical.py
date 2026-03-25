@@ -596,8 +596,9 @@ class TestFullPipeline:
             modified_positions={2}, seed=55,
         )
         result = compute_sequential_modification_probabilities(cr, run_hmm=False)
+        # With HMM off, p_mod_hmm falls back to emission_source (default: p_mod_knn)
         for ps in result.position_stats.values():
-            np.testing.assert_array_equal(ps.p_mod_hmm, ps.p_mod_raw)
+            np.testing.assert_array_equal(ps.p_mod_hmm, ps.p_mod_knn)
 
     def test_coverage_classes(self):
         positions = {}
