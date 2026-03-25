@@ -410,7 +410,7 @@ def _contig_pooled_mixture_em(
     *,
     max_iter: int = 200,
     tol: float = 1e-6,
-) -> tuple[float, float]:
+) -> tuple[float | None, float | None]:
     """Fit a global two-component mixture across the entire contig.
 
     Concatenates native z-scores from all positions and fits a single

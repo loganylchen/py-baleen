@@ -7,10 +7,23 @@ name = "baleen"
 version = "0.1.0"
 description = "CUDA-accelerated DTW and nanopore signal analysis pipeline"
 requires-python = ">=3.9"
-dependencies = ["numpy", "tslearn", "pysam", "scipy", "tqdm", "pandas"]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.9",
+    "tslearn>=0.6",
+    "pysam>=0.21",
+    "tqdm>=4.60",
+    "pandas>=1.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
 
 [project.scripts]
 baleen = "baleen.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["baleen*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
