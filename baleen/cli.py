@@ -31,6 +31,7 @@ from baleen.eventalign import (
     load_hmm_params,
     load_results,
     run_pipeline,
+    run_pipeline_streaming,
     save_results,
     write_site_tsv,
 )
@@ -73,6 +74,16 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     pipe.add_argument(
         "--threads", type=int, default=1,
         help="Number of parallel workers for contig processing (default: 1)",
+    )
+
+    pipe.add_argument(
+        "--target", type=str, default=None,
+        help="Target contig(s): a contig name, comma-separated list, "
+             "or path to file with one contig per line",
+    )
+    pipe.add_argument(
+        "--keep-intermediate", action="store_true", default=False,
+        help="Save per-contig DTW intermediate results (ContigResult files)",
     )
 
     # DTW options
@@ -194,12 +205,25 @@ def _cmd_run(args: argparse.Namespace) -> None:
     elif args.no_cuda:
         use_cuda = False
 
-    # Step 1: Run DTW pipeline
-    logger = logging.getLogger("baleen")
-    logger.info("Step 1/4: Running DTW pipeline...")
-    t0 = time.perf_counter()
+    # Parse --target
+    target_contigs = None
+    if args.target:
+        target_path = Path(args.target)
+        if target_path.is_file():
+            target_contigs = [l.strip() for l in target_path.read_text().splitlines() if l.strip()]
+        else:
+            target_contigs = [c.strip() for c in args.target.split(',')]
 
-    contig_results, metadata = run_pipeline(
+    # Load HMM params if provided
+    logger = logging.getLogger("baleen")
+    hmm_params = None
+    if args.hmm_params:
+        hmm_params = load_hmm_params(args.hmm_params)
+        logger.info("Loaded HMM params: %s (%d-state %s)",
+                    args.hmm_params, hmm_params.n_states, hmm_params.mode)
+
+    # Run streaming pipeline (DTW → HMM → aggregation fused per contig)
+    hmm_results, sites, metadata = run_pipeline_streaming(
         native_bam=args.native_bam,
         native_fastq=args.native_fastq,
         native_blow5=args.native_blow5,
@@ -219,63 +243,22 @@ def _cmd_run(args: argparse.Namespace) -> None:
         min_mapq=args.min_mapq,
         primary_only=not args.no_primary_only,
         threads=args.threads,
+        run_hmm=not args.no_hmm,
+        hmm_params=hmm_params,
+        target_contigs=target_contigs,
+        keep_intermediate=args.keep_intermediate,
     )
 
-    dtw_time = time.perf_counter() - t0
-    logger.info("DTW pipeline done in %.1fs", dtw_time)
-
-    # Save raw results
-    pkl_path = output_dir / "pipeline_results.pkl"
-    save_results(contig_results, metadata, pkl_path)
-
-    # Step 2: HMM smoothing
-    if args.no_hmm:
-        logger.info("Step 2/4: HMM skipped (--no-hmm)")
-        hmm_results = {}
-        for contig, cr in contig_results.items():
-            hmm_results[contig] = compute_sequential_modification_probabilities(
-                cr, run_hmm=False,
-            )
-    else:
-        logger.info("Step 2/4: Running HMM pipeline...")
-        t0 = time.perf_counter()
-
-        hmm_params = None
-        if args.hmm_params:
-            hmm_params = load_hmm_params(args.hmm_params)
-            logger.info("  Loaded HMM params: %s (%d-state %s)",
-                        args.hmm_params, hmm_params.n_states, hmm_params.mode)
-
-        hmm_results = {}
-        for contig, cr in contig_results.items():
-            hmm_results[contig] = compute_sequential_modification_probabilities(
-                cr, hmm_params=hmm_params,
-            )
-
-        hmm_time = time.perf_counter() - t0
-        logger.info("HMM pipeline done in %.1fs", hmm_time)
-
-    # Step 3: Site-level aggregation
-    logger.info("Step 3/4: Aggregating site-level results...")
-    t0 = time.perf_counter()
-
-    sites = aggregate_all(hmm_results)
+    # Write outputs
     tsv_path = output_dir / "site_results.tsv"
     write_site_tsv(sites, tsv_path)
 
-    agg_time = time.perf_counter() - t0
-    logger.info("Aggregation done in %.1fs", agg_time)
-
-    # Step 4: Write per-read BAM
+    bam_path = None
     if not args.no_read_bam:
-        logger.info("Step 4/4: Writing per-read BAM...")
-        t0 = time.perf_counter()
         bam_path = output_dir / "read_results.bam"
-        write_read_bam(hmm_results, contig_results, args.ref, bam_path)
-        bam_time = time.perf_counter() - t0
-        logger.info("Per-read BAM done in %.1fs", bam_time)
-    else:
-        bam_path = None
+        t0 = time.perf_counter()
+        write_read_bam(hmm_results, None, args.ref, bam_path)
+        logger.info("Per-read BAM done in %.1fs", time.perf_counter() - t0)
 
     # Summary
     n_sig = sum(1 for s in sites if s.padj < 0.05)
@@ -288,7 +271,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
     logger.info("  Site results:      %s", tsv_path)
     if bam_path:
         logger.info("  Read results:      %s", bam_path)
-    logger.info("  Raw results:       %s", pkl_path)
+    if args.keep_intermediate:
+        logger.info("  Intermediate:      %s", output_dir / "intermediate")
     logger.info("=" * 60)
 
 
