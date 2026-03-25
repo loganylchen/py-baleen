@@ -66,6 +66,9 @@ from baleen.eventalign._probability import (
     AlgorithmName,
     ModificationProbabilities,
     compute_modification_probabilities,
+    distance_to_ivt,
+    knn_ivt_purity,
+    mds_gmm,
 )
 from baleen.eventalign._aggregation import (
     SiteResult,
@@ -91,6 +94,9 @@ __all__ = [
     "AlgorithmName",
     "ModificationProbabilities",
     "compute_modification_probabilities",
+    "distance_to_ivt",
+    "knn_ivt_purity",
+    "mds_gmm",
     "CoverageClass",
     "ContigModificationResult",
     "compute_sequential_modification_probabilities",
