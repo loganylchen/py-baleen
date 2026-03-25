@@ -443,6 +443,7 @@ def _score_knn_ivt_purity(
     n_native: int,
     n_ivt: int,
     k: Optional[int] = None,
+    weighted: bool = False,
 ) -> NDArray[np.float64]:
     """Compute per-read kNN IVT-purity scores.
 
@@ -450,8 +451,13 @@ def _score_knn_ivt_purity(
     Higher score = fewer IVT neighbors = more likely modified.
     Returns values in [0, 1].
 
-    Uses unweighted neighbor counting for better score spread,
-    then applies rank-based normalization to ensure scores span [0, 1].
+    Parameters
+    ----------
+    weighted : bool
+        If True (Fix B), weight each neighbor by 1/distance instead of
+        uniform counting.  Closer neighbors have more influence.
+
+    Uses rank-based normalization to ensure scores span [0, 1].
     """
     n_total = n_native + n_ivt
     if k is None:
@@ -468,9 +474,17 @@ def _score_knn_ivt_purity(
         dists[i] = np.inf  # exclude self
         neighbor_idx = np.argpartition(dists, k)[:k]
 
-        # Unweighted IVT fraction among k neighbors
-        ivt_count = int(np.sum(is_ivt[neighbor_idx]))
-        raw_scores[i] = 1.0 - ivt_count / k
+        if weighted:
+            # Distance-weighted: closer neighbors count more
+            neighbor_dists = dists[neighbor_idx]
+            weights = 1.0 / np.maximum(neighbor_dists, _EPS)
+            ivt_weight = float(np.sum(weights[is_ivt[neighbor_idx]]))
+            total_weight = float(np.sum(weights))
+            raw_scores[i] = 1.0 - ivt_weight / max(total_weight, _EPS)
+        else:
+            # Unweighted IVT fraction among k neighbors
+            ivt_count = int(np.sum(is_ivt[neighbor_idx]))
+            raw_scores[i] = 1.0 - ivt_count / k
 
     # Rank-based normalization: map to [0, 1] using ranks
     # This ensures good spread regardless of the raw score distribution

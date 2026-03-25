@@ -986,6 +986,8 @@ def compute_sequential_modification_probabilities(
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
     emission_source: str = "p_mod_knn",
+    consistent_fallback: bool = True,
+    knn_weighted: bool = False,
 ) -> ContigModificationResult:
     """Run the full V1→V2→V3 hierarchical pipeline on a contig.
 
@@ -1017,6 +1019,13 @@ def compute_sequential_modification_probabilities(
         Which per-read score field to use as HMM emissions.
         ``"p_mod_knn"`` (default) uses kNN IVT-purity scores;
         ``"p_mod_raw"`` uses V2 mixture posteriors.
+    consistent_fallback : bool
+        If True (default, Fix A), set the short-trajectory fallback to
+        *emission_source* instead of V2 ``p_mod_raw``.  Set to False
+        to reproduce old behavior.
+    knn_weighted : bool
+        If True (Fix B), use distance-weighted kNN scoring instead of
+        unweighted counting.
 
     Returns
     -------
@@ -1174,6 +1183,7 @@ def compute_sequential_modification_probabilities(
 
         raw_knn = _score_knn_ivt_purity(
             pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
+            weighted=knn_weighted,
         )
 
         ivt_mask = np.zeros(n_total, dtype=bool)
@@ -1183,13 +1193,13 @@ def compute_sequential_modification_probabilities(
         ps.p_mod_knn[:] = cal.probabilities
         _mod_pbar.update(1)
 
-    # Update default p_mod_hmm to match emission_source (was V2 p_mod_raw).
-    # Reads not covered by HMM (short trajectories) keep this fallback,
-    # so it should be consistent with what long-trajectory reads are scored
-    # against.
-    for pos in sorted_positions:
-        ps = position_stats[pos]
-        ps.p_mod_hmm[:] = getattr(ps, emission_source)[:]
+    # Fix A: update short-trajectory fallback to match emission_source.
+    # Without this, short-trajectory reads keep V2 p_mod_raw while long
+    # trajectories are scored against kNN — a calibration mismatch.
+    if consistent_fallback:
+        for pos in sorted_positions:
+            ps = position_stats[pos]
+            ps.p_mod_hmm[:] = getattr(ps, emission_source)[:]
 
     _mod_pbar.set_postfix_str("V3: HMM smoothing")
     _mod_pbar.close()
