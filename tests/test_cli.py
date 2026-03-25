@@ -47,6 +47,7 @@ def sample_args_run():
         no_read_bam=True,
         target=None,
         keep_intermediate=False,
+        f5c_threads=None,
     )
     return args
 
