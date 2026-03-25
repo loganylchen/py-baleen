@@ -159,9 +159,9 @@ def _fit_beta(x: NDArray[np.float64]) -> tuple[float, float]:
     m = float(np.mean(x_safe))
     v = float(np.var(x_safe, ddof=0))
     v = max(v, 1e-10)
-    # Method-of-moments
+    # Method-of-moments (capped to prevent Dirac-delta collapse)
     common = m * (1 - m) / v - 1.0
-    common = max(common, 2.0)  # ensure a, b > 0
+    common = max(min(common, 1000.0), 2.0)
     a = m * common
     b = (1 - m) * common
     return max(a, 0.1), max(b, 0.1)
@@ -226,10 +226,14 @@ def _calibrate_normal(
             max(float(np.sum(r * (native_scores - mu1_new) ** 2)) / r_sum, _MIN_SIGMA**2)
         )
 
-        if abs(pi_new - pi) < tol and abs(mu1_new - mu1) < tol:
-            pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
-            break
+        converged = (
+            abs(pi_new - pi) < tol
+            and abs(mu1_new - mu1) < tol
+            and abs(sigma1_new - sigma1) < tol
+        )
         pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+        if converged:
+            break
 
     # BIC gate (log-space to avoid underflow)
     n = len(native_scores)
@@ -316,14 +320,18 @@ def _calibrate_beta(
         w_var = float(np.sum(r * (native_scores - w_mean) ** 2)) / r_sum
         w_var = max(w_var, 1e-10)
         common = w_mean * (1 - w_mean) / w_var - 1.0
-        common = max(common, 2.0)
+        common = max(min(common, 1000.0), 2.0)
         a1_new = max(w_mean * common, 0.1)
         b1_new = max((1 - w_mean) * common, 0.1)
 
-        if abs(pi_new - pi) < tol:
-            pi, a1, b1 = pi_new, a1_new, b1_new
-            break
+        converged = (
+            abs(pi_new - pi) < tol
+            and abs(a1_new - a1) < tol
+            and abs(b1_new - b1) < tol
+        )
         pi, a1, b1 = pi_new, a1_new, b1_new
+        if converged:
+            break
 
     # BIC gate (log-space to avoid underflow)
     n = len(native_scores)
@@ -579,20 +587,24 @@ def _mvn_pdf(
     mu: NDArray[np.float64],
     cov: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    """Multivariate Normal PDF."""
+    """Multivariate Normal PDF (log-space norm factor to avoid det overflow)."""
     d = len(mu)
     diff = X - mu
     try:
         cov_inv = np.linalg.inv(cov)
-        det = np.linalg.det(cov)
+        sign, logdet = np.linalg.slogdet(cov)
     except np.linalg.LinAlgError:
         cov_reg = cov + np.eye(d) * 0.01
         cov_inv = np.linalg.inv(cov_reg)
-        det = np.linalg.det(cov_reg)
-    det = max(det, _EPS)
-    norm = 1.0 / (math.sqrt((2 * math.pi) ** d * det))
+        sign, logdet = np.linalg.slogdet(cov_reg)
+    # If det is negative or zero, regularise
+    if sign <= 0:
+        cov_reg = cov + np.eye(d) * 0.01
+        cov_inv = np.linalg.inv(cov_reg)
+        _, logdet = np.linalg.slogdet(cov_reg)
+    log_norm = -0.5 * (d * math.log(2 * math.pi) + logdet)
     exponent = -0.5 * np.sum(diff @ cov_inv * diff, axis=1)
-    return norm * np.exp(exponent)
+    return np.exp(log_norm + exponent)
 
 
 def mds_gmm(
