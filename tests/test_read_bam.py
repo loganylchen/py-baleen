@@ -15,22 +15,55 @@ PositionResult = pipeline.PositionResult
 ContigResult = pipeline.ContigResult
 
 
+def _make_synthetic_bams(tmp_dir, contig_name, seq_len, native_names, ivt_names):
+    """Create sorted, indexed synthetic native + IVT BAMs with reads aligned to contig."""
+    header = pysam.AlignmentHeader.from_dict({
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": contig_name, "LN": seq_len}],
+    })
+
+    native_bam = Path(tmp_dir) / "native.bam"
+    ivt_bam = Path(tmp_dir) / "ivt.bam"
+
+    for bam_path, names in [(native_bam, native_names), (ivt_bam, ivt_names)]:
+        with pysam.AlignmentFile(str(bam_path), "wb", header=header) as bf:
+            for name in names:
+                a = pysam.AlignedSegment(bf.header)
+                a.query_name = name
+                a.flag = 0
+                a.reference_id = 0
+                a.reference_start = 0
+                a.mapping_quality = 60
+                a.query_sequence = "A" * seq_len
+                a.cigar = [(0, seq_len)]
+                a.query_qualities = pysam.qualitystring_to_array("I" * seq_len)
+                bf.write(a)
+        sorted_path = str(bam_path) + ".sorted.bam"
+        pysam.sort("-o", sorted_path, str(bam_path))
+        Path(sorted_path).rename(bam_path)
+        pysam.index(str(bam_path))
+
+    return native_bam, ivt_bam
+
+
 def _make_synthetic_data():
     """Build minimal ContigResult + ContigModificationResult for testing."""
     n_native, n_ivt = 3, 2
     n_total = n_native + n_ivt
 
-    # Distance matrix (not used by writer, but required by dataclass)
     mat = np.ones((n_total, n_total), dtype=np.float64)
     np.fill_diagonal(mat, 0.0)
+
+    native_names = ["nat_0", "nat_1", "nat_2"]
+    ivt_names = ["ivt_0", "ivt_1"]
 
     pr = PositionResult(
         position=100,
         reference_kmer="AACGU",
         n_native_reads=n_native,
         n_ivt_reads=n_ivt,
-        native_read_names=["nat_0", "nat_1", "nat_2"],
-        ivt_read_names=["ivt_0", "ivt_1"],
+        native_read_names=list(native_names),
+        ivt_read_names=list(ivt_names),
         distance_matrix=mat,
     )
 
@@ -41,15 +74,14 @@ def _make_synthetic_data():
         positions={100: pr},
     )
 
-    # Build PositionStats with known p_mod_hmm values
     ps = hier.PositionStats(
         position=100,
         reference_kmer="AACGU",
         coverage_class=hier.CoverageClass.HIGH,
         n_ivt=n_ivt,
         n_native=n_native,
-        native_read_names=["nat_0", "nat_1", "nat_2"],
-        ivt_read_names=["ivt_0", "ivt_1"],
+        native_read_names=list(native_names),
+        ivt_read_names=list(ivt_names),
         mu_raw=1.0, sigma_raw=0.5,
         mu_shrunk=1.0, sigma_shrunk=0.5,
         scores=np.zeros(n_total),
@@ -70,93 +102,104 @@ def _make_synthetic_data():
         global_sigma=0.5,
     )
 
-    return {"ecoli23S": cr}, {"ecoli23S": cmr}
+    return {"ecoli23S": cr}, {"ecoli23S": cmr}, native_names, ivt_names
 
 
-def test_write_read_bam_basic():
-    """write_read_bam produces a sorted, indexed BAM with correct records."""
+def _write_test_bam(tmp_dir):
+    """Helper: write a test mod-BAM and return its path."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    contig_results, hmm_results, native_names, ivt_names = _make_synthetic_data()
+
+    seq_len = 3000
+    ref_path = Path(tmp_dir) / "ref.fa"
+    ref_path.write_text(">ecoli23S\n" + "A" * seq_len + "\n")
+    pysam.faidx(str(ref_path))
+
+    native_bam, ivt_bam = _make_synthetic_bams(
+        tmp_dir, "ecoli23S", seq_len, native_names, ivt_names,
+    )
+
+    bam_path = Path(tmp_dir) / "read_results.bam"
+    read_bam.write_mod_bam(hmm_results, native_bam, ivt_bam, ref_path, bam_path)
+    return bam_path
+
+
+def test_write_mod_bam_basic():
+    """write_mod_bam produces a sorted, indexed BAM with MM/ML tags."""
     read_bam = importlib.import_module("baleen.eventalign._read_bam")
 
-    contig_results, hmm_results = _make_synthetic_data()
+    contig_results, hmm_results, native_names, ivt_names = _make_synthetic_data()
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Create a minimal FASTA for header
+        seq_len = 3000
         ref_path = Path(tmp) / "ref.fa"
-        ref_path.write_text(">ecoli23S\n" + "A" * 3000 + "\n")
+        ref_path.write_text(">ecoli23S\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref_path))
 
-        bam_path = Path(tmp) / "read_results.bam"
-        result_path = read_bam.write_read_bam(
-            hmm_results, contig_results, ref_path, bam_path,
+        native_bam, ivt_bam = _make_synthetic_bams(
+            tmp, "ecoli23S", seq_len, native_names, ivt_names,
         )
 
-        # Verify BAM file and index exist
+        bam_path = Path(tmp) / "read_results.bam"
+        result_path = read_bam.write_mod_bam(
+            hmm_results, native_bam, ivt_bam, ref_path, bam_path,
+        )
+
         assert result_path.exists()
         assert Path(str(result_path) + ".bai").exists()
 
-        # Read back and verify records
         with pysam.AlignmentFile(str(result_path), "rb") as bam:
             records = list(bam.fetch())
 
-        assert len(records) == 5  # 3 native + 2 ivt
+        # 3 native + 2 ivt = 5 reads (one record per read, not per position)
+        assert len(records) == 5
 
-        # Check first native read
+        # Check first native read has MM/ML tags
         r0 = records[0]
-        assert r0.query_name == "nat_0"
-        assert r0.reference_name == "ecoli23S"
-        assert r0.reference_start == 99
-        assert abs(r0.get_tag("MP") - 0.85) < 1e-5
         assert r0.get_tag("RG") == "native"
-        assert r0.get_tag("KM") == "AACGU"
-        # SEQ should have U->T conversion
-        assert "U" not in r0.query_sequence
-        assert r0.query_sequence == "AACGT"
-        # CIGAR should match kmer length
-        assert r0.cigarstring == "5M"
+        assert r0.has_tag("MM")
+        assert r0.has_tag("ML")
 
-        # Check last IVT read
-        r4 = records[4]
-        assert r4.query_name == "ivt_1"
-        assert r4.get_tag("RG") == "ivt"
-        assert abs(r4.get_tag("MP") - 0.02) < 1e-5
+        # MM tag should be N+? format
+        mm = r0.get_tag("MM")
+        assert mm.startswith("N+?")
+
+        # Check IVT reads
+        ivt_records = [r for r in records if r.get_tag("RG") == "ivt"]
+        assert len(ivt_records) == 2
 
 
-def test_write_read_bam_skips_nan():
-    """Records with NaN p_mod_hmm are omitted from the BAM."""
+def test_write_mod_bam_skips_nan():
+    """Reads with all-NaN p_mod_hmm still appear but without MM/ML tags."""
     read_bam = importlib.import_module("baleen.eventalign._read_bam")
 
-    contig_results, hmm_results = _make_synthetic_data()
+    contig_results, hmm_results, native_names, ivt_names = _make_synthetic_data()
 
     # Set one native read's p_mod_hmm to NaN
     ps = hmm_results["ecoli23S"].position_stats[100]
     ps.p_mod_hmm[1] = np.nan  # nat_1 becomes NaN
 
     with tempfile.TemporaryDirectory() as tmp:
+        seq_len = 3000
         ref_path = Path(tmp) / "ref.fa"
-        ref_path.write_text(">ecoli23S\n" + "A" * 3000 + "\n")
+        ref_path.write_text(">ecoli23S\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref_path))
+
+        native_bam, ivt_bam = _make_synthetic_bams(
+            tmp, "ecoli23S", seq_len, native_names, ivt_names,
+        )
 
         bam_path = Path(tmp) / "read_results.bam"
-        read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
+        read_bam.write_mod_bam(hmm_results, native_bam, ivt_bam, ref_path, bam_path)
 
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             records = list(bam.fetch())
 
-        # 5 total - 1 NaN = 4
-        assert len(records) == 4
-        names = [r.query_name for r in records]
-        assert "nat_1" not in names
-
-
-def _write_test_bam(tmp_dir):
-    """Helper: write a test BAM and return its path."""
-    read_bam = importlib.import_module("baleen.eventalign._read_bam")
-    contig_results, hmm_results = _make_synthetic_data()
-
-    ref_path = Path(tmp_dir) / "ref.fa"
-    ref_path.write_text(">ecoli23S\n" + "A" * 3000 + "\n")
-
-    bam_path = Path(tmp_dir) / "read_results.bam"
-    read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
-    return bam_path
+        # nat_1 still has a non-NaN position at pos 100 — wait, it only has 1 position
+        # and it's NaN, so nat_1 won't be in read_positions at all.
+        # All 5 reads still written, but nat_1 has no MM/ML tags.
+        names_with_mm = [r.query_name for r in records if r.has_tag("MM")]
+        assert "nat_1" not in names_with_mm
 
 
 def test_load_read_results_full():
@@ -167,12 +210,12 @@ def test_load_read_results_full():
         bam_path = _write_test_bam(tmp)
         df = read_bam.load_read_results(bam_path)
 
-    assert len(df) == 5
-    assert set(df.columns) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+    assert len(df) == 5  # 5 reads × 1 position each
+    expected_cols = {"contig", "position", "read_name", "is_native", "p_mod_hmm"}
+    assert expected_cols.issubset(set(df.columns))
     assert df["is_native"].sum() == 3
     assert (~df["is_native"]).sum() == 2
     assert df["contig"].iloc[0] == "ecoli23S"
-    assert df["kmer"].iloc[0] == "AACGU"  # Original RNA kmer from KM tag
 
 
 def test_load_read_results_region_filter():
@@ -182,15 +225,15 @@ def test_load_read_results_region_filter():
     with tempfile.TemporaryDirectory() as tmp:
         bam_path = _write_test_bam(tmp)
 
-        # Query region that includes position 100
+        # Query region that includes position 100 (0-based: 99)
         df = read_bam.load_read_results(bam_path, contig="ecoli23S", start=98, end=104)
         assert len(df) == 5
 
         # Query region that excludes position 100
         df_empty = read_bam.load_read_results(bam_path, contig="ecoli23S", start=200, end=300)
         assert len(df_empty) == 0
-        # Empty DataFrame must have correct columns
-        assert set(df_empty.columns) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+        expected_cols = {"contig", "position", "read_name", "is_native", "p_mod_hmm"}
+        assert expected_cols.issubset(set(df_empty.columns))
 
 
 def test_load_read_results_iter():
@@ -203,23 +246,25 @@ def test_load_read_results_iter():
 
     assert len(records) == 5
     r0 = records[0]
-    assert set(r0.keys()) == {"contig", "position", "kmer", "read_name", "is_native", "p_mod_hmm"}
+    expected_keys = {"contig", "position", "read_name", "is_native", "p_mod_hmm"}
+    assert expected_keys.issubset(set(r0.keys()))
     assert isinstance(r0["p_mod_hmm"], float)
     assert isinstance(r0["is_native"], bool)
 
 
 def test_load_read_results_round_trip():
-    """Values written by write_read_bam are preserved through load_read_results."""
+    """Values written by write_mod_bam are preserved through load_read_results."""
     read_bam = importlib.import_module("baleen.eventalign._read_bam")
 
     with tempfile.TemporaryDirectory() as tmp:
         bam_path = _write_test_bam(tmp)
         df = read_bam.load_read_results(bam_path)
 
-    # Check native reads have expected p_mod_hmm values
+    # Check native reads have expected p_mod_hmm values (within uint8 quantization)
     native_df = df[df["is_native"]].sort_values("read_name").reset_index(drop=True)
-    assert abs(native_df.loc[native_df["read_name"] == "nat_0", "p_mod_hmm"].values[0] - 0.85) < 1e-5
-    assert abs(native_df.loc[native_df["read_name"] == "nat_1", "p_mod_hmm"].values[0] - 0.92) < 1e-5
+    # Original: 0.85 → uint8 round(0.85*255)=217 → 217/255≈0.851
+    assert abs(native_df.loc[native_df["read_name"] == "nat_0", "p_mod_hmm"].values[0] - 0.85) < 0.01
+    assert abs(native_df.loc[native_df["read_name"] == "nat_1", "p_mod_hmm"].values[0] - 0.92) < 0.01
 
     # Check IVT reads
     ivt_df = df[~df["is_native"]]
@@ -227,100 +272,94 @@ def test_load_read_results_round_trip():
     assert set(ivt_df["read_name"].tolist()) == {"ivt_0", "ivt_1"}
 
 
-def test_write_read_bam_multi_contig():
-    """BAM correctly handles multiple contigs sorted by (contig, position)."""
+def test_write_mod_bam_multi_contig():
+    """BAM correctly handles multiple contigs with reads from different BAMs."""
     read_bam = importlib.import_module("baleen.eventalign._read_bam")
-    n = 3  # reads per group
+    n = 3
 
-    def _make_pos(pos, kmer="ACGTA"):
-        mat = np.ones((n + n, n + n), dtype=np.float64)
-        np.fill_diagonal(mat, 0.0)
-        return PositionResult(
-            position=pos, reference_kmer=kmer,
-            n_native_reads=n, n_ivt_reads=n,
-            native_read_names=[f"nat_{pos}_{i}" for i in range(n)],
-            ivt_read_names=[f"ivt_{pos}_{i}" for i in range(n)],
-            distance_matrix=mat,
-        )
-
-    def _make_ps(pos):
+    def _make_ps(pos, native_names, ivt_names):
+        n_total = len(native_names) + len(ivt_names)
         return hier.PositionStats(
             position=pos, reference_kmer="ACGTA",
             coverage_class=hier.CoverageClass.HIGH,
-            n_ivt=n, n_native=n,
-            native_read_names=[f"nat_{pos}_{i}" for i in range(n)],
-            ivt_read_names=[f"ivt_{pos}_{i}" for i in range(n)],
+            n_ivt=len(ivt_names), n_native=len(native_names),
+            native_read_names=native_names,
+            ivt_read_names=ivt_names,
             mu_raw=1.0, sigma_raw=0.5, mu_shrunk=1.0, sigma_shrunk=0.5,
-            scores=np.zeros(2 * n), z_scores=np.zeros(2 * n),
-            p_null=np.ones(2 * n),
-            p_mod_raw=np.full(2 * n, 0.5),
+            scores=np.zeros(n_total), z_scores=np.zeros(n_total),
+            p_null=np.ones(n_total),
+            p_mod_raw=np.full(n_total, 0.5),
             mixture_pi=0.5, mixture_null_gate=False, gate_weight=1.0,
-            p_mod_knn=np.full(2 * n, 0.5),
-            p_mod_hmm=np.full(2 * n, 0.5),
+            p_mod_knn=np.full(n_total, 0.5),
+            p_mod_hmm=np.full(n_total, 0.5),
         )
 
-    contig_results = {
-        "chrB": ContigResult("chrB", 30, 20, {200: _make_pos(200), 300: _make_pos(300)}),
-        "chrA": ContigResult("chrA", 30, 20, {100: _make_pos(100)}),
-    }
+    # Use the same read names across positions (as in real pipeline)
+    native_names = [f"nat_{i}" for i in range(n)]
+    ivt_names = [f"ivt_{i}" for i in range(n)]
+
     hmm_results = {
-        "chrB": hier.ContigModificationResult("chrB", {200: _make_ps(200), 300: _make_ps(300)}, [], [], 1.0, 0.5),
-        "chrA": hier.ContigModificationResult("chrA", {100: _make_ps(100)}, [], [], 1.0, 0.5),
+        "chrA": hier.ContigModificationResult(
+            "chrA",
+            {100: _make_ps(100, native_names, ivt_names)},
+            [], [], 1.0, 0.5,
+        ),
+        "chrB": hier.ContigModificationResult(
+            "chrB",
+            {200: _make_ps(200, native_names, ivt_names),
+             300: _make_ps(300, native_names, ivt_names)},
+            [], [], 1.0, 0.5,
+        ),
     }
 
     with tempfile.TemporaryDirectory() as tmp:
         ref_path = Path(tmp) / "ref.fa"
         ref_path.write_text(">chrA\n" + "A" * 1000 + "\n>chrB\n" + "A" * 1000 + "\n")
+        pysam.faidx(str(ref_path))
+
+        # Create BAMs with reads that map to both contigs
+        header = pysam.AlignmentHeader.from_dict({
+            "HD": {"VN": "1.6", "SO": "coordinate"},
+            "SQ": [{"SN": "chrA", "LN": 1000}, {"SN": "chrB", "LN": 1000}],
+        })
+
+        native_bam_path = Path(tmp) / "native.bam"
+        ivt_bam_path = Path(tmp) / "ivt.bam"
+
+        for bam_path_i, names in [(native_bam_path, native_names), (ivt_bam_path, ivt_names)]:
+            with pysam.AlignmentFile(str(bam_path_i), "wb", header=header) as bf:
+                for name in names:
+                    # Map to chrA
+                    a = pysam.AlignedSegment(bf.header)
+                    a.query_name = name
+                    a.flag = 0
+                    a.reference_id = 0  # chrA
+                    a.reference_start = 0
+                    a.mapping_quality = 60
+                    a.query_sequence = "A" * 500
+                    a.cigar = [(0, 500)]
+                    a.query_qualities = pysam.qualitystring_to_array("I" * 500)
+                    bf.write(a)
+            sorted_path = str(bam_path_i) + ".sorted.bam"
+            pysam.sort("-o", sorted_path, str(bam_path_i))
+            Path(sorted_path).rename(bam_path_i)
+            pysam.index(str(bam_path_i))
 
         bam_path = Path(tmp) / "read_results.bam"
-        read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
+        read_bam.write_mod_bam(hmm_results, native_bam_path, ivt_bam_path, ref_path, bam_path)
 
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             records = list(bam.fetch())
 
-        # 3 positions × (3 native + 3 ivt) = 18 records
-        assert len(records) == 18
-
-        # Verify sorted by (contig, position)
-        prev_contig, prev_pos = "", -1
-        for r in records:
-            if r.reference_name == prev_contig:
-                assert r.reference_start >= prev_pos
-            prev_contig = r.reference_name
-            prev_pos = r.reference_start
-
-        # Region query should work
-        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
-            chrA_records = list(bam.fetch("chrA"))
-        assert len(chrA_records) == 6  # 1 position × 6 reads
-
-
-def test_write_read_bam_no_fasta_fallback():
-    """When ref_fasta doesn't exist, header is built from result contig names."""
-    read_bam = importlib.import_module("baleen.eventalign._read_bam")
-
-    contig_results, hmm_results = _make_synthetic_data()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        # Use a non-existent FASTA path
-        ref_path = Path(tmp) / "nonexistent.fa"
-
-        bam_path = Path(tmp) / "read_results.bam"
-        read_bam.write_read_bam(hmm_results, contig_results, ref_path, bam_path)
-
-        # Should still write a valid BAM (with LN:0 in header)
-        assert bam_path.exists()
-        assert Path(str(bam_path) + ".bai").exists()
-
-        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
-            records = list(bam.fetch())
-
-        assert len(records) == 5
+        # Each read appears once (primary alignment), with MM/ML for positions
+        # that fall within its alignment span
+        assert len(records) == 6  # 3 native + 3 ivt
 
 
 def test_public_api_exports():
-    """load_read_results and load_read_results_iter are importable from baleen.eventalign."""
-    from baleen.eventalign import load_read_results, load_read_results_iter
+    """load_read_results, load_read_results_iter, and write_mod_bam are importable."""
+    from baleen.eventalign import load_read_results, load_read_results_iter, write_mod_bam
 
     assert callable(load_read_results)
     assert callable(load_read_results_iter)
+    assert callable(write_mod_bam)

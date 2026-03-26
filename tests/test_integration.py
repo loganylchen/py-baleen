@@ -184,9 +184,14 @@ class TestEndToEndPipeline:
             assert pa >= pv - 1e-12
 
     def test_full_pipeline_with_bam_output(self):
-        """HMM results → BAM round-trip (no ContigResult needed)."""
+        """HMM results → mod-BAM round-trip with MM/ML tags."""
+        import pysam
+
+        n_native = 15
+        n_ivt = 10
         contig_results = _build_multi_contig_data(
             n_contigs=1, n_positions=5,
+            n_native=n_native, n_ivt=n_ivt,
             modified_positions_per_contig={"contig_0": {1, 3}},
         )
 
@@ -195,16 +200,46 @@ class TestEndToEndPipeline:
             hmm_results[contig] = hier.compute_sequential_modification_probabilities(cr)
 
         with tempfile.TemporaryDirectory() as tmp:
-            # Write BAM without ContigResult (streaming path)
+            # Create reference FASTA
+            seq_len = 3000
             ref_path = Path(tmp) / "ref.fa"
-            ref_path.write_text(">contig_0\n" + "A" * 3000 + "\n")
-            # Index the FASTA
-            import pysam
+            ref_path.write_text(">contig_0\n" + "A" * seq_len + "\n")
             pysam.faidx(str(ref_path))
 
-            bam_path = Path(tmp) / "read_results.bam"
-            result_path = read_bam.write_read_bam(
-                hmm_results, None, ref_path, bam_path,
+            # Create synthetic input BAMs with reads aligned to contig_0
+            native_bam_path = Path(tmp) / "native.bam"
+            ivt_bam_path = Path(tmp) / "ivt.bam"
+
+            header = pysam.AlignmentHeader.from_dict({
+                "HD": {"VN": "1.6", "SO": "coordinate"},
+                "SQ": [{"SN": "contig_0", "LN": seq_len}],
+            })
+
+            for bam_path_i, prefix, n_reads in [
+                (native_bam_path, "nat_contig_0", n_native),
+                (ivt_bam_path, "ivt_contig_0", n_ivt),
+            ]:
+                with pysam.AlignmentFile(str(bam_path_i), "wb", header=header) as bf:
+                    for i in range(n_reads):
+                        a = pysam.AlignedSegment(bf.header)
+                        a.query_name = f"{prefix}_{i}"
+                        a.flag = 0
+                        a.reference_id = 0
+                        a.reference_start = 0
+                        a.mapping_quality = 60
+                        a.query_sequence = "A" * 200
+                        a.cigar = [(0, 200)]  # 200M
+                        a.query_qualities = pysam.qualitystring_to_array("I" * 200)
+                        bf.write(a)
+                # Sort and index
+                sorted_path = str(bam_path_i) + ".sorted.bam"
+                pysam.sort("-o", sorted_path, str(bam_path_i))
+                Path(sorted_path).rename(bam_path_i)
+                pysam.index(str(bam_path_i))
+
+            out_bam = Path(tmp) / "read_results.bam"
+            result_path = read_bam.write_mod_bam(
+                hmm_results, native_bam_path, ivt_bam_path, ref_path, out_bam,
             )
             assert result_path.exists()
             assert Path(str(result_path) + ".bai").exists()
