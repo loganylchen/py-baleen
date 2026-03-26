@@ -11,6 +11,7 @@ from baleen.eventalign import (
     run_pipeline_streaming,
     save_hmm_params,
     save_results,
+    write_mod_bam,
     write_site_tsv,
 )
 
@@ -26,4 +27,5 @@ __all__ = [
     "save_hmm_params",
     "load_read_results",
     "load_read_results_iter",
+    "write_mod_bam",
 ]

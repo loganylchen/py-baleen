@@ -35,7 +35,7 @@ from baleen.eventalign import (
     save_results,
     write_site_tsv,
 )
-from baleen.eventalign._read_bam import write_read_bam
+from baleen.eventalign._read_bam import write_mod_bam
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
@@ -144,7 +144,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     )
     misc.add_argument(
         "--no-read-bam", action="store_true", default=False,
-        help="Skip writing per-read BAM output (read_results.bam)",
+        help="Skip writing mod-BAM output (read_results.bam with MM/ML tags)",
     )
 
 
@@ -169,11 +169,19 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--no-read-bam", action="store_true", default=False,
-        help="Skip writing per-read BAM output",
+        help="Skip writing mod-BAM output",
     )
     parser.add_argument(
         "--ref", type=str, default=None,
-        help="Reference FASTA (required for per-read BAM output)",
+        help="Reference FASTA (required for mod-BAM output)",
+    )
+    parser.add_argument(
+        "--native-bam", type=str, default=None,
+        help="Native BAM file (required for mod-BAM output)",
+    )
+    parser.add_argument(
+        "--ivt-bam", type=str, default=None,
+        help="IVT BAM file (required for mod-BAM output)",
     )
 
 
@@ -280,8 +288,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
     if not args.no_read_bam:
         bam_path = output_dir / "read_results.bam"
         t0 = time.perf_counter()
-        write_read_bam(hmm_results, None, args.ref, bam_path)
-        logger.info("Per-read BAM done in %.1fs", time.perf_counter() - t0)
+        write_mod_bam(hmm_results, args.native_bam, args.ivt_bam, args.ref, bam_path)
+        logger.info("mod-BAM done in %.1fs", time.perf_counter() - t0)
 
     # Summary
     n_sig = sum(1 for s in sites if s.padj < 0.05)
@@ -331,13 +339,22 @@ def _cmd_aggregate(args: argparse.Namespace) -> None:
     write_site_tsv(sites, args.output)
 
     if not args.no_read_bam:
+        missing = []
         if args.ref is None:
-            logger.warning("Skipping read-level BAM: --ref not provided")
+            missing.append("--ref")
+        if args.native_bam is None:
+            missing.append("--native-bam")
+        if args.ivt_bam is None:
+            missing.append("--ivt-bam")
+        if missing:
+            logger.warning(
+                "Skipping mod-BAM output: %s not provided", ", ".join(missing),
+            )
         else:
             output_parent = Path(args.output).parent.resolve()
             bam_path = output_parent / "read_results.bam"
-            write_read_bam(hmm_results, contig_results, args.ref, bam_path)
-            logger.info("Wrote per-read BAM to %s", bam_path)
+            write_mod_bam(hmm_results, args.native_bam, args.ivt_bam, args.ref, bam_path)
+            logger.info("Wrote mod-BAM to %s", bam_path)
 
     n_sig = sum(1 for s in sites if s.padj < 0.05)
     logger.info("Wrote %d sites (%d significant) to %s", len(sites), n_sig, args.output)
