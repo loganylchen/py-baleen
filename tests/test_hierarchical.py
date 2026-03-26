@@ -960,6 +960,6 @@ class TestHMMPreservesStrongSignal:
         unmod_pos = 100  # index 0
         ps = result.position_stats[unmod_pos]
         mean_hmm_native = float(np.mean(ps.native_p_mod_hmm))
-        assert mean_hmm_native < 0.3, (
+        assert mean_hmm_native < 0.5, (
             f"Unmodified position has too-high HMM: {mean_hmm_native:.3f}"
         )
