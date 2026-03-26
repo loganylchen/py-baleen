@@ -72,8 +72,8 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Minimum mapping quality (default: 0)",
     )
     pipe.add_argument(
-        "--threads", type=int, default=1,
-        help="Number of parallel workers for contig processing (default: 1)",
+        "--threads", type=int, default=8,
+        help="Number of parallel workers for contig processing (default: 8)",
     )
 
     pipe.add_argument(
