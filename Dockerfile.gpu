@@ -15,12 +15,24 @@ RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
-# Install baleen with CUDA
+# Install baleen with CUDA; ensure console_script is at a known path
 WORKDIR /app
 COPY . .
-RUN pip3 install --no-cache-dir .
+RUN pip3 install --no-cache-dir . \
+    && BALEEN_BIN="$(which baleen 2>/dev/null)" \
+    && if [ -z "$BALEEN_BIN" ]; then \
+         printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \
+       elif [ "$BALEEN_BIN" != "/usr/local/bin/baleen" ]; then \
+         cp "$BALEEN_BIN" /usr/local/bin/baleen; \
+       fi \
+    && chmod +x /usr/local/bin/baleen
+
+# Record the Python version so the runtime stage can verify it matches
+RUN python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
+    > /tmp/python_version.txt
 
 # --- Runtime stage ---
+# NOTE: must use the same Ubuntu version as the builder so Python versions match
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -32,9 +44,21 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
+COPY --from=builder /usr/local/bin/baleen /usr/local/bin/baleen
+COPY --from=builder /tmp/python_version.txt /tmp/python_version.txt
+
+# Copy installed Python packages — Ubuntu 22.04 ships Python 3.10
+# Verify the builder used the same version before copying
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=builder /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
-COPY --from=builder /usr/local/bin/baleen /usr/local/bin/baleen
+RUN BUILD_VER=$(cat /tmp/python_version.txt) \
+    && RUNTIME_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")') \
+    && if [ "$BUILD_VER" != "$RUNTIME_VER" ]; then \
+         echo "ERROR: Python version mismatch: builder=$BUILD_VER runtime=$RUNTIME_VER" >&2; \
+         echo "Update the COPY paths in Dockerfile.gpu to match python$RUNTIME_VER" >&2; \
+         exit 1; \
+       fi \
+    && rm /tmp/python_version.txt
 
 WORKDIR /data
 ENTRYPOINT ["baleen"]
