@@ -384,6 +384,35 @@ def main(argv: list[str] | None = None) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Run the full baleen pipeline from raw inputs to site-level\n"
+            '''                                                                                                    
+                                                                                                    
+           *#M###***                                                                                
+         *  #  /  8.  **+                                                                           
+      &w                 p *o                                                                       
+      #[a                   m   *                                          *#                  oa   
+     #                          :  #*                                     MB  ****%    M***o*    *  
+     M                             `  ook                                 M    ^ ] # *    |      #  
+     M                                 \  M*#                             #         * x       `to   
+    *   8%                                 '   o                           #               C O o    
+    *                                            a                           oo         "`#**       
+    #                                               koo                          o0   *   .         
+    M                                                }   {**                   * .   *              
+     *                                                       Moo    #       WM       *              
+       #*****?* <# #M#                                         M     *****.          *              
+           f **#**#*#*# #MMM            #M                             &+           zC              
+                 MM#***#***#|*#         ]                                         v.*               
+                     il##********#\                                               *.                
+                     L **###**M#***   0*                                          *                 
+              & o#*#o*;#*0##. ..         #M                                      *                  
+            #                        o         &                           ^  ^.*                   
+             ,&#**& ^ #MxJ   MM-    o    M#    aw                     t     dh(                     
+                  ^|uvx# & :W#   QaqO   *o     **         #              % *d                       
+                        MMWx{i fxMM   `'#     #***          #O*#M''      #*                         
+                              M##J{   ***8    n**#I:        *   8p  #oa                             
+                                  M######^     #*o**         l*##*                                  
+                                  '###****#    **oo**M '       o                                    
+                                    **##*#             #          o                                 
+                                       *#*               joo | ; .@#                 '''
             "modification calls.\n\n"
             "Example:\n"
             "  baleen run \\\n"
