@@ -8,10 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget build-essential zlib1g-dev libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install f5c v1.6 from pre-built binaries (CUDA)
+# Install f5c v1.6 from pre-built binaries (CPU)
 RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
     && tar xf f5c-v1.6-binaries.tar.gz \
-    && cp f5c-v1.6/f5c_x86_64_linux_cuda /usr/local/bin/f5c \
+    && cp f5c-v1.6/f5c_x86_64_linux /usr/local/bin/f5c \
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
