@@ -105,6 +105,10 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--open-end", action="store_true", default=False,
         help="Allow open-end DTW alignment",
     )
+    dtw.add_argument(
+        "--gpu-memory-limit", type=int, default=None, metavar="BYTES",
+        help="GPU memory budget in bytes for concurrent DTW workers (default: auto-detect)",
+    )
 
     # HMM options
     hmm = parser.add_argument_group("HMM options")
@@ -278,6 +282,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         hmm_params=hmm_params,
         target_contigs=target_contigs,
         keep_intermediate=args.keep_intermediate,
+        gpu_memory_limit=args.gpu_memory_limit,
     )
 
     # Write outputs

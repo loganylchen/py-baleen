@@ -609,11 +609,43 @@ def is_available() -> bool:
     return CUDA_AVAILABLE
 
 
+def estimate_gpu_memory(position_signals: list[list[np.ndarray]]) -> int:
+    """Estimate GPU memory bytes for a multi-position pairwise DTW call.
+
+    Parameters
+    ----------
+    position_signals : list of list of np.ndarray
+        Same format as ``dtw_multi_position_pairwise`` input.
+
+    Returns
+    -------
+    int
+        Estimated GPU memory usage in bytes (includes 1.2x headroom).
+    """
+    total_seqs = sum(len(ps) for ps in position_signals)
+    max_len = max(len(s) for ps in position_signals for s in ps)
+
+    # Input padded array: total_seqs × max_len × 4 bytes (float32)
+    input_bytes = total_seqs * max_len * 4
+    # Lengths array: total_seqs × 8 bytes (int64)
+    lengths_bytes = total_seqs * 8
+    # Output: sum of n_p^2 × 8 bytes (float64) per position
+    output_bytes = sum(len(ps) ** 2 for ps in position_signals) * 8
+    # Cost buffers (per-pair DP): 2 rows × max_len × 4 bytes per active pair
+    total_pairs = sum(len(ps) * (len(ps) - 1) // 2 for ps in position_signals)
+    cost_bytes = total_pairs * max_len * 2 * 4
+
+    total = input_bytes + lengths_bytes + output_bytes + cost_bytes
+    # Add 20% headroom for CUDA allocator overhead
+    return int(total * 1.2)
+
+
 __all__ = [
     "dtw_distance",
     "dtw_pairwise",
     "dtw_pairwise_varlen",
     "dtw_multi_position_pairwise",
+    "estimate_gpu_memory",
     "cleanup",
     "is_available",
     "backend",
