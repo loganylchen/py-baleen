@@ -548,6 +548,7 @@ def _process_contig_streaming(
     gpu_memory_bytes: Optional[int] = None,
     legacy_scoring: bool = False,
     num_workers: int = 1,
+    mod_threshold: float = 0.99,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -565,6 +566,8 @@ def _process_contig_streaming(
         If True, save the per-contig ``ContigResult`` pickle.
     intermediate_dir
         Directory for intermediate files (used when *keep_intermediate* is True).
+    mod_threshold
+        Per-read probability threshold for counting a read as modified.
 
     Returns
     -------
@@ -614,7 +617,7 @@ def _process_contig_streaming(
     )
 
     # Stage 3: Site-level aggregation (no FDR — done globally later)
-    sites = aggregate_contig(cmr)
+    sites = aggregate_contig(cmr, mod_threshold=mod_threshold)
 
     # Optionally save intermediate ContigResult
     if keep_intermediate and intermediate_dir is not None:
@@ -916,6 +919,7 @@ def run_pipeline_streaming(
     subsample: bool = False,
     subsample_n: int = 300,
     legacy_scoring: bool = False,
+    mod_threshold: float = 0.99,
 ) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -1074,6 +1078,7 @@ def run_pipeline_streaming(
             gpu_memory_bytes=resolved_gpu_mem,
             legacy_scoring=legacy_scoring,
             num_workers=gpu_workers,
+            mod_threshold=mod_threshold,
         )
 
         if threads > 1:

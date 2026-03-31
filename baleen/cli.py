@@ -133,6 +133,10 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--legacy-scoring", action="store_true", default=False,
         help="Use per-position EM calibration (legacy behavior, less sensitive at low stoichiometry)",
     )
+    pipe.add_argument(
+        "--mod-threshold", type=float, default=0.99,
+        help="Per-read P(mod) threshold for counting a read as modified (default: 0.99)",
+    )
 
     # f5c options
     f5c = parser.add_argument_group("f5c options")
@@ -203,6 +207,10 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--legacy-scoring", action="store_true", default=False,
         help="Use per-position EM calibration (legacy behavior)",
+    )
+    parser.add_argument(
+        "--mod-threshold", type=float, default=0.99,
+        help="Per-read P(mod) threshold for counting a read as modified (default: 0.99)",
     )
 
 
@@ -301,6 +309,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         subsample=args.subsample,
         subsample_n=args.subsample_n,
         legacy_scoring=args.legacy_scoring,
+        mod_threshold=args.mod_threshold,
     )
 
     # Write outputs
@@ -359,7 +368,8 @@ def _cmd_aggregate(args: argparse.Namespace) -> None:
 
     # Aggregate
     logger.info("Aggregating site-level results...")
-    sites = aggregate_all(hmm_results, score_field=args.score_field)
+    sites = aggregate_all(hmm_results, score_field=args.score_field,
+                          mod_threshold=args.mod_threshold)
     write_site_tsv(sites, args.output)
 
     if not args.no_read_bam:
