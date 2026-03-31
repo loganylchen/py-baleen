@@ -398,6 +398,7 @@ def split_bam_contig(
     *,
     primary_only: bool = True,
     min_mapq: int = 0,
+    max_reads: Optional[int] = None,
 ) -> Path:
     """Extract one contig into a sorted and indexed BAM.
 
@@ -434,12 +435,27 @@ def split_bam_contig(
             raise ValueError(f"Contig '{contig}' not found in BAM: {bam_path}")
 
         header_dict = in_bam.header.to_dict()
+
+        # Collect filtered reads, then optionally subsample
+        reads = [
+            r for r in in_bam.fetch(contig=contig)
+            if _read_passes_filters(r, primary_only=primary_only, min_mapq=min_mapq)
+        ]
+
+        if max_reads is not None and len(reads) > max_reads:
+            n_before = len(reads)
+            rng = np.random.default_rng(42)
+            indices = np.sort(rng.choice(len(reads), max_reads, replace=False))
+            reads = [reads[i] for i in indices]
+            logger.info(
+                "Subsampled %d → %d reads for contig %s",
+                n_before, max_reads, contig,
+            )
+
         with pysam.AlignmentFile(str(unsorted_bam), "wb", header=header_dict) as out:
-            for read in in_bam.fetch(contig=contig):
-                if not _read_passes_filters(read, primary_only=primary_only, min_mapq=min_mapq):
-                    continue
+            for read in reads:
                 out.write(read)
-                n_written += 1
+        n_written = len(reads)
 
     pysam.sort("-o", str(out_bam), str(unsorted_bam))
     pysam.index(str(out_bam))

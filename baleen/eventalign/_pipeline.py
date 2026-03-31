@@ -268,6 +268,9 @@ def _process_contig(
     cleanup_temp: bool,
     num_cuda_streams: int,
     gpu_budget: Optional[_GpuBudget] = None,
+    subsample: bool = False,
+    subsample_n: int = 300,
+    gpu_memory_bytes: Optional[int] = None,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -283,6 +286,12 @@ def _process_contig(
         Total number of contigs (for logging).
     gpu_budget : _GpuBudget or None
         Shared GPU memory budget.  If *None*, no budget management.
+    subsample : bool
+        If True, subsample reads per condition per contig.
+    subsample_n : int
+        Max reads per condition when subsampling.
+    gpu_memory_bytes : int or None
+        GPU memory available for chunking.  Auto-detected if *None*.
     ... (other params match run_pipeline)
 
     Returns
@@ -300,6 +309,7 @@ def _process_contig(
     contig_tmp = tmp_root / contig
     contig_tmp.mkdir(parents=True, exist_ok=True)
 
+    _max_reads = subsample_n if subsample else None
     logger.info("    Splitting BAM → native contig BAM...")
     native_contig_bam = _bam.split_bam_contig(
         native_bam,
@@ -307,6 +317,7 @@ def _process_contig(
         contig_tmp / "native",
         primary_only=primary_only,
         min_mapq=min_mapq,
+        max_reads=_max_reads,
     )
     logger.info("    Splitting BAM → IVT contig BAM...")
     ivt_contig_bam = _bam.split_bam_contig(
@@ -315,6 +326,7 @@ def _process_contig(
         contig_tmp / "ivt",
         primary_only=primary_only,
         min_mapq=min_mapq,
+        max_reads=_max_reads,
     )
 
     native_tsv = contig_tmp / "native.eventalign.tsv"
@@ -404,36 +416,64 @@ def _process_contig(
         ))
         pbar.update(1)
 
-    # Phase 2: Batch DTW (single GPU call for all positions)
+    # Phase 2: Chunked DTW (split positions into GPU-memory-sized batches)
     if position_data:
-        pbar.set_postfix_str(f"DTW {len(position_data)} positions")
-        pbar.refresh()
         all_signal_lists = [d[4] for d in position_data]
+        all_matrices: list[NDArray[np.float64]] = []
 
-        estimated_bytes = 0
-        if gpu_budget is not None:
-            estimated_bytes = _cuda_dtw.estimate_gpu_memory(all_signal_lists)
-            logger.debug(
-                "    GPU budget: requesting %d MB for %s",
-                estimated_bytes // (1024 * 1024), contig,
-            )
-            if not gpu_budget.acquire(estimated_bytes):
-                logger.warning(
-                    "    GPU budget timeout for %s; proceeding anyway", contig,
+        chunk_mem_limit = int((gpu_memory_bytes if gpu_memory_bytes is not None else _get_gpu_memory()) * 0.8)
+
+        # Greedy bin-packing by estimated GPU memory
+        chunks: list[list[int]] = []
+        current_chunk: list[int] = []
+        current_estimate = 0
+
+        for i, sigs in enumerate(all_signal_lists):
+            pos_estimate = _cuda_dtw.estimate_gpu_memory([sigs])
+            if current_chunk and current_estimate + pos_estimate > chunk_mem_limit:
+                chunks.append(current_chunk)
+                current_chunk = [i]
+                current_estimate = pos_estimate
+            else:
+                current_chunk.append(i)
+                current_estimate += pos_estimate
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        pbar.set_postfix_str(f"DTW {len(position_data)} pos in {len(chunks)} chunk(s)")
+        pbar.refresh()
+
+        for chunk_idx, chunk_indices in enumerate(chunks):
+            chunk_signals = [all_signal_lists[i] for i in chunk_indices]
+            estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
+
+            acquired = 0
+            if gpu_budget is not None:
+                logger.debug(
+                    "    GPU budget: requesting %d MB for %s chunk %d/%d",
+                    estimated_bytes // (1024 * 1024), contig, chunk_idx + 1, len(chunks),
                 )
-                estimated_bytes = 0  # don't release what we didn't acquire
+                if gpu_budget.acquire(estimated_bytes):
+                    acquired = estimated_bytes
+                else:
+                    logger.warning(
+                        "    GPU budget timeout for %s chunk %d/%d; proceeding anyway",
+                        contig, chunk_idx + 1, len(chunks),
+                    )
 
-        try:
-            all_matrices = _cuda_dtw.dtw_multi_position_pairwise(
-                all_signal_lists,
-                use_open_start=use_open_start,
-                use_open_end=use_open_end,
-                use_cuda=use_cuda,
-                num_streams=num_cuda_streams,
-            )
-        finally:
-            if gpu_budget is not None and estimated_bytes > 0:
-                gpu_budget.release(estimated_bytes)
+            try:
+                chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+                    chunk_signals,
+                    use_open_start=use_open_start,
+                    use_open_end=use_open_end,
+                    use_cuda=use_cuda,
+                    num_streams=num_cuda_streams,
+                )
+            finally:
+                if gpu_budget is not None and acquired > 0:
+                    gpu_budget.release(acquired)
+
+            all_matrices.extend(chunk_matrices)
 
         # Phase 3: Package results
         for (pos, kmer, nat_names, ivt_names, _sigs), matrix in zip(position_data, all_matrices):
@@ -516,6 +556,9 @@ def _process_contig_streaming(
     keep_intermediate: bool = False,
     intermediate_dir: Optional[Path] = None,
     gpu_budget: Optional[_GpuBudget] = None,
+    subsample: bool = False,
+    subsample_n: int = 300,
+    gpu_memory_bytes: Optional[int] = None,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -570,6 +613,9 @@ def _process_contig_streaming(
         cleanup_temp=cleanup_temp,
         num_cuda_streams=num_cuda_streams,
         gpu_budget=gpu_budget,
+        subsample=subsample,
+        subsample_n=subsample_n,
+        gpu_memory_bytes=gpu_memory_bytes,
     )
 
     # Stage 2: HMM smoothing
@@ -615,6 +661,8 @@ def run_pipeline(
     threads: int = 1,
     num_cuda_streams: int = 16,
     gpu_memory_limit: Optional[int] = None,
+    subsample: bool = False,
+    subsample_n: int = 300,
 ) -> tuple[dict[str, ContigResult], PipelineMetadata]:
     pipeline_t0 = time.perf_counter()
     logger.info("=" * 60)
@@ -729,13 +777,13 @@ def run_pipeline(
     logger.debug("  Temporary directory: %s", tmp_root)
 
     # Create GPU budget for multi-worker coordination
+    resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
     gpu_budget: Optional[_GpuBudget] = None
     if threads > 1:
         want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
         if want_cuda:
-            limit = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-            gpu_budget = _GpuBudget(limit)
-            logger.info("  GPU memory budget: %d MB", limit // (1024 * 1024))
+            gpu_budget = _GpuBudget(resolved_gpu_mem)
+            logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
         if threads > 1:
@@ -771,6 +819,9 @@ def run_pipeline(
                         cleanup_temp=cleanup_temp,
                         num_cuda_streams=num_cuda_streams,
                         gpu_budget=gpu_budget,
+                        subsample=subsample,
+                        subsample_n=subsample_n,
+                        gpu_memory_bytes=resolved_gpu_mem,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -814,6 +865,9 @@ def run_pipeline(
                     primary_only=primary_only,
                     cleanup_temp=cleanup_temp,
                     num_cuda_streams=num_cuda_streams,
+                    subsample=subsample,
+                    subsample_n=subsample_n,
+                    gpu_memory_bytes=resolved_gpu_mem,
                 )
                 results[contig_name] = contig_result
     finally:
@@ -865,6 +919,8 @@ def run_pipeline_streaming(
     target_contigs: Optional[list[str]] = None,
     keep_intermediate: bool = False,
     gpu_memory_limit: Optional[int] = None,
+    subsample: bool = False,
+    subsample_n: int = 300,
 ) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -989,13 +1045,13 @@ def run_pipeline_streaming(
         intermediate_dir = Path(output_dir) / "intermediate"
 
     # Create GPU budget for multi-worker coordination
+    resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
     gpu_budget: Optional[_GpuBudget] = None
     if threads > 1:
         want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
         if want_cuda:
-            limit = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-            gpu_budget = _GpuBudget(limit)
-            logger.info("  GPU memory budget: %d MB", limit // (1024 * 1024))
+            gpu_budget = _GpuBudget(resolved_gpu_mem)
+            logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
         worker_kwargs = dict(
@@ -1025,6 +1081,9 @@ def run_pipeline_streaming(
             keep_intermediate=keep_intermediate,
             intermediate_dir=intermediate_dir,
             gpu_budget=gpu_budget,
+            subsample=subsample,
+            subsample_n=subsample_n,
+            gpu_memory_bytes=resolved_gpu_mem,
         )
 
         if threads > 1:

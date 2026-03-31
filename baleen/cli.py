@@ -85,6 +85,14 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--keep-intermediate", action="store_true", default=False,
         help="Save per-contig DTW intermediate results (ContigResult files)",
     )
+    pipe.add_argument(
+        "--subsample", action="store_true", default=False,
+        help="Subsample reads per condition per contig to reduce memory usage",
+    )
+    pipe.add_argument(
+        "--subsample-n", type=int, default=300,
+        help="Max reads per condition per contig when --subsample is enabled (default: 300)",
+    )
 
     # DTW options
     dtw = parser.add_argument_group("DTW options")
@@ -283,6 +291,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
         target_contigs=target_contigs,
         keep_intermediate=args.keep_intermediate,
         gpu_memory_limit=args.gpu_memory_limit,
+        subsample=args.subsample,
+        subsample_n=args.subsample_n,
     )
 
     # Write outputs
