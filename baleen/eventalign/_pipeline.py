@@ -467,6 +467,7 @@ def _process_contig(
             estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
 
             acquired = 0
+            chunk_use_cuda = use_cuda
             if gpu_budget is not None:
                 logger.debug(
                     "    GPU budget: requesting %d MB for %s chunk %d/%d",
@@ -476,16 +477,17 @@ def _process_contig(
                     acquired = estimated_bytes
                 else:
                     logger.warning(
-                        "    GPU budget timeout for %s chunk %d/%d; proceeding anyway",
+                        "    GPU budget timeout for %s chunk %d/%d; falling back to CPU",
                         contig, chunk_idx + 1, len(chunks),
                     )
+                    chunk_use_cuda = False
 
             try:
                 chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
                     chunk_signals,
                     use_open_start=use_open_start,
                     use_open_end=use_open_end,
-                    use_cuda=use_cuda,
+                    use_cuda=chunk_use_cuda,
                     num_streams=num_cuda_streams,
                 )
             finally:
@@ -846,6 +848,7 @@ def run_pipeline(
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
+                failed = []
                 with tqdm(
                     total=len(passed_contigs),
                     desc="Pipeline",
@@ -853,11 +856,20 @@ def run_pipeline(
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} contigs [{elapsed}<{remaining}] {postfix}",
                 ) as pbar:
                     for future in as_completed(futures):
-                        contig_name, contig_result = future.result()
+                        contig = futures[future]
+                        try:
+                            contig_name, contig_result = future.result()
+                        except Exception:
+                            logger.exception("Worker failed for contig %s", contig)
+                            failed.append(contig)
+                            pbar.update(1)
+                            continue
                         results[contig_name] = contig_result
                         n_pos = len(contig_result.positions)
                         pbar.set_postfix_str(f"{contig_name} ({n_pos} pos)")
                         pbar.update(1)
+                if failed:
+                    logger.error("%d contig(s) failed: %s", len(failed), ", ".join(failed))
         else:
             # Sequential processing (original behavior)
             for contig_idx, contig in enumerate(passed_contigs, 1):
@@ -892,8 +904,11 @@ def run_pipeline(
                 )
                 results[contig_name] = contig_result
     finally:
-        if gpu_budget is not None:
-            gpu_budget.shutdown()
+        try:
+            if gpu_budget is not None:
+                gpu_budget.shutdown()
+        except Exception:
+            logger.debug("GPU budget shutdown error (ignored)", exc_info=True)
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
@@ -1125,6 +1140,7 @@ def run_pipeline_streaming(
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
+                failed = []
                 with tqdm(
                     total=len(passed_contigs),
                     desc="Pipeline",
@@ -1132,12 +1148,21 @@ def run_pipeline_streaming(
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} contigs [{elapsed}<{remaining}] {postfix}",
                 ) as pbar:
                     for future in as_completed(futures):
-                        contig_name, cmr, sites = future.result()
+                        contig = futures[future]
+                        try:
+                            contig_name, cmr, sites = future.result()
+                        except Exception:
+                            logger.exception("Worker failed for contig %s", contig)
+                            failed.append(contig)
+                            pbar.update(1)
+                            continue
                         hmm_results[contig_name] = cmr
                         all_sites.extend(sites)
                         n_pos = len(cmr.position_stats)
                         pbar.set_postfix_str(f"{contig_name} ({n_pos} pos)")
                         pbar.update(1)
+                if failed:
+                    logger.error("%d contig(s) failed: %s", len(failed), ", ".join(failed))
         else:
             for contig_idx, contig in enumerate(passed_contigs, 1):
                 contig_name, cmr, sites = _process_contig_streaming(
@@ -1149,8 +1174,11 @@ def run_pipeline_streaming(
                 hmm_results[contig_name] = cmr
                 all_sites.extend(sites)
     finally:
-        if gpu_budget is not None:
-            gpu_budget.shutdown()
+        try:
+            if gpu_budget is not None:
+                gpu_budget.shutdown()
+        except Exception:
+            logger.debug("GPU budget shutdown error (ignored)", exc_info=True)
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
