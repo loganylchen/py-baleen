@@ -69,32 +69,34 @@ class SiteResult:
     """Fraction of native reads with p_mod_hmm > 0.5."""
 
 
-def _beta_binomial_aggregate(
+def _threshold_aggregate(
     p_mod: NDArray[np.float64],
+    threshold: float = 0.99,
 ) -> tuple[float, float, float]:
-    """Compute Beta-Binomial MAP and 95% credible interval.
+    """Compute modification ratio as fraction of reads exceeding threshold.
 
     Parameters
     ----------
     p_mod
         Per-read P(modified) values (native reads only).
+    threshold
+        Reads with p_mod > threshold are counted as modified.
 
     Returns
     -------
     mod_ratio, ci_low, ci_high
+        mod_ratio is the fraction of reads above threshold.
+        ci_low/ci_high are the 95% credible interval from a Beta posterior
+        on the binary counts.
     """
-    alpha = 1.0 + float(np.sum(p_mod))
-    beta_param = 1.0 + float(np.sum(1.0 - p_mod))
+    n = len(p_mod)
+    n_mod = int(np.sum(p_mod > threshold))
 
-    # MAP estimate (mode of Beta distribution)
-    # For Beta(α, β), mode = (α-1)/(α+β-2) when α>1 and β>1
-    denom = alpha + beta_param - 2.0
-    if denom > 0 and alpha > 1.0 and beta_param > 1.0:
-        mod_ratio = (alpha - 1.0) / denom
-    else:
-        # Fall back to posterior mean
-        mod_ratio = alpha / (alpha + beta_param)
+    mod_ratio = n_mod / n if n > 0 else 0.0
 
+    # Beta posterior on binomial counts: Beta(1 + n_mod, 1 + n - n_mod)
+    alpha = 1.0 + n_mod
+    beta_param = 1.0 + (n - n_mod)
     ci_low = float(_beta_dist.ppf(0.025, alpha, beta_param))
     ci_high = float(_beta_dist.ppf(0.975, alpha, beta_param))
 
@@ -154,6 +156,7 @@ def aggregate_contig(
     cmr: ContigModificationResult,
     *,
     score_field: str = "p_mod_hmm",
+    mod_threshold: float = 0.99,
 ) -> list[SiteResult]:
     """Aggregate per-read results into site-level calls for one contig.
 
@@ -189,8 +192,8 @@ def aggregate_contig(
         if len(valid_native) == 0:
             continue
 
-        # Beta-Binomial aggregation (native reads only)
-        mod_ratio, ci_low, ci_high = _beta_binomial_aggregate(valid_native)
+        # Threshold-based aggregation (native reads only)
+        mod_ratio, ci_low, ci_high = _threshold_aggregate(valid_native, mod_threshold)
 
         # Mann-Whitney U test
         pvalue = _mann_whitney_pvalue(valid_native, valid_ivt)
@@ -230,6 +233,7 @@ def aggregate_all(
     results: dict[str, ContigModificationResult],
     *,
     score_field: str = "p_mod_hmm",
+    mod_threshold: float = 0.99,
 ) -> list[SiteResult]:
     """Aggregate all contigs and apply FDR correction across all sites.
 
@@ -239,6 +243,8 @@ def aggregate_all(
         ``{contig_name: ContigModificationResult}``
     score_field
         Which per-read score to aggregate.
+    mod_threshold
+        Per-read probability threshold for counting a read as modified.
 
     Returns
     -------
@@ -249,7 +255,8 @@ def aggregate_all(
     all_sites: list[SiteResult] = []
     for contig in sorted(results.keys()):
         all_sites.extend(
-            aggregate_contig(results[contig], score_field=score_field)
+            aggregate_contig(results[contig], score_field=score_field,
+                             mod_threshold=mod_threshold)
         )
 
     if not all_sites:
