@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import beta as _beta_dist
+from scipy.stats import fisher_exact as _fisher_exact
 from scipy.stats import mannwhitneyu as _mannwhitneyu
 
 if TYPE_CHECKING:
@@ -103,29 +104,35 @@ def _threshold_aggregate(
     return mod_ratio, ci_low, ci_high
 
 
-def _mann_whitney_pvalue(
+def _fisher_pvalue(
     native_p_mod: NDArray[np.float64],
     ivt_p_mod: NDArray[np.float64],
+    threshold: float = 0.99,
 ) -> float:
-    """One-sided Mann-Whitney U test: native > IVT.
+    """One-sided Fisher's exact test on binary modification calls.
 
-    Returns 1.0 if either group has fewer than 2 observations.
+    Tests whether the fraction of reads above *threshold* is higher
+    in native than in IVT.
+
+    Returns 1.0 if both groups have zero modified reads.
     """
-    if len(native_p_mod) < 2 or len(ivt_p_mod) < 2:
+    n_nat = len(native_p_mod)
+    n_ivt = len(ivt_p_mod)
+    if n_nat < 1 or n_ivt < 1:
         return 1.0
 
-    # If all values are identical, no test needed
-    if np.all(native_p_mod == native_p_mod[0]) and np.all(
-        ivt_p_mod == ivt_p_mod[0]
-    ):
-        if native_p_mod[0] > ivt_p_mod[0]:
-            return 0.0
-        return 1.0
+    nat_mod = int(np.sum(native_p_mod > threshold))
+    ivt_mod = int(np.sum(ivt_p_mod > threshold))
+
+    # Contingency table:
+    #              modified  unmodified
+    #   native   [ nat_mod,  n_nat - nat_mod ]
+    #   IVT      [ ivt_mod,  n_ivt - ivt_mod ]
+    table = [[nat_mod, n_nat - nat_mod],
+             [ivt_mod, n_ivt - ivt_mod]]
 
     try:
-        _, p = _mannwhitneyu(
-            native_p_mod, ivt_p_mod, alternative="greater"
-        )
+        _, p = _fisher_exact(table, alternative="greater")
         return float(p)
     except ValueError:
         return 1.0
@@ -195,8 +202,8 @@ def aggregate_contig(
         # Threshold-based aggregation (native reads only)
         mod_ratio, ci_low, ci_high = _threshold_aggregate(valid_native, mod_threshold)
 
-        # Mann-Whitney U test
-        pvalue = _mann_whitney_pvalue(valid_native, valid_ivt)
+        # Fisher's exact test on binary calls
+        pvalue = _fisher_pvalue(valid_native, valid_ivt, mod_threshold)
 
         # Effect size (NaN if no IVT reads — avoids systematic upward bias)
         if len(valid_ivt) > 0:
