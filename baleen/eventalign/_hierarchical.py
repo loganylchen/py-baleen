@@ -1222,10 +1222,13 @@ def compute_sequential_modification_probabilities(
         ps.p_mod_knn[:] = cal.probabilities
 
         if not legacy_scoring and cal.null_gate_active:
-            # Per-position gate fired — save for contig-level rescue
-            all_raw_knn[pos] = raw_knn
-            all_ivt_masks[pos] = ivt_mask
-            gated_positions.append(pos)
+            # Per-position gate fired — rescue only if V2 suggests
+            # some modification signal (mean native p_mod_raw > 0.1)
+            native_raw_mean = float(np.mean(ps.p_mod_raw[:ps.n_native]))
+            if native_raw_mean > 0.1:
+                all_raw_knn[pos] = raw_knn
+                all_ivt_masks[pos] = ivt_mask
+                gated_positions.append(pos)
 
         _mod_pbar.update(1)
 
