@@ -169,6 +169,37 @@ def _compute_pairwise_loop(
 
 
 
+_MIN_GPU_PER_WORKER = 4 * 1024 ** 3  # 4 GB — minimum for efficient DTW chunks
+
+
+def _cap_threads_for_gpu(
+    threads: int,
+    gpu_mem: int,
+    use_cuda: Optional[bool],
+) -> int:
+    """Reduce *threads* so each worker gets enough GPU memory.
+
+    Each worker needs at least ``_MIN_GPU_PER_WORKER`` bytes to build
+    large DTW chunks and keep the GPU busy.  If *use_cuda* is False or
+    the GPU is not available, *threads* is returned unchanged.
+    """
+    if threads <= 1:
+        return threads
+    want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
+    if not want_cuda:
+        return threads
+    max_workers = max(1, int(gpu_mem * 0.8 / _MIN_GPU_PER_WORKER))
+    if threads > max_workers:
+        logger.info(
+            "  Capping GPU workers %d → %d (%.0f GB GPU, %.0f GB/worker minimum)",
+            threads, max_workers,
+            gpu_mem / 1024 ** 3,
+            _MIN_GPU_PER_WORKER / 1024 ** 3,
+        )
+        return max_workers
+    return threads
+
+
 def _get_gpu_memory() -> int:
     """Try to detect total GPU memory in bytes via nvidia-smi."""
     try:
@@ -732,6 +763,7 @@ def run_pipeline(
     logger.debug("  Temporary directory: %s", tmp_root)
 
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
+    threads = _cap_threads_for_gpu(threads, resolved_gpu_mem, use_cuda)
 
     try:
         if threads > 1:
@@ -1004,6 +1036,7 @@ def run_pipeline_streaming(
         intermediate_dir = Path(output_dir) / "intermediate"
 
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
+    threads = _cap_threads_for_gpu(threads, resolved_gpu_mem, use_cuda)
 
     try:
         worker_kwargs = dict(
