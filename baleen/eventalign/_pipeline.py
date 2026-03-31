@@ -192,17 +192,12 @@ class _GpuBudget:
         self.__dict__.update(state)
         self._mgr = None  # worker side; shutdown() is a no-op
 
-    def acquire(self, nbytes: int, timeout: float = 300.0) -> bool:
+    def acquire(self, nbytes: int) -> None:
         """Block until *nbytes* is available, then reserve it."""
         with self._cond:
-            deadline = time.monotonic() + timeout
             while self._available.value < nbytes:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._cond.wait(timeout=remaining)
+                self._cond.wait()
             self._available.value -= nbytes
-            return True
 
     def release(self, nbytes: int) -> None:
         """Return *nbytes* to the budget."""
@@ -467,27 +462,20 @@ def _process_contig(
             estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
 
             acquired = 0
-            chunk_use_cuda = use_cuda
             if gpu_budget is not None:
                 logger.debug(
                     "    GPU budget: requesting %d MB for %s chunk %d/%d",
                     estimated_bytes // (1024 * 1024), contig, chunk_idx + 1, len(chunks),
                 )
-                if gpu_budget.acquire(estimated_bytes):
-                    acquired = estimated_bytes
-                else:
-                    logger.warning(
-                        "    GPU budget timeout for %s chunk %d/%d; falling back to CPU",
-                        contig, chunk_idx + 1, len(chunks),
-                    )
-                    chunk_use_cuda = False
+                gpu_budget.acquire(estimated_bytes)
+                acquired = estimated_bytes
 
             try:
                 chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
                     chunk_signals,
                     use_open_start=use_open_start,
                     use_open_end=use_open_end,
-                    use_cuda=chunk_use_cuda,
+                    use_cuda=use_cuda,
                     num_streams=num_cuda_streams,
                 )
             finally:
