@@ -488,11 +488,11 @@ def _anchored_mixture_em(
     *,
     max_iter: int = 100,
     tol: float = 1e-6,
-    pi_threshold: float = 0.02,
-    separation_threshold: float = 0.3,
+    pi_threshold: float = 0.05,
+    separation_threshold: float = 0.8,
     tau_pi: float = 0.05,
     tau_bic: float = 10.0,
-    tau_sep: float = 0.3,
+    tau_sep: float = 0.5,
     global_mu1: float | None = None,
     global_sigma1: float | None = None,
     min_reads_for_local: int = 50,
@@ -1170,17 +1170,13 @@ def compute_sequential_modification_probabilities(
         z_native = ps.z_scores[: ps.n_native]
         z_ivt = ps.z_scores[ps.n_native :]
 
-        # Lower gate thresholds for contig-level calibration mode
-        eff_pi_thresh = mixture_pi_threshold if legacy_scoring else 0.02
-        eff_sep_thresh = mixture_separation if legacy_scoring else 0.3
         p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
             z_native,
             z_ivt,
             ps.z_scores,
             max_iter=mixture_max_iter,
-            pi_threshold=eff_pi_thresh,
-            separation_threshold=eff_sep_thresh,
-            tau_sep=0.3 if not legacy_scoring else 0.5,
+            pi_threshold=mixture_pi_threshold,
+            separation_threshold=mixture_separation,
             global_mu1=global_mu1,
             global_sigma1=global_sigma1,
             legacy_scoring=legacy_scoring,
