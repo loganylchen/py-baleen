@@ -16,7 +16,7 @@
 # Environment variables:
 #   BENCHMARK_THREADS     Pipeline threads (default: 4)
 #   BALEEN_RUN_ARGS       Extra baleen args (default: empty = auto-detect CUDA)
-#   BALEEN_MOD_THRESHOLD  Per-read P(mod) threshold (default: uses baleen default 0.99)
+#   BALEEN_MOD_THRESHOLD  Per-read P(mod) threshold (default: uses baleen default 0.9)
 set -euo pipefail
 
 # Resolve testdata directory

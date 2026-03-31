@@ -550,7 +550,7 @@ def _process_contig_streaming(
     gpu_memory_bytes: Optional[int] = None,
     legacy_scoring: bool = False,
     num_workers: int = 1,
-    mod_threshold: float = 0.99,
+    mod_threshold: float = 0.9,
     show_progress: bool = True,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
@@ -925,7 +925,7 @@ def run_pipeline_streaming(
     subsample: bool = False,
     subsample_n: int = 300,
     legacy_scoring: bool = False,
-    mod_threshold: float = 0.99,
+    mod_threshold: float = 0.9,
 ) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
