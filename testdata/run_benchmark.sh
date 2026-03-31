@@ -86,4 +86,9 @@ done
 echo ""
 echo "=== Benchmark complete ($DONE stoichiometry levels) ==="
 echo "Results in: $DATA_DIR/{0.0..1.0}/output/"
-echo "Run evaluation: python testdata/evaluate_benchmark.py $DATA_DIR"
+
+# Run evaluation
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo ""
+echo "=== Running evaluation ==="
+python "$SCRIPT_DIR/evaluate_benchmark.py" "$DATA_DIR"
