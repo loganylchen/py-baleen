@@ -168,30 +168,6 @@ def _compute_pairwise_loop(
     return matrix
 
 
-class _GpuBudget:
-    """Serialize GPU access across worker processes.
-
-    Uses a spawn-context :class:`multiprocessing.Lock` so that only one
-    worker runs GPU DTW at a time.  This avoids GPU OOM when multiple
-    workers try to use the GPU concurrently, and is robust across
-    spawn-context ``ProcessPoolExecutor`` (no Manager needed).
-    """
-
-    def __init__(self, ctx: "mp.context.BaseContext"):
-        self._lock = ctx.Lock()
-
-    def acquire(self, nbytes: int) -> None:  # noqa: ARG002
-        """Acquire exclusive GPU access (blocks until available)."""
-        self._lock.acquire()
-
-    def release(self, nbytes: int) -> None:  # noqa: ARG002
-        """Release GPU access."""
-        self._lock.release()
-
-    def shutdown(self) -> None:
-        """No-op; Lock requires no cleanup."""
-        pass
-
 
 def _get_gpu_memory() -> int:
     """Try to detect total GPU memory in bytes via nvidia-smi."""
@@ -260,10 +236,10 @@ def _process_contig(
     primary_only: bool,
     cleanup_temp: bool,
     num_cuda_streams: int,
-    gpu_budget: Optional[_GpuBudget] = None,
     subsample: bool = False,
     subsample_n: int = 300,
     gpu_memory_bytes: Optional[int] = None,
+    num_workers: int = 1,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -277,14 +253,15 @@ def _process_contig(
         Index of this contig (1-based, for logging).
     total_contigs : int
         Total number of contigs (for logging).
-    gpu_budget : _GpuBudget or None
-        Shared GPU memory budget.  If *None*, no budget management.
     subsample : bool
         If True, subsample reads per condition per contig.
     subsample_n : int
         Max reads per condition when subsampling.
     gpu_memory_bytes : int or None
         GPU memory available for chunking.  Auto-detected if *None*.
+    num_workers : int
+        Number of parallel workers sharing the GPU.  Chunk memory limit
+        is divided by this to prevent GPU OOM.
     ... (other params match run_pipeline)
 
     Returns
@@ -414,7 +391,8 @@ def _process_contig(
         all_signal_lists = [d[4] for d in position_data]
         all_matrices: list[NDArray[np.float64]] = []
 
-        chunk_mem_limit = int((gpu_memory_bytes if gpu_memory_bytes is not None else _get_gpu_memory()) * 0.8)
+        total_gpu = gpu_memory_bytes if gpu_memory_bytes is not None else _get_gpu_memory()
+        chunk_mem_limit = int(total_gpu * 0.8 / max(num_workers, 1))
 
         # Greedy bin-packing by estimated GPU memory
         chunks: list[list[int]] = []
@@ -440,26 +418,13 @@ def _process_contig(
             chunk_signals = [all_signal_lists[i] for i in chunk_indices]
             estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
 
-            acquired = 0
-            if gpu_budget is not None:
-                logger.debug(
-                    "    GPU budget: requesting %d MB for %s chunk %d/%d",
-                    estimated_bytes // (1024 * 1024), contig, chunk_idx + 1, len(chunks),
-                )
-                gpu_budget.acquire(estimated_bytes)
-                acquired = estimated_bytes
-
-            try:
-                chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
-                    chunk_signals,
-                    use_open_start=use_open_start,
-                    use_open_end=use_open_end,
-                    use_cuda=use_cuda,
-                    num_streams=num_cuda_streams,
-                )
-            finally:
-                if gpu_budget is not None and acquired > 0:
-                    gpu_budget.release(acquired)
+            chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+                chunk_signals,
+                use_open_start=use_open_start,
+                use_open_end=use_open_end,
+                use_cuda=use_cuda,
+                num_streams=num_cuda_streams,
+            )
 
             all_matrices.extend(chunk_matrices)
 
@@ -543,11 +508,11 @@ def _process_contig_streaming(
     hmm_params: object = None,
     keep_intermediate: bool = False,
     intermediate_dir: Optional[Path] = None,
-    gpu_budget: Optional[_GpuBudget] = None,
     subsample: bool = False,
     subsample_n: int = 300,
     gpu_memory_bytes: Optional[int] = None,
     legacy_scoring: bool = False,
+    num_workers: int = 1,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -601,10 +566,10 @@ def _process_contig_streaming(
         primary_only=primary_only,
         cleanup_temp=cleanup_temp,
         num_cuda_streams=num_cuda_streams,
-        gpu_budget=gpu_budget,
         subsample=subsample,
         subsample_n=subsample_n,
         gpu_memory_bytes=gpu_memory_bytes,
+        num_workers=num_workers,
     )
 
     # Stage 2: HMM smoothing
@@ -766,20 +731,13 @@ def run_pipeline(
     tmp_root = Path(tempfile.mkdtemp(prefix="baleen-eventalign-"))
     logger.debug("  Temporary directory: %s", tmp_root)
 
-    # Create GPU budget for multi-worker coordination
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    ctx = mp.get_context('spawn') if threads > 1 else None
-    gpu_budget: Optional[_GpuBudget] = None
-    if threads > 1:
-        want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
-        if want_cuda:
-            gpu_budget = _GpuBudget(ctx)
-            logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
         if threads > 1:
             # Parallel processing with multiprocessing
             logger.info("  Using %d parallel workers (spawn context)", threads)
+            ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
                 futures = {
                     executor.submit(
@@ -808,10 +766,10 @@ def run_pipeline(
                         primary_only=primary_only,
                         cleanup_temp=cleanup_temp,
                         num_cuda_streams=num_cuda_streams,
-                        gpu_budget=gpu_budget,
                         subsample=subsample,
                         subsample_n=subsample_n,
                         gpu_memory_bytes=resolved_gpu_mem,
+                        num_workers=threads,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -871,11 +829,6 @@ def run_pipeline(
                 )
                 results[contig_name] = contig_result
     finally:
-        try:
-            if gpu_budget is not None:
-                gpu_budget.shutdown()
-        except Exception:
-            logger.debug("GPU budget shutdown error (ignored)", exc_info=True)
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
@@ -1050,15 +1003,7 @@ def run_pipeline_streaming(
     if keep_intermediate and output_dir is not None:
         intermediate_dir = Path(output_dir) / "intermediate"
 
-    # Create GPU budget for multi-worker coordination
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    ctx = mp.get_context('spawn') if threads > 1 else None
-    gpu_budget: Optional[_GpuBudget] = None
-    if threads > 1:
-        want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
-        if want_cuda:
-            gpu_budget = _GpuBudget(ctx)
-            logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
         worker_kwargs = dict(
@@ -1087,15 +1032,16 @@ def run_pipeline_streaming(
             hmm_params=hmm_params,
             keep_intermediate=keep_intermediate,
             intermediate_dir=intermediate_dir,
-            gpu_budget=gpu_budget,
             subsample=subsample,
             subsample_n=subsample_n,
             gpu_memory_bytes=resolved_gpu_mem,
             legacy_scoring=legacy_scoring,
+            num_workers=threads,
         )
 
         if threads > 1:
             logger.info("  Using %d parallel workers (spawn context)", threads)
+            ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
                 futures = {
                     executor.submit(
@@ -1141,11 +1087,6 @@ def run_pipeline_streaming(
                 hmm_results[contig_name] = cmr
                 all_sites.extend(sites)
     finally:
-        try:
-            if gpu_budget is not None:
-                gpu_budget.shutdown()
-        except Exception:
-            logger.debug("GPU budget shutdown error (ignored)", exc_info=True)
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
