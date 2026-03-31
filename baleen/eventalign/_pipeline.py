@@ -182,6 +182,16 @@ class _GpuBudget:
         self._available = self._mgr.Value('l', total_bytes)
         self._cond = self._mgr.Condition()
 
+    def __getstate__(self):
+        # Exclude _mgr from pickling — it contains an AuthenticationString
+        # that cannot be pickled.  The proxy objects (_available, _cond)
+        # are picklable and are all workers need.
+        return {k: v for k, v in self.__dict__.items() if k != '_mgr'}
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._mgr = None  # worker side; shutdown() is a no-op
+
     def acquire(self, nbytes: int, timeout: float = 300.0) -> bool:
         """Block until *nbytes* is available, then reserve it."""
         with self._cond:
@@ -203,7 +213,8 @@ class _GpuBudget:
     def shutdown(self) -> None:
         """Shut down the underlying manager."""
         try:
-            self._mgr.shutdown()
+            if self._mgr is not None:
+                self._mgr.shutdown()
         except Exception:
             pass
 
