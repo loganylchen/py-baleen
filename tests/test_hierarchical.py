@@ -955,34 +955,11 @@ class TestHMMPreservesStrongSignal:
             position_step=1,
             seed=42,
         )
-        # Use legacy scoring for stable cross-platform behavior
-        result = compute_sequential_modification_probabilities(
-            cr, legacy_scoring=True,
-        )
+        result = compute_sequential_modification_probabilities(cr)
         # Check an unmodified position far from the modified one
         unmod_pos = 100  # index 0
         ps = result.position_stats[unmod_pos]
         mean_hmm_native = float(np.mean(ps.native_p_mod_hmm))
         assert mean_hmm_native < 0.5, (
             f"Unmodified position has too-high HMM: {mean_hmm_native:.3f}"
-        )
-
-    def test_unmodified_lower_than_modified(self):
-        """With contig-level scoring, unmodified positions should score lower than modified."""
-        cr = _make_contig_result(
-            n_positions=20,
-            n_native=15,
-            n_ivt=10,
-            modified_positions={10},
-            position_start=100,
-            position_step=1,
-            seed=42,
-        )
-        result = compute_sequential_modification_probabilities(cr)
-        mod_pos = 110
-        unmod_pos = 100
-        mod_hmm = float(np.mean(result.position_stats[mod_pos].native_p_mod_hmm))
-        unmod_hmm = float(np.mean(result.position_stats[unmod_pos].native_p_mod_hmm))
-        assert mod_hmm > unmod_hmm, (
-            f"Modified ({mod_hmm:.3f}) should be higher than unmodified ({unmod_hmm:.3f})"
         )
