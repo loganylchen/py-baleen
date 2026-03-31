@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_EPS = 1e-300
+_EPS = 1e-20
 _MIN_SIGMA = 1e-6
 _MAD_SCALE = 1.4826  # MAD → σ for Normal
 
@@ -553,7 +553,7 @@ def _anchored_mixture_em(
         # Sanity check: reject degenerate global alternative
         if use_global:
             global_sep = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
-            if global_sigma1 > 10 * sigma0 or global_sep > 50:
+            if global_sigma1 > 10 * sigma0 or global_sep > 8:
                 use_global = False
     if use_global:
         mu1 = global_mu1
@@ -589,6 +589,9 @@ def _anchored_mixture_em(
             break
         pi = pi_new
 
+    # Clamp pi to prevent degenerate posteriors (consistent with _calibrate_normal)
+    pi_post = min(max(pi, 0.01), 0.7)
+
     # Compute gate signals
     separation = abs(mu1 - mu0) / max(sigma0, _MIN_SIGMA)
     n = len(z_native)
@@ -596,26 +599,22 @@ def _anchored_mixture_em(
     ll_null = _normal_log_likelihood(z_native, mu0, sigma0)
     log_f0_n = _normal_logpdf(z_native, mu0, sigma0)
     log_f1_n = _normal_logpdf(z_native, mu1, sigma1)
-    ll_mix = _mixture_log_likelihood(log_f0_n, log_f1_n, pi)
+    ll_mix = _mixture_log_likelihood(log_f0_n, log_f1_n, pi_post)
     bic_null = -2 * ll_null + 2 * math.log(max(n, 2))
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 2))
 
     # Legacy hard gate (for reporting / backward compat)
     null_gate_legacy = (
-        pi < pi_threshold
+        pi_post < pi_threshold
         or bic_mix >= bic_null
         or separation < separation_threshold
     )
 
     # Soft gate: continuous weights ∈ [0, 1]
-    w_pi = float(_sigmoid((pi - pi_threshold) / tau_pi))
+    w_pi = float(_sigmoid((pi_post - pi_threshold) / tau_pi))
     w_bic = float(_sigmoid((bic_null - bic_mix) / tau_bic))
     w_sep = float(_sigmoid((separation - separation_threshold) / tau_sep))
     gate_weight = w_pi * w_bic * w_sep
-
-    # Mixture posteriors with pi-weighted Bayes rule
-    # Clamp pi to prevent degenerate posteriors (consistent with _calibrate_normal)
-    pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _normal_pdf(z_all, mu0, sigma0)
     f1_all = _normal_pdf(z_all, mu1, sigma1)
     denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
@@ -625,7 +624,7 @@ def _anchored_mixture_em(
     # otherwise z-score-based probability
     if not legacy_scoring and global_mu1 is not None and global_sigma1 is not None:
         global_sep_fb = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
-        if 0.5 < global_sep_fb < 50 and global_sigma1 < 10 * sigma0:
+        if 0.5 < global_sep_fb < 8 and global_sigma1 < 10 * sigma0:
             # Global alternative is meaningfully separated and not degenerate
             f0_fb = _normal_pdf(z_all, mu0, sigma0)
             f1_fb = _normal_pdf(z_all, global_mu1, global_sigma1)

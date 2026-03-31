@@ -195,13 +195,14 @@ def aggregate_contig(
         # Mann-Whitney U test
         pvalue = _mann_whitney_pvalue(valid_native, valid_ivt)
 
-        # Effect size
-        effect_size = float(np.median(valid_native)) - (
-            float(np.median(valid_ivt)) if len(valid_ivt) > 0 else 0.0
-        )
+        # Effect size (NaN if no IVT reads — avoids systematic upward bias)
+        if len(valid_ivt) > 0:
+            effect_size = float(np.median(valid_native)) - float(np.median(valid_ivt))
+        else:
+            effect_size = float('nan')
 
         # Stoichiometry: fraction of native reads confidently modified
-        hmm_valid = valid_native[~np.isnan(valid_native)]
+        hmm_valid = valid_native
         stoichiometry = float(np.mean(hmm_valid > 0.5)) if len(hmm_valid) > 0 else 0.0
 
         results.append(

@@ -263,8 +263,6 @@ def _cmd_run(args: argparse.Namespace) -> None:
         f5c_threads = max(2, min(16, total_cores // max(args.threads, 1)))
     # Inject into extra_f5c_args (f5c uses -t for threads, --iop for I/O threads)
     extra_f5c_args = []
-    if hasattr(args, 'extra_f5c_args') and args.extra_f5c_args:
-        extra_f5c_args = list(args.extra_f5c_args)
     if '-t' not in extra_f5c_args:
         extra_f5c_args.extend(['-t', str(f5c_threads)])
     iop_threads = max(1, f5c_threads // 2)
