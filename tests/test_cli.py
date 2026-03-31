@@ -52,6 +52,7 @@ def sample_args_run():
         subsample=False,
         subsample_n=300,
         legacy_scoring=False,
+        mod_threshold=0.99,
     )
     return args
 
@@ -67,6 +68,7 @@ def sample_args_aggregate():
         no_read_bam=True,
         ref=None,
         legacy_scoring=False,
+        mod_threshold=0.99,
     )
     return args
 

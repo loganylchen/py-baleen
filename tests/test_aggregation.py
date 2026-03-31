@@ -107,49 +107,52 @@ def _run_pipeline(cr: ContigResult):
     return hier.compute_sequential_modification_probabilities(cr)
 
 
-class TestBetaBinomial:
+class TestThresholdAggregate:
     def test_all_modified(self):
         p_mod = np.ones(20, dtype=np.float64)
-        ratio, lo, hi = agg._beta_binomial_aggregate(p_mod)
-        assert ratio > 0.9
+        ratio, lo, hi = agg._threshold_aggregate(p_mod, threshold=0.99)
+        assert ratio == 1.0
         assert lo > 0.8
 
     def test_all_unmodified(self):
         p_mod = np.zeros(20, dtype=np.float64)
-        ratio, lo, hi = agg._beta_binomial_aggregate(p_mod)
-        assert ratio < 0.1
+        ratio, lo, hi = agg._threshold_aggregate(p_mod, threshold=0.99)
+        assert ratio == 0.0
         assert hi < 0.2
 
     def test_mixed(self):
-        p_mod = np.array([0.9] * 10 + [0.1] * 10, dtype=np.float64)
-        ratio, lo, hi = agg._beta_binomial_aggregate(p_mod)
-        assert 0.3 < ratio < 0.7
+        # 10 reads above threshold, 10 below
+        p_mod = np.array([1.0] * 10 + [0.1] * 10, dtype=np.float64)
+        ratio, lo, hi = agg._threshold_aggregate(p_mod, threshold=0.99)
+        assert ratio == 0.5
         assert lo < ratio < hi
 
     def test_ci_width_decreases_with_coverage(self):
-        rng = np.random.RandomState(123)
-        vals = rng.uniform(0.3, 0.7, size=5).astype(np.float64)
-        _, lo5, hi5 = agg._beta_binomial_aggregate(vals)
-        vals_big = rng.uniform(0.3, 0.7, size=100).astype(np.float64)
-        _, lo100, hi100 = agg._beta_binomial_aggregate(vals_big)
+        # 2/5 modified vs 40/100 modified — same ratio, narrower CI
+        p5 = np.array([1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        _, lo5, hi5 = agg._threshold_aggregate(p5, threshold=0.99)
+        p100 = np.array([1.0] * 40 + [0.0] * 60, dtype=np.float64)
+        _, lo100, hi100 = agg._threshold_aggregate(p100, threshold=0.99)
         assert (hi100 - lo100) < (hi5 - lo5)
 
 
-class TestMannWhitney:
+class TestFisherPvalue:
     def test_identical_distributions(self):
+        # No reads above threshold in either group
         native = np.array([0.1, 0.2, 0.15, 0.12, 0.18])
         ivt = np.array([0.11, 0.19, 0.14, 0.13, 0.17])
-        p = agg._mann_whitney_pvalue(native, ivt)
-        assert p > 0.3
+        p = agg._fisher_pvalue(native, ivt, threshold=0.99)
+        assert p == 1.0
 
     def test_clearly_different(self):
-        native = np.array([0.8, 0.9, 0.85, 0.88, 0.92])
+        # All native above threshold, no IVT above
+        native = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
         ivt = np.array([0.1, 0.12, 0.08, 0.15, 0.11])
-        p = agg._mann_whitney_pvalue(native, ivt)
+        p = agg._fisher_pvalue(native, ivt, threshold=0.99)
         assert p < 0.01
 
-    def test_too_few_reads(self):
-        p = agg._mann_whitney_pvalue(np.array([0.5]), np.array([0.1, 0.2]))
+    def test_no_reads(self):
+        p = agg._fisher_pvalue(np.array([]), np.array([0.1, 0.2]), threshold=0.99)
         assert p == 1.0
 
 
@@ -191,7 +194,8 @@ class TestAggregateContig:
             modified_positions={3, 7}, seed=55,
         )
         cmr = _run_pipeline(cr)
-        sites = agg.aggregate_contig(cmr)
+        # Use a lower threshold so synthetic data can pass it
+        sites = agg.aggregate_contig(cmr, mod_threshold=0.5)
         mod_positions = {100 + i for i in {3, 7}}
         mod_ratios = [s.mod_ratio for s in sites if s.position in mod_positions]
         unmod_ratios = [
@@ -206,7 +210,7 @@ class TestAggregateContig:
             n_positions=10, modified_positions={3, 7}, seed=55,
         )
         cmr = _run_pipeline(cr)
-        sites = agg.aggregate_contig(cmr)
+        sites = agg.aggregate_contig(cmr, mod_threshold=0.5)
         mod_pvals = [s.pvalue for s in sites if s.position in {103, 107}]
         unmod_pvals = [
             s.pvalue for s in sites if s.position not in {103, 107}
