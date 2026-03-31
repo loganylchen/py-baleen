@@ -1009,6 +1009,7 @@ def compute_sequential_modification_probabilities(
     consistent_fallback: bool = True,
     knn_weighted: bool = False,
     legacy_scoring: bool = False,
+    show_progress: bool = True,
 ) -> ContigModificationResult:
     """Run the full V1→V2→V3 hierarchical pipeline on a contig.
 
@@ -1082,6 +1083,7 @@ def compute_sequential_modification_probabilities(
         desc=f"  {contig_short} mod-calling",
         unit="step",
         leave=False,
+        disable=not show_progress,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
     )
     _mod_pbar.set_postfix_str("V1: null fitting")
