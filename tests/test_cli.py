@@ -49,6 +49,8 @@ def sample_args_run():
         keep_intermediate=False,
         f5c_threads=None,
         gpu_memory_limit=None,
+        subsample=False,
+        subsample_n=300,
     )
     return args
 
