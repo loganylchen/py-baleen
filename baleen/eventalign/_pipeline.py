@@ -172,32 +172,36 @@ def _compute_pairwise_loop(
 _MIN_GPU_PER_WORKER = 4 * 1024 ** 3  # 4 GB — minimum for efficient DTW chunks
 
 
-def _cap_threads_for_gpu(
+def _gpu_concurrent_workers(
     threads: int,
     gpu_mem: int,
     use_cuda: Optional[bool],
 ) -> int:
-    """Reduce *threads* so each worker gets enough GPU memory.
+    """Estimate how many workers can run GPU DTW concurrently.
 
-    Each worker needs at least ``_MIN_GPU_PER_WORKER`` bytes to build
-    large DTW chunks and keep the GPU busy.  If *use_cuda* is False or
-    the GPU is not available, *threads* is returned unchanged.
+    Returns the number of workers that can each hold a large DTW chunk
+    (``_MIN_GPU_PER_WORKER``) on the GPU simultaneously.  This is used
+    to size chunks (``chunk_mem_limit = gpu_mem * 0.8 / gpu_workers``)
+    so each kernel launch keeps the GPU busy.
+
+    Total *threads* is NOT reduced — extra workers run CPU phases
+    (f5c, HMM, aggregation) in parallel and naturally stagger their
+    DTW phases.
     """
     if threads <= 1:
-        return threads
+        return 1
     want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
     if not want_cuda:
-        return threads
-    max_workers = max(1, int(gpu_mem * 0.8 / _MIN_GPU_PER_WORKER))
-    if threads > max_workers:
+        return threads  # CPU mode: no GPU constraint on chunk sizing
+    gpu_workers = max(1, int(gpu_mem * 0.8 / _MIN_GPU_PER_WORKER))
+    gpu_workers = min(gpu_workers, threads)  # never exceed actual threads
+    if gpu_workers < threads:
         logger.info(
-            "  Capping GPU workers %d → %d (%.0f GB GPU, %.0f GB/worker minimum)",
-            threads, max_workers,
-            gpu_mem / 1024 ** 3,
-            _MIN_GPU_PER_WORKER / 1024 ** 3,
+            "  GPU chunk sizing: %d concurrent GPU workers "
+            "(%.0f GB GPU, %d total threads)",
+            gpu_workers, gpu_mem / 1024 ** 3, threads,
         )
-        return max_workers
-    return threads
+    return gpu_workers
 
 
 def _get_gpu_memory() -> int:
@@ -763,7 +767,7 @@ def run_pipeline(
     logger.debug("  Temporary directory: %s", tmp_root)
 
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    threads = _cap_threads_for_gpu(threads, resolved_gpu_mem, use_cuda)
+    gpu_workers = _gpu_concurrent_workers(threads, resolved_gpu_mem, use_cuda)
 
     try:
         if threads > 1:
@@ -801,7 +805,7 @@ def run_pipeline(
                         subsample=subsample,
                         subsample_n=subsample_n,
                         gpu_memory_bytes=resolved_gpu_mem,
-                        num_workers=threads,
+                        num_workers=gpu_workers,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -1036,7 +1040,7 @@ def run_pipeline_streaming(
         intermediate_dir = Path(output_dir) / "intermediate"
 
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    threads = _cap_threads_for_gpu(threads, resolved_gpu_mem, use_cuda)
+    gpu_workers = _gpu_concurrent_workers(threads, resolved_gpu_mem, use_cuda)
 
     try:
         worker_kwargs = dict(
@@ -1069,7 +1073,7 @@ def run_pipeline_streaming(
             subsample_n=subsample_n,
             gpu_memory_bytes=resolved_gpu_mem,
             legacy_scoring=legacy_scoring,
-            num_workers=threads,
+            num_workers=gpu_workers,
         )
 
         if threads > 1:
