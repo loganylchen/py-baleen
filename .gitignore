@@ -9,18 +9,6 @@ build/
 # Testing
 .pytest_cache/
 
-# Nanopore data files (never commit)
-*.bam
-*.bam.bai
-*.bai
-*.fq.gz
-*.fastq.gz
-*.blow5
-*.slow5
-*.fa
-*.fa.fai
-*.fasta
-*.fasta.fai
 
 # Pipeline outputs
 *.pkl
@@ -30,20 +18,6 @@ baleen_output/
 .vscode/
 .idea/
 
-# Allow testdata files (override nanopore data rules above)
-!testdata/**/*.fq.gz
-!testdata/**/*.fastq.gz
-!testdata/**/*.blow5
-!testdata/**/*.slow5
-!testdata/**/*.fa
-!testdata/**/*.fa.fai
-!testdata/**/*.fasta
-!testdata/**/*.fasta.fai
-!testdata/**/*.bam
-!testdata/**/*.bam.bai
-!testdata/**/*.bai
-!testdata/**/*.pkl
-!testdata/**/*.dict
 
 # OS
 .DS_Store
