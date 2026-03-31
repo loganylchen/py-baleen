@@ -169,49 +169,28 @@ def _compute_pairwise_loop(
 
 
 class _GpuBudget:
-    """Shared GPU memory budget for cross-process coordination.
+    """Serialize GPU access across worker processes.
 
-    Workers call :meth:`acquire` before a GPU DTW call and :meth:`release`
-    afterwards.  Uses a :class:`multiprocessing.Manager` so the object is
-    picklable and works with spawn-context ``ProcessPoolExecutor``.
+    Uses a spawn-context :class:`multiprocessing.Lock` so that only one
+    worker runs GPU DTW at a time.  This avoids GPU OOM when multiple
+    workers try to use the GPU concurrently, and is robust across
+    spawn-context ``ProcessPoolExecutor`` (no Manager needed).
     """
 
-    def __init__(self, total_bytes: int):
-        self._total = total_bytes
-        self._mgr = mp.Manager()
-        self._available = self._mgr.Value('l', total_bytes)
-        self._cond = self._mgr.Condition()
+    def __init__(self, ctx: "mp.context.BaseContext"):
+        self._lock = ctx.Lock()
 
-    def __getstate__(self):
-        # Exclude _mgr from pickling — it contains an AuthenticationString
-        # that cannot be pickled.  The proxy objects (_available, _cond)
-        # are picklable and are all workers need.
-        return {k: v for k, v in self.__dict__.items() if k != '_mgr'}
+    def acquire(self, nbytes: int) -> None:  # noqa: ARG002
+        """Acquire exclusive GPU access (blocks until available)."""
+        self._lock.acquire()
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._mgr = None  # worker side; shutdown() is a no-op
-
-    def acquire(self, nbytes: int) -> None:
-        """Block until *nbytes* is available, then reserve it."""
-        with self._cond:
-            while self._available.value < nbytes:
-                self._cond.wait()
-            self._available.value -= nbytes
-
-    def release(self, nbytes: int) -> None:
-        """Return *nbytes* to the budget."""
-        with self._cond:
-            self._available.value += nbytes
-            self._cond.notify_all()
+    def release(self, nbytes: int) -> None:  # noqa: ARG002
+        """Release GPU access."""
+        self._lock.release()
 
     def shutdown(self) -> None:
-        """Shut down the underlying manager."""
-        try:
-            if self._mgr is not None:
-                self._mgr.shutdown()
-        except Exception:
-            pass
+        """No-op; Lock requires no cleanup."""
+        pass
 
 
 def _get_gpu_memory() -> int:
@@ -789,18 +768,18 @@ def run_pipeline(
 
     # Create GPU budget for multi-worker coordination
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
+    ctx = mp.get_context('spawn') if threads > 1 else None
     gpu_budget: Optional[_GpuBudget] = None
     if threads > 1:
         want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
         if want_cuda:
-            gpu_budget = _GpuBudget(resolved_gpu_mem)
+            gpu_budget = _GpuBudget(ctx)
             logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
         if threads > 1:
             # Parallel processing with multiprocessing
             logger.info("  Using %d parallel workers (spawn context)", threads)
-            ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
                 futures = {
                     executor.submit(
@@ -1073,11 +1052,12 @@ def run_pipeline_streaming(
 
     # Create GPU budget for multi-worker coordination
     resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
+    ctx = mp.get_context('spawn') if threads > 1 else None
     gpu_budget: Optional[_GpuBudget] = None
     if threads > 1:
         want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
         if want_cuda:
-            gpu_budget = _GpuBudget(resolved_gpu_mem)
+            gpu_budget = _GpuBudget(ctx)
             logger.info("  GPU memory budget: %d MB", resolved_gpu_mem // (1024 * 1024))
 
     try:
@@ -1116,7 +1096,6 @@ def run_pipeline_streaming(
 
         if threads > 1:
             logger.info("  Using %d parallel workers (spawn context)", threads)
-            ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
                 futures = {
                     executor.submit(
