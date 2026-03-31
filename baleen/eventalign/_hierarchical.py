@@ -619,13 +619,15 @@ def _anchored_mixture_em(
     # Fallback: use global-alternative posterior when available,
     # otherwise z-score-based probability
     if not legacy_scoring and global_mu1 is not None and global_sigma1 is not None:
-        f0_fb = _normal_pdf(z_all, mu0, sigma0)
-        f1_fb = _normal_pdf(z_all, global_mu1, global_sigma1)
-        fallback = f1_fb / (f0_fb + f1_fb + _EPS)
-        # If global alternative is too close to null (fallback ≈ 0 for all),
-        # blend with z-score fallback to preserve signal for high-z reads
-        z_fallback = 1.0 - _norm_dist.cdf(-z_all)
-        fallback = np.maximum(fallback, z_fallback)
+        global_sep = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+        if global_sep > 0.5:
+            # Global alternative is meaningfully separated — use it
+            f0_fb = _normal_pdf(z_all, mu0, sigma0)
+            f1_fb = _normal_pdf(z_all, global_mu1, global_sigma1)
+            fallback = f1_fb / (f0_fb + f1_fb + _EPS)
+        else:
+            # Global alternative collapsed to null — use z-score fallback
+            fallback = 1.0 - _norm_dist.cdf(-z_all)
     else:
         fallback = 1.0 - _norm_dist.cdf(-z_all)
 
