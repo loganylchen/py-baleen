@@ -51,6 +51,7 @@ def sample_args_run():
         gpu_memory_limit=None,
         subsample=False,
         subsample_n=300,
+        legacy_scoring=False,
     )
     return args
 
@@ -65,6 +66,7 @@ def sample_args_aggregate():
         hmm_params=None,
         no_read_bam=True,
         ref=None,
+        legacy_scoring=False,
     )
     return args
 

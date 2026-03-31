@@ -65,6 +65,8 @@ class SiteResult:
     n_ivt: int
     mean_p_mod: float
     """Mean of native p_mod_hmm values."""
+    stoichiometry: float
+    """Fraction of native reads with p_mod_hmm > 0.5."""
 
 
 def _beta_binomial_aggregate(
@@ -198,6 +200,10 @@ def aggregate_contig(
             float(np.median(valid_ivt)) if len(valid_ivt) > 0 else 0.0
         )
 
+        # Stoichiometry: fraction of native reads confidently modified
+        hmm_valid = valid_native[~np.isnan(valid_native)]
+        stoichiometry = float(np.mean(hmm_valid > 0.5)) if len(hmm_valid) > 0 else 0.0
+
         results.append(
             SiteResult(
                 contig=cmr.contig,
@@ -212,6 +218,7 @@ def aggregate_contig(
                 n_native=ps.n_native,
                 n_ivt=ps.n_ivt,
                 mean_p_mod=float(np.mean(valid_native)),
+                stoichiometry=stoichiometry,
             )
         )
 
@@ -270,6 +277,7 @@ _TSV_COLUMNS = [
     "n_native",
     "n_ivt",
     "mean_p_mod",
+    "stoichiometry",
 ]
 
 
@@ -311,6 +319,7 @@ def write_site_tsv(
                 site.n_native,
                 site.n_ivt,
                 f"{site.mean_p_mod:.6f}",
+                f"{site.stoichiometry:.6f}",
             ])
 
     logger.info("Wrote %d site results to %s", len(sites), out)

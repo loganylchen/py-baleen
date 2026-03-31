@@ -172,14 +172,15 @@ class _GpuBudget:
     """Shared GPU memory budget for cross-process coordination.
 
     Workers call :meth:`acquire` before a GPU DTW call and :meth:`release`
-    afterwards.  Uses a condition variable so blocked workers wake
-    immediately when budget is freed.
+    afterwards.  Uses a :class:`multiprocessing.Manager` so the object is
+    picklable and works with spawn-context ``ProcessPoolExecutor``.
     """
 
     def __init__(self, total_bytes: int):
         self._total = total_bytes
-        self._available = mp.Value('l', total_bytes)
-        self._cond = mp.Condition(mp.Lock())
+        self._mgr = mp.Manager()
+        self._available = self._mgr.Value('l', total_bytes)
+        self._cond = self._mgr.Condition()
 
     def acquire(self, nbytes: int, timeout: float = 300.0) -> bool:
         """Block until *nbytes* is available, then reserve it."""
@@ -198,6 +199,13 @@ class _GpuBudget:
         with self._cond:
             self._available.value += nbytes
             self._cond.notify_all()
+
+    def shutdown(self) -> None:
+        """Shut down the underlying manager."""
+        try:
+            self._mgr.shutdown()
+        except Exception:
+            pass
 
 
 def _get_gpu_memory() -> int:
@@ -559,6 +567,7 @@ def _process_contig_streaming(
     subsample: bool = False,
     subsample_n: int = 300,
     gpu_memory_bytes: Optional[int] = None,
+    legacy_scoring: bool = False,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -621,6 +630,7 @@ def _process_contig_streaming(
     # Stage 2: HMM smoothing
     cmr = compute_sequential_modification_probabilities(
         contig_result, run_hmm=run_hmm, hmm_params=hmm_params,
+        legacy_scoring=legacy_scoring,
     )
 
     # Stage 3: Site-level aggregation (no FDR — done globally later)
@@ -871,6 +881,8 @@ def run_pipeline(
                 )
                 results[contig_name] = contig_result
     finally:
+        if gpu_budget is not None:
+            gpu_budget.shutdown()
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
@@ -921,6 +933,7 @@ def run_pipeline_streaming(
     gpu_memory_limit: Optional[int] = None,
     subsample: bool = False,
     subsample_n: int = 300,
+    legacy_scoring: bool = False,
 ) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -1084,6 +1097,7 @@ def run_pipeline_streaming(
             subsample=subsample,
             subsample_n=subsample_n,
             gpu_memory_bytes=resolved_gpu_mem,
+            legacy_scoring=legacy_scoring,
         )
 
         if threads > 1:
@@ -1124,6 +1138,8 @@ def run_pipeline_streaming(
                 hmm_results[contig_name] = cmr
                 all_sites.extend(sites)
     finally:
+        if gpu_budget is not None:
+            gpu_budget.shutdown()
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
