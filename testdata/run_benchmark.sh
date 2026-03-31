@@ -1,52 +1,50 @@
 #!/usr/bin/env bash
-# Run baleen benchmark across all stoichiometry levels (0.0–1.0) via Docker.
+# Run baleen benchmark across all stoichiometry levels (0.0–1.0).
+#
+# This script assumes you are already inside the baleen environment
+# (e.g. singularity shell / singularity exec).
 #
 # Usage:
-#   # CPU (default):
-#   bash testdata/run_benchmark.sh
+#   singularity exec -B /SSD --nv baleen.sif bash testdata/run_benchmark.sh /path/to/testdata
 #
-#   # GPU:
-#   BALEEN_IMAGE=btrspg/py-baleen:dev bash testdata/run_benchmark.sh
+#   # Or if already inside the container:
+#   bash run_benchmark.sh /path/to/testdata
+#
+# Arguments:
+#   $1  Path to testdata directory containing {0.0..1.0}/data/ and ref.fa
 #
 # Environment variables:
-#   BALEEN_IMAGE        Docker image (default: btrspg/py-baleen-cpu:dev)
-#   BENCHMARK_THREADS   Pipeline threads (default: 4)
-#   BALEEN_EXTRA_ARGS   Extra docker args, e.g. "--gpus all" for GPU
-#   BALEEN_RUN_ARGS     Extra baleen args, e.g. "" to remove --no-cuda
+#   BENCHMARK_THREADS     Pipeline threads (default: 4)
+#   BALEEN_RUN_ARGS       Extra baleen args (default: empty = auto-detect CUDA)
+#   BALEEN_MOD_THRESHOLD  Per-read P(mod) threshold (default: uses baleen default 0.99)
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve testdata directory
+DATA_DIR="${1:?Usage: $0 /path/to/testdata}"
+DATA_DIR="$(cd "$DATA_DIR" && pwd)"
+
 STOICH_LEVELS=(0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
 THREADS="${BENCHMARK_THREADS:-4}"
-
-# Docker settings
-IMAGE="${BALEEN_IMAGE:-btrspg/py-baleen-cpu:dev}"
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
-EXTRA_DOCKER_ARGS="${BALEEN_EXTRA_ARGS:-}"
-# Default: --no-cuda for CPU image; set BALEEN_RUN_ARGS="" to auto-detect
-RUN_ARGS="${BALEEN_RUN_ARGS:---no-cuda}"
-
-run_baleen() {
-    docker run --rm \
-        --user "$HOST_UID:$HOST_GID" \
-        -v "$SCRIPT_DIR:/data" \
-        $EXTRA_DOCKER_ARGS \
-        "$IMAGE" \
-        run "$@"
-}
+RUN_ARGS="${BALEEN_RUN_ARGS:-}"
+MOD_THRESHOLD="${BALEEN_MOD_THRESHOLD:-}"
 
 TOTAL=${#STOICH_LEVELS[@]}
 DONE=0
 
 for stoich in "${STOICH_LEVELS[@]}"; do
-    NATIVE="/data/$stoich/data/native_1"
-    IVT="/data/$stoich/data/control_1"
+    NATIVE="$DATA_DIR/$stoich/data/native_1"
+    IVT="$DATA_DIR/$stoich/data/control_1"
 
-    # Verify inputs exist on host
-    if [[ ! -f "$SCRIPT_DIR/$stoich/data/native_1/native_1.bam" ]]; then
-        echo "SKIP $stoich: native BAM not found"
+    # Verify inputs exist
+    if [[ ! -f "$NATIVE/native_1.bam" ]]; then
+        echo "SKIP $stoich: native BAM not found at $NATIVE/native_1.bam"
         continue
+    fi
+
+    # Threshold arg (if set)
+    THRESH_ARG=()
+    if [[ -n "$MOD_THRESHOLD" ]]; then
+        THRESH_ARG=(--mod-threshold "$MOD_THRESHOLD")
     fi
 
     COMMON_ARGS=(
@@ -56,28 +54,30 @@ for stoich in "${STOICH_LEVELS[@]}"; do
         --ivt-bam "$IVT/control_1.bam"
         --ivt-fastq "$IVT/fastq/pass.fq.gz"
         --ivt-blow5 "$IVT/blow5/nanopore.blow5"
-        --ref /data/ref.fa
+        --ref "$DATA_DIR/ref.fa"
         --threads "$THREADS"
+        --keep-intermediate
         --no-read-bam
+        "${THRESH_ARG[@]}"
         $RUN_ARGS
     )
 
     # --- New scoring (contig-level global alternative) ---
-    if [[ -f "$SCRIPT_DIR/$stoich/output/site_results.tsv" ]]; then
+    if [[ -f "$DATA_DIR/$stoich/output/site_results.tsv" ]]; then
         echo "SKIP $stoich new: output already exists"
     else
         echo "=== [$((DONE * 2 + 1))/$((TOTAL * 2))] Running $stoich (new scoring) ==="
-        mkdir -p "$SCRIPT_DIR/$stoich/output"
-        run_baleen "${COMMON_ARGS[@]}" -o "/data/$stoich/output"
+        mkdir -p "$DATA_DIR/$stoich/output"
+        baleen run "${COMMON_ARGS[@]}" -o "$DATA_DIR/$stoich/output"
     fi
 
     # --- Legacy scoring (per-position EM) ---
-    if [[ -f "$SCRIPT_DIR/$stoich/output_legacy/site_results.tsv" ]]; then
+    if [[ -f "$DATA_DIR/$stoich/output_legacy/site_results.tsv" ]]; then
         echo "SKIP $stoich legacy: output already exists"
     else
         echo "=== [$((DONE * 2 + 2))/$((TOTAL * 2))] Running $stoich (legacy scoring) ==="
-        mkdir -p "$SCRIPT_DIR/$stoich/output_legacy"
-        run_baleen "${COMMON_ARGS[@]}" -o "/data/$stoich/output_legacy" --legacy-scoring
+        mkdir -p "$DATA_DIR/$stoich/output_legacy"
+        baleen run "${COMMON_ARGS[@]}" -o "$DATA_DIR/$stoich/output_legacy" --legacy-scoring
     fi
 
     DONE=$((DONE + 1))
@@ -85,4 +85,5 @@ done
 
 echo ""
 echo "=== Benchmark complete ($DONE stoichiometry levels) ==="
-echo "Run: python testdata/evaluate_benchmark.py"
+echo "Results in: $DATA_DIR/{0.0..1.0}/output/"
+echo "Run evaluation: python testdata/evaluate_benchmark.py $DATA_DIR"

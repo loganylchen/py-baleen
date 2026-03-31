@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate baleen benchmark: AUPRC/AUROC across stoichiometry levels."""
+"""Evaluate baleen benchmark: AUPRC/AUROC across stoichiometry levels.
+
+Also exports read-level results and finds the optimal mod_threshold
+from the stoich=1.0 dataset.
+"""
 
 import sys
 from pathlib import Path
@@ -9,14 +13,21 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-TESTDATA = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 STOICH_LEVELS = [f"{x / 10:.1f}" for x in range(11)]  # 0.0 .. 1.0
 SCORE_COLS = ["mod_ratio", "mean_p_mod", "effect_size", "stoichiometry"]
+
+# Resolved at runtime via CLI arg or default to script directory
+TESTDATA: Path = SCRIPT_DIR
 
 
 def load_ground_truth() -> set[tuple[str, int]]:
     """Load known modification positions as (contig, position) set."""
-    gt = pd.read_csv(TESTDATA / "known_modifications.tsv", sep="\t")
+    # known_modifications.tsv lives next to this script, not necessarily in TESTDATA
+    gt_path = TESTDATA / "known_modifications.tsv"
+    if not gt_path.exists():
+        gt_path = SCRIPT_DIR / "known_modifications.tsv"
+    gt = pd.read_csv(gt_path, sep="\t")
     return set(zip(gt["contig"], gt["position"]))
 
 
@@ -53,10 +64,214 @@ def evaluate(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
     return results
 
 
-def main():
-    gt = load_ground_truth()
-    rows = []
+# ---------------------------------------------------------------------------
+# Read-level export from intermediate .pkl files
+# ---------------------------------------------------------------------------
 
+
+def export_read_level(stoich: str, mode: str = "new") -> pd.DataFrame | None:
+    """Export read-level p_mod values from intermediate .pkl files.
+
+    Returns a DataFrame with columns:
+        contig, position, kmer, read_name, condition (native/ivt),
+        p_mod_raw, p_mod_knn, p_mod_hmm
+    """
+    import pickle
+
+    subdir = "output" if mode == "new" else "output_legacy"
+    intermediate_dir = TESTDATA / stoich / subdir / "intermediate"
+
+    # Try loading per-contig .pkl files first
+    pkl_files = sorted(intermediate_dir.glob("*.pkl")) if intermediate_dir.exists() else []
+
+    # Fall back to pipeline_results.pkl
+    if not pkl_files:
+        pipeline_pkl = TESTDATA / stoich / subdir / "pipeline_results.pkl"
+        if not pipeline_pkl.exists():
+            return None
+        with pipeline_pkl.open("rb") as f:
+            loaded = pickle.load(f)
+        if isinstance(loaded, tuple):
+            contig_results = loaded[0]
+        else:
+            contig_results = loaded
+
+        # Need to run HMM to get per-read scores
+        from baleen.eventalign._hierarchical import (
+            compute_sequential_modification_probabilities,
+        )
+
+        hmm_results = {}
+        for contig, cr in contig_results.items():
+            hmm_results[contig] = compute_sequential_modification_probabilities(cr)
+    else:
+        # Load intermediate ContigResult files and run HMM
+        import pickle
+
+        from baleen.eventalign._hierarchical import (
+            compute_sequential_modification_probabilities,
+        )
+
+        hmm_results = {}
+        for pkl_file in pkl_files:
+            with pkl_file.open("rb") as f:
+                cr = pickle.load(f)
+            contig = cr.contig
+            hmm_results[contig] = compute_sequential_modification_probabilities(cr)
+
+    # Extract read-level data
+    rows = []
+    for contig, cmr in sorted(hmm_results.items()):
+        for pos, ps in sorted(cmr.position_stats.items()):
+            for i, name in enumerate(ps.native_read_names):
+                rows.append({
+                    "contig": contig,
+                    "position": pos,
+                    "kmer": ps.reference_kmer,
+                    "read_name": name,
+                    "condition": "native",
+                    "p_mod_raw": float(ps.p_mod_raw[i]),
+                    "p_mod_knn": float(ps.p_mod_knn[i]),
+                    "p_mod_hmm": float(ps.p_mod_hmm[i]),
+                })
+            for j, name in enumerate(ps.ivt_read_names):
+                idx = ps.n_native + j
+                rows.append({
+                    "contig": contig,
+                    "position": pos,
+                    "kmer": ps.reference_kmer,
+                    "read_name": name,
+                    "condition": "ivt",
+                    "p_mod_raw": float(ps.p_mod_raw[idx]),
+                    "p_mod_knn": float(ps.p_mod_knn[idx]),
+                    "p_mod_hmm": float(ps.p_mod_hmm[idx]),
+                })
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Threshold optimization from stoich=1.0
+# ---------------------------------------------------------------------------
+
+
+def find_optimal_threshold(
+    read_df: pd.DataFrame,
+    gt: set[tuple[str, int]],
+    score_col: str = "p_mod_hmm",
+    thresholds: np.ndarray | None = None,
+) -> dict:
+    """Find optimal per-read threshold using stoich=1.0 data.
+
+    At stoich=1.0, all known modification sites should be fully modified
+    in the native sample. We evaluate thresholds by:
+    1. For each threshold, compute site-level mod_ratio (fraction of native
+       reads above threshold)
+    2. Classify sites as positive if mod_ratio > 0 (or use a site-level cutoff)
+    3. Compute AUPRC on true positive sites
+
+    Returns dict with threshold, metrics, and recommendation.
+    """
+    if thresholds is None:
+        thresholds = np.arange(0.5, 1.001, 0.01)
+
+    native_df = read_df[read_df["condition"] == "native"].copy()
+    ivt_df = read_df[read_df["condition"] == "ivt"].copy()
+
+    # For each threshold, compute per-site mod_ratio
+    results = []
+    for thresh in thresholds:
+        site_rows = []
+        for (contig, pos), grp in native_df.groupby(["contig", "position"]):
+            scores = grp[score_col].values
+            n_mod = np.sum(scores > thresh)
+            n_total = len(scores)
+            mod_ratio = n_mod / n_total if n_total > 0 else 0.0
+
+            # Also get IVT mod_ratio for Fisher-like comparison
+            ivt_grp = ivt_df[(ivt_df["contig"] == contig) & (ivt_df["position"] == pos)]
+            ivt_scores = ivt_grp[score_col].values if len(ivt_grp) > 0 else np.array([])
+            ivt_mod = np.sum(ivt_scores > thresh) if len(ivt_scores) > 0 else 0
+            ivt_total = len(ivt_scores)
+            ivt_ratio = ivt_mod / ivt_total if ivt_total > 0 else 0.0
+
+            is_true = (contig, pos) in gt
+            site_rows.append({
+                "contig": contig,
+                "position": pos,
+                "mod_ratio": mod_ratio,
+                "ivt_ratio": ivt_ratio,
+                "is_modified": is_true,
+                "n_native": n_total,
+                "n_native_mod": int(n_mod),
+            })
+
+        site_df = pd.DataFrame(site_rows)
+        labels = site_df["is_modified"].astype(int).values
+        scores = site_df["mod_ratio"].values
+
+        if labels.sum() == 0 or labels.sum() == len(labels):
+            continue
+
+        auprc = average_precision_score(labels, scores)
+        auroc = roc_auc_score(labels, scores)
+
+        # FP rate at stoich=0 proxy: IVT mod_ratio on unmodified sites
+        unmod = site_df[~site_df["is_modified"]]
+        fp_rate = (unmod["mod_ratio"] > 0).mean() if len(unmod) > 0 else 0.0
+
+        # Sensitivity: fraction of true positive sites with mod_ratio > 0
+        mod_sites = site_df[site_df["is_modified"]]
+        sensitivity = (mod_sites["mod_ratio"] > 0).mean() if len(mod_sites) > 0 else 0.0
+
+        # Mean mod_ratio at true sites
+        mean_mod_ratio_true = mod_sites["mod_ratio"].mean() if len(mod_sites) > 0 else 0.0
+
+        results.append({
+            "threshold": float(thresh),
+            "auprc": auprc,
+            "auroc": auroc,
+            "fp_rate": fp_rate,
+            "sensitivity": sensitivity,
+            "mean_mod_ratio_true": mean_mod_ratio_true,
+        })
+
+    if not results:
+        return {"error": "No valid thresholds found"}
+
+    results_df = pd.DataFrame(results)
+
+    # Best threshold: maximize AUPRC with penalty for FP
+    # Score = AUPRC - 0.5 * fp_rate
+    results_df["score"] = results_df["auprc"] - 0.5 * results_df["fp_rate"]
+    best_idx = results_df["score"].idxmax()
+    best = results_df.loc[best_idx]
+
+    return {
+        "best_threshold": best["threshold"],
+        "best_auprc": best["auprc"],
+        "best_auroc": best["auroc"],
+        "best_fp_rate": best["fp_rate"],
+        "best_sensitivity": best["sensitivity"],
+        "all_results": results_df,
+    }
+
+
+def main():
+    global TESTDATA
+    if len(sys.argv) > 1:
+        TESTDATA = Path(sys.argv[1]).resolve()
+        print(f"Using data directory: {TESTDATA}")
+    else:
+        print(f"Using default data directory: {TESTDATA}")
+        print("  (pass a path as argument to override, e.g. python evaluate_benchmark.py /SSD/testdata)")
+
+    gt = load_ground_truth()
+
+    # ---- Standard site-level evaluation ----
+    rows = []
     for stoich in STOICH_LEVELS:
         for mode in ("new", "legacy"):
             df = load_results(stoich, mode)
@@ -79,8 +294,86 @@ def main():
     summary.to_csv(TESTDATA / "benchmark_summary.csv", index=False)
     print(f"\nSaved to {TESTDATA / 'benchmark_summary.csv'}")
 
-    # --- Plot AUPRC vs stoichiometry (new vs legacy) ---
-    # Use best available score column
+    # ---- Read-level export ----
+    print("\n=== Exporting read-level results ===")
+    for stoich in STOICH_LEVELS:
+        for mode in ("new",):
+            read_df = export_read_level(stoich, mode)
+            if read_df is None:
+                print(f"  {stoich} {mode}: no intermediate data")
+                continue
+            subdir = "output" if mode == "new" else "output_legacy"
+            out_path = TESTDATA / stoich / subdir / "read_results.tsv"
+            read_df.to_csv(out_path, sep="\t", index=False)
+            n_reads = len(read_df)
+            n_sites = read_df.groupby(["contig", "position"]).ngroups
+            print(f"  {stoich} {mode}: {n_reads} read-level entries across {n_sites} sites -> {out_path}")
+
+    # ---- Threshold optimization from stoich=1.0 ----
+    print("\n=== Threshold Optimization (stoich=1.0) ===")
+    read_1_0 = export_read_level("1.0", "new")
+    if read_1_0 is not None:
+        opt = find_optimal_threshold(read_1_0, gt)
+        if "error" not in opt:
+            print(f"\n  Recommended threshold:  {opt['best_threshold']:.2f}")
+            print(f"  AUPRC at best:         {opt['best_auprc']:.4f}")
+            print(f"  AUROC at best:         {opt['best_auroc']:.4f}")
+            print(f"  FP rate (unmod sites): {opt['best_fp_rate']:.4f}")
+            print(f"  Sensitivity (TP > 0):  {opt['best_sensitivity']:.4f}")
+
+            # Save full threshold scan
+            opt_df = opt["all_results"]
+            opt_path = TESTDATA / "threshold_optimization.csv"
+            opt_df.to_csv(opt_path, index=False)
+            print(f"\n  Full scan saved to {opt_path}")
+
+            # Print top-10 thresholds
+            print("\n  Top 10 thresholds by score (AUPRC - 0.5*FP_rate):")
+            top = opt_df.nlargest(10, "score")
+            print(top.to_string(index=False, float_format="%.4f"))
+
+            # Plot threshold scan
+            fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+            ax = axes[0]
+            ax.plot(opt_df["threshold"], opt_df["auprc"], "-o", markersize=3, label="AUPRC")
+            ax.plot(opt_df["threshold"], opt_df["auroc"], "-s", markersize=3, label="AUROC")
+            ax.axvline(opt["best_threshold"], color="red", ls="--", alpha=0.7,
+                       label=f"best={opt['best_threshold']:.2f}")
+            ax.set_xlabel("Threshold")
+            ax.set_ylabel("Score")
+            ax.set_title("Site-level classification (stoich=1.0)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            ax = axes[1]
+            ax.plot(opt_df["threshold"], opt_df["sensitivity"], "-o", markersize=3, label="Sensitivity")
+            ax.plot(opt_df["threshold"], 1 - opt_df["fp_rate"], "-s", markersize=3, label="1 - FP rate")
+            ax.axvline(opt["best_threshold"], color="red", ls="--", alpha=0.7)
+            ax.set_xlabel("Threshold")
+            ax.set_ylabel("Rate")
+            ax.set_title("Sensitivity vs Specificity")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            ax = axes[2]
+            ax.plot(opt_df["threshold"], opt_df["mean_mod_ratio_true"], "-o", markersize=3)
+            ax.axvline(opt["best_threshold"], color="red", ls="--", alpha=0.7)
+            ax.set_xlabel("Threshold")
+            ax.set_ylabel("Mean mod_ratio at true sites")
+            ax.set_title("Signal strength at known sites")
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plot_path = TESTDATA / "threshold_optimization.png"
+            plt.savefig(plot_path, dpi=150)
+            print(f"\n  Plot saved to {plot_path}")
+        else:
+            print(f"  Error: {opt['error']}")
+    else:
+        print("  No read-level data for stoich=1.0. Run with --keep-intermediate first.")
+
+    # ---- Plot AUPRC vs stoichiometry ----
     score_col = None
     for candidate in ["auprc_mean_p_mod", "auprc_mod_ratio", "auprc_effect_size"]:
         if candidate in summary.columns:
