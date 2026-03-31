@@ -275,6 +275,7 @@ def _process_contig(
     subsample_n: int = 300,
     gpu_memory_bytes: Optional[int] = None,
     num_workers: int = 1,
+    show_progress: bool = True,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -380,6 +381,7 @@ def _process_contig(
         desc=f"  {contig_short}",
         unit="pos",
         leave=False,
+        disable=not show_progress,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
     )
     pbar.set_postfix_str("extracting signals")
@@ -549,6 +551,7 @@ def _process_contig_streaming(
     legacy_scoring: bool = False,
     num_workers: int = 1,
     mod_threshold: float = 0.99,
+    show_progress: bool = True,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -608,12 +611,14 @@ def _process_contig_streaming(
         subsample_n=subsample_n,
         gpu_memory_bytes=gpu_memory_bytes,
         num_workers=num_workers,
+        show_progress=show_progress,
     )
 
     # Stage 2: HMM smoothing
     cmr = compute_sequential_modification_probabilities(
         contig_result, run_hmm=run_hmm, hmm_params=hmm_params,
         legacy_scoring=legacy_scoring,
+        show_progress=show_progress,
     )
 
     # Stage 3: Site-level aggregation (no FDR — done globally later)
@@ -809,6 +814,7 @@ def run_pipeline(
                         subsample_n=subsample_n,
                         gpu_memory_bytes=resolved_gpu_mem,
                         num_workers=gpu_workers,
+                        show_progress=False,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -1079,6 +1085,7 @@ def run_pipeline_streaming(
             legacy_scoring=legacy_scoring,
             num_workers=gpu_workers,
             mod_threshold=mod_threshold,
+            show_progress=(threads <= 1),
         )
 
         if threads > 1:
