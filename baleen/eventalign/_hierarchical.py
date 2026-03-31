@@ -1196,11 +1196,6 @@ def compute_sequential_modification_probabilities(
 
     _mod_pbar.set_postfix_str("kNN scoring")
 
-    # Per-position Beta calibration first, then contig-level rescue for gated positions
-    all_raw_knn: dict[int, NDArray[np.float64]] = {}
-    all_ivt_masks: dict[int, NDArray[np.bool_]] = {}
-    gated_positions: list[int] = []  # positions where per-position gate fired
-
     for pos in sorted_positions:
         pr = contig_result.positions[pos]
         ps = position_stats[pos]
@@ -1220,55 +1215,7 @@ def compute_sequential_modification_probabilities(
 
         cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
         ps.p_mod_knn[:] = cal.probabilities
-
-        if not legacy_scoring and cal.null_gate_active:
-            # Per-position gate fired — rescue only if V2 suggests
-            # some modification signal (mean native p_mod_raw > 0.1)
-            native_raw_mean = float(np.mean(ps.p_mod_raw[:ps.n_native]))
-            if native_raw_mean > 0.1:
-                all_raw_knn[pos] = raw_knn
-                all_ivt_masks[pos] = ivt_mask
-                gated_positions.append(pos)
-
         _mod_pbar.update(1)
-
-    # Contig-level rescue: re-calibrate gated positions using pooled data
-    if gated_positions and len(all_raw_knn) > 0:
-        # Pool scores from ALL positions (not just gated) for a robust fit
-        pool_scores_list = []
-        pool_ivt_list = []
-        for pos in sorted_positions:
-            pr = contig_result.positions[pos]
-            n_total = pr.n_native_reads + pr.n_ivt_reads
-            if n_total < 3:
-                continue
-            if pos in all_raw_knn:
-                pool_scores_list.append(all_raw_knn[pos])
-            else:
-                # Re-compute raw scores for non-gated positions
-                pool_scores_list.append(_score_knn_ivt_purity(
-                    pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
-                    weighted=knn_weighted,
-                ))
-            ivt_mask = np.zeros(n_total, dtype=bool)
-            ivt_mask[pr.n_native_reads:] = True
-            pool_ivt_list.append(ivt_mask)
-
-        pooled_scores = np.concatenate(pool_scores_list)
-        pooled_ivt = np.concatenate(pool_ivt_list)
-        contig_cal = _calibrate_beta(pooled_scores, pooled_ivt, ~pooled_ivt)
-
-        if not contig_cal.null_gate_active:
-            # Distribute contig-level posteriors only to gated positions
-            offset = 0
-            for pos in sorted_positions:
-                pr = contig_result.positions[pos]
-                n_total = pr.n_native_reads + pr.n_ivt_reads
-                if n_total < 3:
-                    continue
-                if pos in all_raw_knn:
-                    position_stats[pos].p_mod_knn[:] = contig_cal.probabilities[offset:offset + n_total]
-                offset += n_total
 
     # Fix A: update short-trajectory fallback to match emission_source.
     # Without this, short-trajectory reads keep V2 p_mod_raw while long
