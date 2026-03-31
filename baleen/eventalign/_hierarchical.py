@@ -550,6 +550,11 @@ def _anchored_mixture_em(
         )
     else:
         use_global = (global_mu1 is not None and global_sigma1 is not None)
+        # Sanity check: reject degenerate global alternative
+        if use_global:
+            global_sep = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+            if global_sigma1 > 10 * sigma0 or global_sep > 50:
+                use_global = False
     if use_global:
         mu1 = global_mu1
         sigma1 = global_sigma1
@@ -619,14 +624,14 @@ def _anchored_mixture_em(
     # Fallback: use global-alternative posterior when available,
     # otherwise z-score-based probability
     if not legacy_scoring and global_mu1 is not None and global_sigma1 is not None:
-        global_sep = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
-        if global_sep > 0.5:
-            # Global alternative is meaningfully separated — use it
+        global_sep_fb = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+        if 0.5 < global_sep_fb < 50 and global_sigma1 < 10 * sigma0:
+            # Global alternative is meaningfully separated and not degenerate
             f0_fb = _normal_pdf(z_all, mu0, sigma0)
             f1_fb = _normal_pdf(z_all, global_mu1, global_sigma1)
             fallback = f1_fb / (f0_fb + f1_fb + _EPS)
         else:
-            # Global alternative collapsed to null — use z-score fallback
+            # Global alternative degenerate or collapsed — use z-score fallback
             fallback = 1.0 - _norm_dist.cdf(-z_all)
     else:
         fallback = 1.0 - _norm_dist.cdf(-z_all)
@@ -1165,13 +1170,17 @@ def compute_sequential_modification_probabilities(
         z_native = ps.z_scores[: ps.n_native]
         z_ivt = ps.z_scores[ps.n_native :]
 
+        # Lower gate thresholds for contig-level calibration mode
+        eff_pi_thresh = mixture_pi_threshold if legacy_scoring else 0.02
+        eff_sep_thresh = mixture_separation if legacy_scoring else 0.3
         p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
             z_native,
             z_ivt,
             ps.z_scores,
             max_iter=mixture_max_iter,
-            pi_threshold=mixture_pi_threshold,
-            separation_threshold=mixture_separation,
+            pi_threshold=eff_pi_thresh,
+            separation_threshold=eff_sep_thresh,
+            tau_sep=0.3 if not legacy_scoring else 0.5,
             global_mu1=global_mu1,
             global_sigma1=global_sigma1,
             legacy_scoring=legacy_scoring,
@@ -1191,86 +1200,76 @@ def compute_sequential_modification_probabilities(
 
     _mod_pbar.set_postfix_str("kNN scoring")
 
-    if legacy_scoring:
-        # Per-position Beta calibration (original behavior)
+    # Per-position Beta calibration first, then contig-level rescue for gated positions
+    all_raw_knn: dict[int, NDArray[np.float64]] = {}
+    all_ivt_masks: dict[int, NDArray[np.bool_]] = {}
+    gated_positions: list[int] = []  # positions where per-position gate fired
+
+    for pos in sorted_positions:
+        pr = contig_result.positions[pos]
+        ps = position_stats[pos]
+        n_total = pr.n_native_reads + pr.n_ivt_reads
+
+        if n_total < 3:
+            _mod_pbar.update(1)
+            continue
+
+        raw_knn = _score_knn_ivt_purity(
+            pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
+            weighted=knn_weighted,
+        )
+
+        ivt_mask = np.zeros(n_total, dtype=bool)
+        ivt_mask[pr.n_native_reads:] = True
+
+        cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
+        ps.p_mod_knn[:] = cal.probabilities
+
+        if not legacy_scoring and cal.null_gate_active:
+            # Per-position gate fired — save for contig-level rescue
+            all_raw_knn[pos] = raw_knn
+            all_ivt_masks[pos] = ivt_mask
+            gated_positions.append(pos)
+
+        _mod_pbar.update(1)
+
+    # Contig-level rescue: re-calibrate gated positions using pooled data
+    if gated_positions and len(all_raw_knn) > 0:
+        # Pool scores from ALL positions (not just gated) for a robust fit
+        pool_scores_list = []
+        pool_ivt_list = []
         for pos in sorted_positions:
             pr = contig_result.positions[pos]
-            ps = position_stats[pos]
-            n_total = pr.n_native_reads + pr.n_ivt_reads
-
-            if n_total < 3:
-                _mod_pbar.update(1)
-                continue
-
-            raw_knn = _score_knn_ivt_purity(
-                pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
-                weighted=knn_weighted,
-            )
-
-            ivt_mask = np.zeros(n_total, dtype=bool)
-            ivt_mask[pr.n_native_reads:] = True
-
-            cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
-            ps.p_mod_knn[:] = cal.probabilities
-            _mod_pbar.update(1)
-    else:
-        # Contig-level Beta calibration: pool raw kNN scores, fit once
-        all_raw_knn: list[NDArray[np.float64]] = []
-        all_ivt_masks: list[NDArray[np.bool_]] = []
-        knn_positions: list[int] = []  # positions that have enough reads
-
-        for pos in sorted_positions:
-            pr = contig_result.positions[pos]
             n_total = pr.n_native_reads + pr.n_ivt_reads
             if n_total < 3:
-                _mod_pbar.update(1)
                 continue
-
-            raw_knn = _score_knn_ivt_purity(
-                pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
-                weighted=knn_weighted,
-            )
-            ivt_mask = np.zeros(n_total, dtype=bool)
-            ivt_mask[pr.n_native_reads:] = True
-
-            all_raw_knn.append(raw_knn)
-            all_ivt_masks.append(ivt_mask)
-            knn_positions.append(pos)
-            _mod_pbar.update(1)
-
-        if all_raw_knn:
-            pooled_scores = np.concatenate(all_raw_knn)
-            pooled_ivt = np.concatenate(all_ivt_masks)
-
-            # Fit contig-level Beta mixture on pooled data
-            contig_cal = _calibrate_beta(pooled_scores, pooled_ivt, ~pooled_ivt)
-
-            if contig_cal.null_gate_active:
-                # Rare: no modification signal anywhere in contig.
-                # Fall back to per-position calibration.
-                logger.debug("Contig-level kNN gate fired; falling back to per-position")
-                offset = 0
-                for pos in knn_positions:
-                    pr = contig_result.positions[pos]
-                    ps = position_stats[pos]
-                    n_total = pr.n_native_reads + pr.n_ivt_reads
-                    ivt_mask = np.zeros(n_total, dtype=bool)
-                    ivt_mask[pr.n_native_reads:] = True
-                    cal = _calibrate_beta(
-                        all_raw_knn[knn_positions.index(pos)],
-                        ivt_mask, ~ivt_mask,
-                    )
-                    ps.p_mod_knn[:] = cal.probabilities
-                    offset += n_total
+            if pos in all_raw_knn:
+                pool_scores_list.append(all_raw_knn[pos])
             else:
-                # Distribute contig-level posteriors back to positions
-                offset = 0
-                for pos in knn_positions:
-                    ps = position_stats[pos]
-                    pr = contig_result.positions[pos]
-                    n_total = pr.n_native_reads + pr.n_ivt_reads
-                    ps.p_mod_knn[:] = contig_cal.probabilities[offset:offset + n_total]
-                    offset += n_total
+                # Re-compute raw scores for non-gated positions
+                pool_scores_list.append(_score_knn_ivt_purity(
+                    pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
+                    weighted=knn_weighted,
+                ))
+            ivt_mask = np.zeros(n_total, dtype=bool)
+            ivt_mask[pr.n_native_reads:] = True
+            pool_ivt_list.append(ivt_mask)
+
+        pooled_scores = np.concatenate(pool_scores_list)
+        pooled_ivt = np.concatenate(pool_ivt_list)
+        contig_cal = _calibrate_beta(pooled_scores, pooled_ivt, ~pooled_ivt)
+
+        if not contig_cal.null_gate_active:
+            # Distribute contig-level posteriors only to gated positions
+            offset = 0
+            for pos in sorted_positions:
+                pr = contig_result.positions[pos]
+                n_total = pr.n_native_reads + pr.n_ivt_reads
+                if n_total < 3:
+                    continue
+                if pos in all_raw_knn:
+                    position_stats[pos].p_mod_knn[:] = contig_cal.probabilities[offset:offset + n_total]
+                offset += n_total
 
     # Fix A: update short-trajectory fallback to match emission_source.
     # Without this, short-trajectory reads keep V2 p_mod_raw while long
