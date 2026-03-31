@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Small helpers
 # ---------------------------------------------------------------------------
 
-_EPS = 1e-300  # avoid log(0)
+_EPS = 1e-20  # avoid log(0) / division by zero
 _MIN_SIGMA = 1e-6  # lower bound on fitted standard deviations
 
 
