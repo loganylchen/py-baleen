@@ -129,6 +129,11 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Skip HMM smoothing (output V2 scores only)",
     )
 
+    pipe.add_argument(
+        "--legacy-scoring", action="store_true", default=False,
+        help="Use per-position EM calibration (legacy behavior, less sensitive at low stoichiometry)",
+    )
+
     # f5c options
     f5c = parser.add_argument_group("f5c options")
     f5c.add_argument(
@@ -194,6 +199,10 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ivt-bam", type=str, default=None,
         help="IVT BAM file (required for mod-BAM output)",
+    )
+    parser.add_argument(
+        "--legacy-scoring", action="store_true", default=False,
+        help="Use per-position EM calibration (legacy behavior)",
     )
 
 
@@ -293,6 +302,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         gpu_memory_limit=args.gpu_memory_limit,
         subsample=args.subsample,
         subsample_n=args.subsample_n,
+        legacy_scoring=args.legacy_scoring,
     )
 
     # Write outputs
@@ -346,6 +356,7 @@ def _cmd_aggregate(args: argparse.Namespace) -> None:
     for contig, cr in contig_results.items():
         hmm_results[contig] = compute_sequential_modification_probabilities(
             cr, hmm_params=hmm_params,
+            legacy_scoring=getattr(args, 'legacy_scoring', False),
         )
 
     # Aggregate
