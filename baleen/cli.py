@@ -86,12 +86,12 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Save per-contig DTW intermediate results (ContigResult files)",
     )
     pipe.add_argument(
-        "--subsample", action="store_true", default=False,
-        help="Subsample reads per condition per contig to reduce memory usage",
+        "--no-subsample", action="store_true", default=False,
+        help="Disable read subsampling (by default, reads are subsampled per condition per contig)",
     )
     pipe.add_argument(
         "--subsample-n", type=int, default=300,
-        help="Max reads per condition per contig when --subsample is enabled (default: 300)",
+        help="Max reads per condition per contig (default: 300)",
     )
 
     # DTW options
@@ -306,7 +306,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         target_contigs=target_contigs,
         keep_intermediate=args.keep_intermediate,
         gpu_memory_limit=args.gpu_memory_limit,
-        subsample=args.subsample,
+        subsample=not args.no_subsample,
         subsample_n=args.subsample_n,
         legacy_scoring=args.legacy_scoring,
         mod_threshold=args.mod_threshold,
