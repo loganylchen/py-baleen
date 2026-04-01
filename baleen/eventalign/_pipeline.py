@@ -680,6 +680,9 @@ def run_pipeline(
                 subsample, subsample_n, gpu_memory_limit)
     logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
                 cleanup_temp, kmer_model, extra_f5c_args)
+    logger.info("  DTW backend:  %s  (CUDA=%s, tslearn=%s)",
+                _cuda_dtw.backend(), _cuda_dtw.CUDA_AVAILABLE,
+                _cuda_dtw.TSLEARN_AVAILABLE)
     logger.info("=" * 60)
 
     # Validate threads parameter
