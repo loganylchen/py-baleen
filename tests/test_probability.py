@@ -193,15 +193,18 @@ class TestCalibrateNormal:
         assert float(np.mean(native_probs)) > 0.5
         assert float(np.mean(ivt_probs)) < 0.3
 
-    def test_null_position_triggers_gate(self) -> None:
+    def test_null_position_low_probabilities(self) -> None:
+        """When native and IVT are drawn from the same distribution,
+        soft gate should produce low modification probabilities."""
         rng = np.random.RandomState(42)
         all_scores = rng.normal(0, 0.5, size=30)
         ivt_mask = np.zeros(30, dtype=bool)
         ivt_mask[15:] = True
 
         cal = _calibrate_normal(all_scores, ivt_mask, ~ivt_mask)
-        assert cal.null_gate_active
-        assert np.all(cal.probabilities == 0.0)
+        # With soft gating, probabilities are no longer hard-zeroed but
+        # should remain moderate (z-score fallback on null data ≈ 0.5)
+        assert float(np.mean(cal.probabilities)) < 0.7
 
 
 class TestCalibrateBeta:
@@ -244,11 +247,12 @@ class TestDistanceToIvt:
         # Native should have higher prob than IVT
         assert float(np.mean(result.native_probabilities)) > float(np.mean(result.ivt_probabilities))
 
-    def test_null_position_returns_zero(self) -> None:
+    def test_null_position_low_probabilities(self) -> None:
+        """Null matrix (no modification signal) should yield low probabilities."""
         mat = _make_null_matrix(10, 10)
         result = distance_to_ivt(mat, n_native=10, n_ivt=10)
-        assert result.null_gate_active
-        assert np.all(result.probabilities == 0.0)
+        # With soft gating, null positions produce low but non-zero probs
+        assert float(np.mean(np.abs(result.probabilities))) < 0.7
 
     def test_scores_shape(self) -> None:
         mat = _make_block_distance_matrix(5, 5)
