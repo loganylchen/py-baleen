@@ -46,7 +46,7 @@ jobs:
           images: ${{ secrets.DH_USER }}/${{ github.event.repository.name }}-cpu
           tags: |
             type=ref,event=branch
-            type=sha,prefix=
+            type=sha,prefix=,format=long
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/dev' }}
 
       - name: Build and push CPU image
@@ -79,7 +79,7 @@ jobs:
           images: ${{ secrets.DH_USER }}/${{ github.event.repository.name }}-gpu
           tags: |
             type=ref,event=branch
-            type=sha,prefix=
+            type=sha,prefix=,format=long
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/dev' }}
 
       - name: Build and push GPU image
