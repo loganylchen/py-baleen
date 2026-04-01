@@ -172,7 +172,7 @@ def test_create_unsupervised_params():
     assert params.mode == "unsupervised"
     assert params.n_states == 3
     assert params.p_stay_per_base == 0.92
-    np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
+    np.testing.assert_allclose(params.init_prob, np.array([0.98, 0.01, 0.01]))
     assert params.emission_transform is None
 
 
@@ -475,7 +475,7 @@ def test_create_unsupervised_params_3state():
     assert params.mode == "unsupervised"
     assert params.n_states == 3
     assert params.p_stay_per_base == 0.92
-    np.testing.assert_allclose(params.init_prob, np.array([0.7, 0.2, 0.1]))
+    np.testing.assert_allclose(params.init_prob, np.array([0.98, 0.01, 0.01]))
     assert params.emission_transform is None
     assert params.unmod_emission_beta == (2.0, 8.0)
     assert params.flank_emission_beta == (3.0, 3.0)

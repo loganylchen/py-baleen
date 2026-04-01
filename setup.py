@@ -186,7 +186,7 @@ class CUDABuildExt(build_ext):
             obj = src + ".o"
             compile_cmd = [
                 nvcc,
-                "-std=c++11",
+                "-std=c++17",
                 "-O3",
                 "-Xcompiler", "-fPIC",
                 "-c", src,
