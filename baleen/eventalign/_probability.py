@@ -380,19 +380,25 @@ def _score_distance_to_ivt(
     Returns log-transformed scores (larger = more likely modified).
     """
     n_total = n_native + n_ivt
-    scores = np.empty(n_total, dtype=np.float64)
-    ivt_indices = np.arange(n_native, n_total)
+    scores = np.zeros(n_total, dtype=np.float64)
 
-    for i in range(n_total):
-        if i >= n_native:
-            # IVT read: leave-one-out
-            others = ivt_indices[ivt_indices != i]
-        else:
-            others = ivt_indices
-        if len(others) == 0:
-            scores[i] = 0.0
-        else:
-            scores[i] = float(np.median(distance_matrix[i, others]))
+    if n_ivt == 0:
+        return np.log(scores + _EPS)
+
+    # Native reads: median distance to all IVT columns
+    if n_native > 0:
+        scores[:n_native] = np.median(
+            distance_matrix[:n_native, n_native:], axis=1,
+        )
+
+    # IVT reads: leave-one-out median distance to other IVT
+    if n_ivt > 1:
+        ivt_block = distance_matrix[n_native:, n_native:]
+        # Set diagonal to NaN so nanmedian skips self-distance
+        ivt_loo = ivt_block.copy()
+        np.fill_diagonal(ivt_loo, np.nan)
+        scores[n_native:] = np.nanmedian(ivt_loo, axis=1)
+    # n_ivt == 1: leave-one-out has no others, score stays 0
 
     # Log-transform
     return np.log(scores + _EPS)
@@ -444,6 +450,7 @@ def _score_knn_ivt_purity(
     n_ivt: int,
     k: Optional[int] = None,
     weighted: bool = False,
+    ratio_correction: bool = True,
 ) -> NDArray[np.float64]:
     """Compute per-read kNN IVT-purity scores.
 
@@ -454,8 +461,11 @@ def _score_knn_ivt_purity(
     Parameters
     ----------
     weighted : bool
-        If True (Fix B), weight each neighbor by 1/distance instead of
+        If True, weight each neighbor by 1/distance instead of
         uniform counting.  Closer neighbors have more influence.
+    ratio_correction : bool
+        If True, correct for IVT/native sample size imbalance by
+        adjusting the expected IVT fraction under null hypothesis.
 
     Uses rank-based normalization to ensure scores span [0, 1].
     """
@@ -467,24 +477,49 @@ def _score_knn_ivt_purity(
     is_ivt = np.zeros(n_total, dtype=bool)
     is_ivt[n_native:] = True
 
+    # Work on a copy with diagonal set to inf (exclude self), once
+    dm = distance_matrix.copy()
+    np.fill_diagonal(dm, np.inf)
+
+    # Find k nearest neighbors for all reads at once
+    # argpartition along axis=1 gives indices of k smallest per row
+    knn_idx = np.argpartition(dm, k, axis=1)[:, :k]
+
     raw_scores = np.empty(n_total, dtype=np.float64)
 
-    for i in range(n_total):
-        dists = distance_matrix[i].copy()
-        dists[i] = np.inf  # exclude self
-        neighbor_idx = np.argpartition(dists, k)[:k]
+    if weighted:
+        # Gather neighbor distances: shape (n_total, k)
+        knn_dists = np.take_along_axis(dm, knn_idx, axis=1)
+        weights = 1.0 / np.maximum(knn_dists, _EPS)
+        # Check which neighbors are IVT: shape (n_total, k)
+        neighbor_is_ivt = is_ivt[knn_idx]
+        ivt_weight = np.sum(weights * neighbor_is_ivt, axis=1)
+        total_weight = np.sum(weights, axis=1)
+        raw_scores = 1.0 - ivt_weight / np.maximum(total_weight, _EPS)
+    else:
+        # Count IVT neighbors per read
+        neighbor_is_ivt = is_ivt[knn_idx]
+        ivt_count = np.sum(neighbor_is_ivt, axis=1)
+        raw_scores = 1.0 - ivt_count / k
 
-        if weighted:
-            # Distance-weighted: closer neighbors count more
-            neighbor_dists = dists[neighbor_idx]
-            weights = 1.0 / np.maximum(neighbor_dists, _EPS)
-            ivt_weight = float(np.sum(weights[is_ivt[neighbor_idx]]))
-            total_weight = float(np.sum(weights))
-            raw_scores[i] = 1.0 - ivt_weight / max(total_weight, _EPS)
-        else:
-            # Unweighted IVT fraction among k neighbors
-            ivt_count = int(np.sum(is_ivt[neighbor_idx]))
-            raw_scores[i] = 1.0 - ivt_count / k
+    # IVT-native ratio correction: adjust for sample size imbalance.
+    # Under the null (no modification), the expected IVT fraction among
+    # neighbors of read i is (n_ivt - 1{i is IVT}) / (n_total - 1).
+    # We subtract this expected fraction so scores are centered around 0
+    # under the null, then rescale back to [0, 1].
+    if ratio_correction and n_total > 1:
+        # Expected IVT fraction for each read (excluding self)
+        expected_ivt_frac = np.where(
+            is_ivt,
+            (n_ivt - 1) / (n_total - 1),
+            n_ivt / (n_total - 1),
+        )
+        # raw_scores = 1 - ivt_frac, so expected null score = 1 - expected_ivt_frac
+        expected_null = 1.0 - expected_ivt_frac
+        # Center around expected null, then shift to [0, 1]
+        raw_scores = np.clip(
+            0.5 + (raw_scores - expected_null), 0.0, 1.0,
+        )
 
     # Rank-based normalization: map to [0, 1] using ranks
     # This ensures good spread regardless of the raw score distribution
@@ -497,22 +532,101 @@ def _score_knn_ivt_purity(
     return scores
 
 
+def _score_lof(
+    distance_matrix: NDArray[np.float64],
+    n_native: int,
+    n_ivt: int,
+    k: Optional[int] = None,
+) -> NDArray[np.float64]:
+    """Compute Local Outlier Factor (LOF) anomaly scores.
+
+    LOF measures how isolated a point is relative to its neighbors'
+    local density.  LOF > 1 indicates the point is in a sparser region
+    than its neighbors (i.e., more anomalous / more likely modified).
+
+    The score is normalized to [0, 1] via rank-based normalization.
+
+    Parameters
+    ----------
+    distance_matrix : (n_total, n_total)
+        Pairwise DTW distance matrix.
+    n_native, n_ivt : int
+        Number of native / IVT reads.
+    k : int, optional
+        Number of neighbors.  Defaults to sqrt(n_total) clipped to [3, 15].
+
+    Returns
+    -------
+    scores : (n_total,)
+        LOF-based anomaly scores in [0, 1].  Higher = more anomalous.
+    """
+    n_total = n_native + n_ivt
+    if k is None:
+        k = int(_clip(round(math.sqrt(n_total)), 3, 15))
+    k = min(k, n_total - 1)
+
+    # Exclude self-distances
+    dm = distance_matrix.copy()
+    np.fill_diagonal(dm, np.inf)
+
+    # k nearest neighbor indices and distances
+    knn_idx = np.argpartition(dm, k, axis=1)[:, :k]  # (n_total, k)
+    knn_dists = np.take_along_axis(dm, knn_idx, axis=1)  # (n_total, k)
+
+    # k-distance: max distance among k nearest neighbors
+    k_dist = np.max(knn_dists, axis=1)  # (n_total,)
+
+    # Reachability distance: max(k_dist[neighbor], actual_dist)
+    reach_dist = np.maximum(knn_dists, k_dist[knn_idx])  # (n_total, k)
+
+    # Local reachability density: inverse of mean reachability distance
+    lrd = 1.0 / np.maximum(np.mean(reach_dist, axis=1), _EPS)  # (n_total,)
+
+    # LOF: mean ratio of neighbors' LRD to own LRD
+    # LOF > 1 → point is in sparser region than neighbors
+    neighbor_lrd = lrd[knn_idx]  # (n_total, k)
+    lof = np.mean(neighbor_lrd, axis=1) / np.maximum(lrd, _EPS)  # (n_total,)
+
+    # Rank-based normalization to [0, 1]
+    ranks = np.argsort(np.argsort(lof)).astype(np.float64)
+    scores = ranks / max(n_total - 1, 1)
+
+    return scores
+
+
 def knn_ivt_purity(
     distance_matrix: NDArray[np.float64],
     n_native: int,
     n_ivt: int,
     *,
     k: Optional[int] = None,
+    lof_weight: float = 0.3,
     max_iter: int = 100,
     pi_threshold: float = 0.05,
 ) -> ModificationProbabilities:
-    """Algorithm 3: kNN IVT-Purity Score.
+    """Algorithm 3: kNN IVT-Purity Score with LOF blending.
 
     Each read is scored by how few of its k nearest neighbors are IVT
-    controls, then calibrated via a Beta null + Beta alternative EM mixture.
+    controls, blended with a Local Outlier Factor (LOF) anomaly score,
+    then calibrated via a Beta null + Beta alternative EM mixture.
+
+    Parameters
+    ----------
+    lof_weight : float
+        Weight for LOF score in the blend (0 = pure kNN, 1 = pure LOF).
+        Default 0.3 gives 70% kNN purity + 30% LOF anomaly signal.
     """
     n_total = n_native + n_ivt
-    scores = _score_knn_ivt_purity(distance_matrix, n_native, n_ivt, k=k)
+    knn_scores = _score_knn_ivt_purity(distance_matrix, n_native, n_ivt, k=k)
+
+    # Blend with LOF anomaly score for density-aware detection
+    if lof_weight > 0:
+        lof_scores = _score_lof(distance_matrix, n_native, n_ivt, k=k)
+        scores = (1.0 - lof_weight) * knn_scores + lof_weight * lof_scores
+        # Clip to [0, 1] for Beta calibration
+        scores = np.clip(scores, _EPS, 1.0 - _EPS)
+    else:
+        scores = knn_scores
 
     ivt_mask = np.zeros(n_total, dtype=bool)
     ivt_mask[n_native:] = True

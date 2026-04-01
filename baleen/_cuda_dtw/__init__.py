@@ -99,6 +99,9 @@ def _dtw_distance_cpu(
     return _dtw_distance_open_boundary(seq1, seq2, use_open_start, use_open_end)
 
 
+_open_boundary_warned = False
+
+
 def _dtw_distance_open_boundary(
     seq1: np.ndarray,
     seq2: np.ndarray,
@@ -106,6 +109,17 @@ def _dtw_distance_open_boundary(
     use_open_end: bool,
 ) -> float:
     """Pure-numpy DTW DP with open-boundary support (CUDA-compatible semantics)."""
+    global _open_boundary_warned
+    if not _open_boundary_warned:
+        import warnings
+        warnings.warn(
+            "Using pure-Python open-boundary DTW fallback (no CUDA). "
+            "This is very slow for large signals. Consider installing "
+            "CUDA or using closed-boundary mode.",
+            stacklevel=3,
+        )
+        _open_boundary_warned = True
+
     len1 = len(seq1)
     len2 = len(seq2)
 

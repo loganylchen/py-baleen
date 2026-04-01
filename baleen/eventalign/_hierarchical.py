@@ -203,29 +203,28 @@ def _extract_ivt_distances(
     Returns shape ``(n_native + n_ivt,)``.
     """
     n_total = n_native + n_ivt
-    ivt_indices = np.arange(n_native, n_total)
-    native_indices = np.arange(n_native)
+    dist_to_ivt = np.zeros(n_total, dtype=np.float64)
+
+    if n_ivt == 0:
+        return np.log1p(dist_to_ivt)
 
     # Component 1: median distance to IVT per read
-    dist_to_ivt = np.empty(n_total, dtype=np.float64)
-    for i in range(n_total):
-        if i >= n_native:
-            others = ivt_indices[ivt_indices != i]
-        else:
-            others = ivt_indices
-        if len(others) == 0:
-            dist_to_ivt[i] = 0.0
-        else:
-            dist_to_ivt[i] = float(np.median(distance_matrix[i, others]))
+    # Native reads → median to all IVT columns
+    if n_native > 0:
+        dist_to_ivt[:n_native] = np.median(
+            distance_matrix[:n_native, n_native:], axis=1,
+        )
+    # IVT reads → leave-one-out median to other IVT
+    if n_ivt > 1:
+        ivt_block = distance_matrix[n_native:, n_native:].copy()
+        np.fill_diagonal(ivt_block, np.nan)
+        dist_to_ivt[n_native:] = np.nanmedian(ivt_block, axis=1)
 
     # Component 2: IVT self-similarity baseline
     if n_ivt >= 2:
-        ivt_self_dists = []
-        for i in ivt_indices:
-            others = ivt_indices[ivt_indices != i]
-            ivt_self_dists.append(float(np.median(distance_matrix[i, others])))
+        ivt_self_dists = dist_to_ivt[n_native:]  # already leave-one-out
         ivt_baseline = float(np.median(ivt_self_dists))
-        ivt_mad = float(np.median(np.abs(np.array(ivt_self_dists) - ivt_baseline)))
+        ivt_mad = float(np.median(np.abs(ivt_self_dists - ivt_baseline)))
         ivt_scale = max(ivt_mad * _MAD_SCALE, _MIN_SIGMA)
     else:
         ivt_baseline = 0.0
@@ -233,32 +232,27 @@ def _extract_ivt_distances(
 
     # Component 3: native within-group distances (cohesion)
     if n_native >= 2:
-        native_self_dists = np.empty(n_native, dtype=np.float64)
-        for i in native_indices:
-            others = native_indices[native_indices != i]
-            native_self_dists[i] = float(np.median(distance_matrix[i, others]))
+        nat_block = distance_matrix[:n_native, :n_native].copy()
+        np.fill_diagonal(nat_block, np.nan)
+        native_self_dists = np.nanmedian(nat_block, axis=1)
         native_cohesion = float(np.median(native_self_dists))
     else:
         native_cohesion = 0.0
 
-    # Combine: asymmetric score = (dist_to_ivt - ivt_baseline) / ivt_scale
-    # For native reads with good cohesion, boost by cohesion ratio
-    scores = np.empty(n_total, dtype=np.float64)
-    for i in range(n_total):
-        base_score = dist_to_ivt[i]
+    # Combine: vectorized scoring
+    scores = np.log1p(dist_to_ivt)
 
-        if i < n_native and n_native >= 2 and n_ivt >= 2:
-            # Asymmetric correction: excess distance beyond IVT self-similarity
-            excess = max(base_score - ivt_baseline, 0.0)
-            # Cohesion ratio: high when native reads agree with each other
-            # but differ from IVT (strong modification signal)
-            cohesion_ratio = base_score / max(native_cohesion, _MIN_SIGMA)
-            # Blend: log1p(base) + weighted excess + cohesion bonus
-            scores[i] = np.log1p(base_score) + 0.3 * excess / ivt_scale
-            if cohesion_ratio > 1.5:
-                scores[i] += 0.2 * np.log1p(cohesion_ratio - 1.0)
-        else:
-            scores[i] = np.log1p(base_score)
+    if n_native >= 2 and n_ivt >= 2:
+        native_base = dist_to_ivt[:n_native]
+        excess = np.maximum(native_base - ivt_baseline, 0.0)
+        cohesion_ratio = native_base / max(native_cohesion, _MIN_SIGMA)
+
+        scores[:n_native] += 0.3 * excess / ivt_scale
+        # Cohesion bonus where ratio > 1.5
+        bonus_mask = cohesion_ratio > 1.5
+        scores[:n_native] += np.where(
+            bonus_mask, 0.2 * np.log1p(cohesion_ratio - 1.0), 0.0,
+        )
 
     return scores
 
@@ -496,6 +490,7 @@ def _anchored_mixture_em(
     global_mu1: float | None = None,
     global_sigma1: float | None = None,
     min_reads_for_local: int = 50,
+    global_regularization: float = 10.0,
     legacy_scoring: bool = False,
 ) -> tuple[NDArray[np.float64], float, bool, float]:
     """EM with null fixed to IVT distribution, alternative free.
@@ -517,6 +512,11 @@ def _anchored_mixture_em(
         low-coverage positions (< min_reads_for_local native reads).
     min_reads_for_local : int
         Minimum native reads to fit a per-position alternative.
+    global_regularization : float
+        Strength of L2 regularization pulling mu1/sigma1 toward global
+        values when use_global is True.  Acts as a pseudo-count: higher
+        values keep params closer to global; lower values allow more
+        local adaptation.  Effective weight is ``lam / (lam + n_native)``.
 
     Returns
     -------
@@ -574,8 +574,21 @@ def _anchored_mixture_em(
         r_sum = float(np.sum(r)) + _EPS
 
         if use_global:
-            # Keep global params, only update pi
-            pass
+            # Regularized update: allow mu1/sigma1 to adapt locally
+            # but pull toward global values.  Weight = lam / (lam + n)
+            # so low coverage → near-global, high coverage → near-local MLE.
+            lam = global_regularization
+            n = len(z_native)
+            w = lam / (lam + n)  # regularization weight
+
+            mu1_mle = float(np.sum(r * z_native)) / r_sum
+            mu1 = w * global_mu1 + (1.0 - w) * mu1_mle
+
+            var_mle = float(np.sum(r * (z_native - mu1) ** 2)) / r_sum
+            sigma1 = math.sqrt(
+                max(w * global_sigma1 ** 2 + (1.0 - w) * var_mle,
+                    _MIN_SIGMA ** 2)
+            )
         else:
             mu1_new = float(np.sum(r * z_native)) / r_sum
             sigma1_new = math.sqrt(

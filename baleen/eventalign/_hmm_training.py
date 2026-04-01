@@ -168,7 +168,7 @@ class HMMParams:
     n_states: int = 3
     p_stay_per_base: float = 0.92
     init_prob: NDArray[np.float64] = field(
-        default_factory=lambda: np.array([0.7, 0.2, 0.1], dtype=np.float64)
+        default_factory=lambda: np.array([0.98, 0.01, 0.01], dtype=np.float64)
     )
     emission_transform: EmissionCalibrator | EmissionKDE | None = None
 
