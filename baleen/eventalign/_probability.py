@@ -30,6 +30,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.stats import norm as _norm_dist
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,12 @@ class _CalibrationResult:
     null_gate_active: bool
 
 
+def _sigmoid(x: float) -> float:
+    """Numerically stable sigmoid for scalar input."""
+    x = max(-500.0, min(500.0, x))
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 def _calibrate_normal(
     scores_all: NDArray[np.float64],
     ivt_mask: NDArray[np.bool_],
@@ -182,6 +189,10 @@ def _calibrate_normal(
     max_iter: int = 100,
     tol: float = 1e-6,
     pi_threshold: float = 0.05,
+    separation_threshold: float = 0.5,
+    tau_pi: float = 0.05,
+    tau_bic: float = 10.0,
+    tau_sep: float = 1.0,
 ) -> _CalibrationResult:
     """EM calibration with Normal null + Normal alternative.
 
@@ -244,28 +255,34 @@ def _calibrate_normal(
     bic_null = -2 * ll_null + 2 * math.log(max(n, 1))  # 2 params (mu0, sigma0)
     bic_mix = -2 * ll_mix + 5 * math.log(max(n, 1))  # 3 free params (pi, mu1, sigma1)
 
-    # Effect-size gate: the alternative mean must be meaningfully separated from null
+    # Effect-size separation
     separation = abs(mu1 - mu0) / max(sigma0, _MIN_SIGMA)
-    null_gate = pi < pi_threshold or bic_mix >= bic_null or separation < 1.0
 
-    if null_gate:
-        return _CalibrationResult(
-            probabilities=np.zeros_like(scores_all),
-            pi=pi,
-            null_gate_active=True,
-        )
+    # Soft gate: continuous weights ∈ [0, 1] via sigmoid (replaces hard gate)
+    w_pi = _sigmoid((pi - pi_threshold) / tau_pi)
+    w_bic = _sigmoid((bic_null - bic_mix) / tau_bic)
+    w_sep = _sigmoid((separation - separation_threshold) / tau_sep)
+    gate_weight = w_pi * w_bic * w_sep
 
-    # Pi-weighted Bayesian posteriors — the BIC gate already protects
-    # against false positives, so we use the fitted pi as prior.
-    # Clamp pi to prevent degenerate posteriors when pi→1.
+    # Legacy hard gate flag (for reporting only)
+    null_gate = pi < pi_threshold or bic_mix >= bic_null or separation < separation_threshold
+
+    # Mixture posterior
     pi_post = min(max(pi, 0.01), 0.7)
     f0_all = _normal_pdf(scores_all, mu0, sigma0)
     f1_all = _normal_pdf(scores_all, mu1, sigma1)
     denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
-    probs = (pi_post * f1_all) / denom_all
+    raw_posterior = (pi_post * f1_all) / denom_all
+
+    # Z-score fallback for when gate is weak
+    z_all = (scores_all - mu0) / max(sigma0, _MIN_SIGMA)
+    fallback = 1.0 - _norm_dist.cdf(-z_all)
+
+    # Blend: high gate_weight → trust mixture; low → fall back to z-score
+    probs = gate_weight * raw_posterior + (1.0 - gate_weight) * fallback
     probs = np.clip(probs, 0.0, 1.0)
 
-    return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=False)
+    return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=null_gate)
 
 
 def _calibrate_beta(
