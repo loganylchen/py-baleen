@@ -15,6 +15,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 STOICH_LEVELS = [f"{x / 10:.1f}" for x in range(11)]  # 0.0 .. 1.0
+THRESHOLDS = ["0.9", "0.95", "0.99", "0.999"]
 SCORE_COLS = ["mod_ratio", "mean_p_mod", "effect_size", "stoichiometry"]
 
 # Resolved at runtime via CLI arg or default to script directory
@@ -31,12 +32,22 @@ def load_ground_truth() -> set[tuple[str, int]]:
     return set(zip(gt["contig"], gt["position"]))
 
 
-def load_results(stoich: str, mode: str) -> pd.DataFrame | None:
-    """Load site_results.tsv for a given stoichiometry and scoring mode."""
-    subdir = "output" if mode == "new" else "output_legacy"
-    path = TESTDATA / stoich / subdir / "site_results.tsv"
+def _output_dir(stoich: str, mode: str, threshold: str) -> Path:
+    """Return the output directory for a given stoich/mode/threshold combo."""
+    if mode == "legacy":
+        return TESTDATA / stoich / f"output_legacy_t{threshold}"
+    return TESTDATA / stoich / f"output_t{threshold}"
+
+
+def load_results(stoich: str, mode: str, threshold: str = "0.9") -> pd.DataFrame | None:
+    """Load site_results.tsv for a given stoichiometry, scoring mode, and threshold."""
+    path = _output_dir(stoich, mode, threshold) / "site_results.tsv"
     if not path.exists():
-        return None
+        # Fall back to old directory layout (output/ or output_legacy/)
+        subdir = "output" if mode == "new" else "output_legacy"
+        path = TESTDATA / stoich / subdir / "site_results.tsv"
+        if not path.exists():
+            return None
     return pd.read_csv(path, sep="\t")
 
 
@@ -69,7 +80,7 @@ def evaluate(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def export_read_level(stoich: str, mode: str = "new") -> pd.DataFrame | None:
+def export_read_level(stoich: str, mode: str = "new", threshold: str = "0.9") -> pd.DataFrame | None:
     """Export read-level p_mod values from intermediate .pkl files.
 
     Returns a DataFrame with columns:
@@ -78,15 +89,19 @@ def export_read_level(stoich: str, mode: str = "new") -> pd.DataFrame | None:
     """
     import pickle
 
-    subdir = "output" if mode == "new" else "output_legacy"
-    intermediate_dir = TESTDATA / stoich / subdir / "intermediate"
+    out_dir = _output_dir(stoich, mode, threshold)
+    if not out_dir.exists():
+        # Fall back to old layout
+        subdir = "output" if mode == "new" else "output_legacy"
+        out_dir = TESTDATA / stoich / subdir
+    intermediate_dir = out_dir / "intermediate"
 
     # Try loading per-contig .pkl files first
     pkl_files = sorted(intermediate_dir.glob("*.pkl")) if intermediate_dir.exists() else []
 
     # Fall back to pipeline_results.pkl
     if not pkl_files:
-        pipeline_pkl = TESTDATA / stoich / subdir / "pipeline_results.pkl"
+        pipeline_pkl = out_dir / "pipeline_results.pkl"
         if not pipeline_pkl.exists():
             return None
         with pipeline_pkl.open("rb") as f:
@@ -270,19 +285,44 @@ def main():
 
     gt = load_ground_truth()
 
+    # ---- Discover available thresholds ----
+    # Check which thresholds have results (support both new and old layout)
+    available_thresholds = set()
+    for stoich in STOICH_LEVELS:
+        stoich_dir = TESTDATA / stoich
+        if not stoich_dir.exists():
+            continue
+        for d in stoich_dir.iterdir():
+            if d.is_dir() and d.name.startswith("output"):
+                # Extract threshold from dir name like output_t0.9 or output_legacy_t0.95
+                if "_t" in d.name:
+                    t = d.name.rsplit("_t", 1)[1]
+                    available_thresholds.add(t)
+        # Check old layout (output/ output_legacy/ without threshold suffix)
+        if (stoich_dir / "output" / "site_results.tsv").exists():
+            available_thresholds.add("default")
+    if not available_thresholds:
+        available_thresholds = set(THRESHOLDS)
+    available_thresholds = sorted(available_thresholds)
+    print(f"Thresholds found: {available_thresholds}")
+
     # ---- Standard site-level evaluation ----
     rows = []
     for stoich in STOICH_LEVELS:
-        for mode in ("new", "legacy"):
-            df = load_results(stoich, mode)
-            if df is None:
-                print(f"  MISSING: {stoich} {mode}")
-                continue
-            metrics = evaluate(df, gt)
-            if not metrics:
-                print(f"  NO VALID METRICS: {stoich} {mode}")
-                continue
-            rows.append({"stoichiometry_level": stoich, "mode": mode, **metrics})
+        for thresh in available_thresholds:
+            for mode in ("new", "legacy"):
+                df = load_results(stoich, mode, thresh)
+                if df is None:
+                    continue
+                metrics = evaluate(df, gt)
+                if not metrics:
+                    continue
+                rows.append({
+                    "stoichiometry_level": stoich,
+                    "mode": mode,
+                    "threshold": thresh,
+                    **metrics,
+                })
 
     if not rows:
         print("No results found. Run run_benchmark.sh first.")
@@ -297,21 +337,27 @@ def main():
     # ---- Read-level export ----
     print("\n=== Exporting read-level results ===")
     for stoich in STOICH_LEVELS:
-        for mode in ("new",):
-            read_df = export_read_level(stoich, mode)
+        for thresh in available_thresholds:
+            read_df = export_read_level(stoich, "new", thresh)
             if read_df is None:
-                print(f"  {stoich} {mode}: no intermediate data")
                 continue
-            subdir = "output" if mode == "new" else "output_legacy"
-            out_path = TESTDATA / stoich / subdir / "read_results.tsv"
+            out_dir = _output_dir(stoich, "new", thresh)
+            if not out_dir.exists():
+                out_dir = TESTDATA / stoich / "output"
+            out_path = out_dir / "read_results.tsv"
             read_df.to_csv(out_path, sep="\t", index=False)
             n_reads = len(read_df)
             n_sites = read_df.groupby(["contig", "position"]).ngroups
-            print(f"  {stoich} {mode}: {n_reads} read-level entries across {n_sites} sites -> {out_path}")
+            print(f"  {stoich} new t={thresh}: {n_reads} reads, {n_sites} sites -> {out_path}")
 
     # ---- Threshold optimization from stoich=1.0 ----
     print("\n=== Threshold Optimization (stoich=1.0) ===")
-    read_1_0 = export_read_level("1.0", "new")
+    # Use the first available threshold's read-level data for optimization
+    read_1_0 = None
+    for thresh in available_thresholds:
+        read_1_0 = export_read_level("1.0", "new", thresh)
+        if read_1_0 is not None:
+            break
     if read_1_0 is not None:
         opt = find_optimal_threshold(read_1_0, gt)
         if "error" not in opt:
@@ -373,7 +419,7 @@ def main():
     else:
         print("  No read-level data for stoich=1.0. Run with --keep-intermediate first.")
 
-    # ---- Plot AUPRC vs stoichiometry ----
+    # ---- Plot AUPRC vs stoichiometry (per threshold x scoring mode) ----
     score_col = None
     for candidate in ["auprc_mean_p_mod", "auprc_mod_ratio", "auprc_effect_size"]:
         if candidate in summary.columns:
@@ -384,7 +430,14 @@ def main():
         print("No AUPRC columns available for plotting.")
         return
 
+    unique_thresholds = sorted(summary["threshold"].unique())
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    styles = {
+        ("new",): "-",
+        ("legacy",): "--",
+    }
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(unique_thresholds), 1)))
 
     for ax, metric_prefix, ylabel in [
         (axes[0], "auprc", "AUPRC"),
@@ -393,15 +446,24 @@ def main():
         col = score_col.replace("auprc_", f"{metric_prefix}_")
         if col not in summary.columns:
             continue
-        for mode, style in [("new", "-o"), ("legacy", "--s")]:
-            sub = summary[summary["mode"] == mode].copy()
-            sub["x"] = sub["stoichiometry_level"].astype(float)
-            sub = sub.sort_values("x")
-            ax.plot(sub["x"], sub[col], style, label=mode, markersize=6)
+        for i, thresh in enumerate(unique_thresholds):
+            for mode, ls in [("new", "-"), ("legacy", "--")]:
+                sub = summary[
+                    (summary["mode"] == mode) & (summary["threshold"] == thresh)
+                ].copy()
+                if sub.empty:
+                    continue
+                sub["x"] = sub["stoichiometry_level"].astype(float)
+                sub = sub.sort_values("x")
+                ax.plot(
+                    sub["x"], sub[col], ls,
+                    color=colors[i], marker="o", markersize=4,
+                    label=f"{mode} t={thresh}",
+                )
         ax.set_xlabel("Stoichiometry level")
         ax.set_ylabel(ylabel)
         ax.set_title(f"{ylabel} vs Stoichiometry ({col.split('_', 1)[1]})")
-        ax.legend()
+        ax.legend(fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
         ax.set_xlim(-0.05, 1.05)
 
