@@ -121,8 +121,9 @@ jobs:
           IVT="/testdata/${STOICH}/data/control_1"
 
           for THRESH in 0.9 0.95 0.99 0.999; do
-            echo "=== Running stoich=${STOICH} threshold=${THRESH} ==="
-            docker run --rm \
+            echo "::group::stoich=${STOICH} threshold=${THRESH}"
+            START=$(date +%s)
+            docker run --rm -e PYTHONUNBUFFERED=1 \
               -v "${TESTDATA}:/testdata" \
               "${IMAGE}" \
               run \
@@ -137,6 +138,9 @@ jobs:
               --no-read-bam \
               --mod-threshold "${THRESH}" \
               -o "/testdata/${STOICH}/output_t${THRESH}"
+            END=$(date +%s)
+            echo "Completed in $((END - START))s"
+            echo "::endgroup::"
           done
 
       - name: Upload benchmark results
