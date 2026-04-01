@@ -16,7 +16,16 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 SCRIPT_DIR = Path(__file__).resolve().parent
 STOICH_LEVELS = [f"{x / 10:.1f}" for x in range(11)]  # 0.0 .. 1.0
 THRESHOLDS = ["0.9", "0.95", "0.99", "0.999"]
-SCORE_COLS = ["mod_ratio", "mean_p_mod", "effect_size", "stoichiometry"]
+# Site-level score columns used for AUPRC/AUROC evaluation.
+# Includes raw columns from site_results.tsv and derived -log10 transforms.
+SITE_SCORE_COLS = [
+    "mod_ratio",
+    "mean_p_mod",
+    "effect_size",
+    "stoichiometry",
+    "neg_log10_pvalue",
+    "neg_log10_padj",
+]
 
 # Resolved at runtime via CLI arg or default to script directory
 TESTDATA: Path = SCRIPT_DIR
@@ -51,16 +60,22 @@ def load_results(stoich: str, mode: str, threshold: str = "0.9") -> pd.DataFrame
     return pd.read_csv(path, sep="\t")
 
 
-def evaluate(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
-    """Compute AUPRC and AUROC for each score column."""
-    labels = np.array(
-        [(row.contig, row.position) in gt for row in df.itertuples()], dtype=int
-    )
-    if labels.sum() == 0 or labels.sum() == len(labels):
-        return {}
+def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add derived score columns (-log10 transforms) to a site results DataFrame."""
+    df = df.copy()
+    for raw, derived in [("pvalue", "neg_log10_pvalue"), ("padj", "neg_log10_padj")]:
+        if raw in df.columns:
+            vals = df[raw].to_numpy(dtype=float)
+            # Clamp to avoid log10(0); smallest representable float64
+            vals = np.where(vals > 0, vals, np.finfo(float).tiny)
+            df[derived] = -np.log10(vals)
+    return df
 
+
+def _eval_scores(labels: np.ndarray, df: pd.DataFrame, score_cols: list[str]) -> dict:
+    """Compute AUPRC and AUROC for each score column against binary labels."""
     results = {}
-    for col in SCORE_COLS:
+    for col in score_cols:
         if col not in df.columns:
             continue
         scores = df[col].to_numpy(dtype=float)
@@ -73,6 +88,43 @@ def evaluate(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
         results[f"auprc_{col}"] = average_precision_score(y, s)
         results[f"auroc_{col}"] = roc_auc_score(y, s)
     return results
+
+
+def evaluate_site(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
+    """Compute site-level AUPRC and AUROC for each score column."""
+    df = _add_derived_columns(df)
+    labels = np.array(
+        [(row.contig, row.position) in gt for row in df.itertuples()], dtype=int
+    )
+    if labels.sum() == 0 or labels.sum() == len(labels):
+        return {}
+    return _eval_scores(labels, df, SITE_SCORE_COLS)
+
+
+def evaluate_transcript(df: pd.DataFrame, gt: set[tuple[str, int]]) -> dict:
+    """Compute transcript-level AUPRC and AUROC.
+
+    Aggregates site scores per contig (max for positive scores, min for p-values).
+    A transcript is labeled positive if it contains at least one known modification.
+    """
+    df = _add_derived_columns(df)
+
+    # Determine which contigs are modified
+    gt_contigs = {contig for contig, _ in gt}
+
+    # Aggregate per contig: max for scores, max for -log10 (= most significant)
+    agg_funcs = {col: "max" for col in SITE_SCORE_COLS if col in df.columns}
+    if not agg_funcs:
+        return {}
+
+    transcript_df = df.groupby("contig", as_index=False).agg(agg_funcs)
+    labels = np.array(
+        [contig in gt_contigs for contig in transcript_df["contig"]], dtype=int
+    )
+    if labels.sum() == 0 or labels.sum() == len(labels):
+        return {}
+
+    return _eval_scores(labels, transcript_df, SITE_SCORE_COLS)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +326,62 @@ def find_optimal_threshold(
     }
 
 
+def _plot_benchmark(summary: pd.DataFrame, level: str, outdir: Path):
+    """Plot AUPRC and AUROC vs stoichiometry for each score column.
+
+    Generates one figure per score column, each with 2 subplots (AUPRC, AUROC).
+    Lines are colored by threshold and styled by scoring mode (solid=new, dashed=legacy).
+    """
+    # Find which score columns are present
+    auprc_cols = [c for c in summary.columns if c.startswith("auprc_")]
+    score_names = [c.replace("auprc_", "") for c in auprc_cols]
+
+    if not score_names:
+        print(f"No AUPRC columns available for {level}-level plotting.")
+        return
+
+    unique_thresholds = sorted(summary["threshold"].unique())
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(unique_thresholds), 1)))
+
+    for score_name in score_names:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        for ax, metric_prefix, ylabel in [
+            (axes[0], "auprc", "AUPRC"),
+            (axes[1], "auroc", "AUROC"),
+        ]:
+            col = f"{metric_prefix}_{score_name}"
+            if col not in summary.columns:
+                continue
+            for i, thresh in enumerate(unique_thresholds):
+                for mode, ls in [("new", "-"), ("legacy", "--")]:
+                    sub = summary[
+                        (summary["mode"] == mode) & (summary["threshold"] == thresh)
+                    ].copy()
+                    if sub.empty or col not in sub.columns:
+                        continue
+                    sub["x"] = sub["stoichiometry_level"].astype(float)
+                    sub = sub.sort_values("x")
+                    ax.plot(
+                        sub["x"], sub[col], ls,
+                        color=colors[i], marker="o", markersize=4,
+                        label=f"{mode} t={thresh}",
+                    )
+            ax.set_xlabel("Stoichiometry level")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{level.capitalize()}-level {ylabel} ({score_name})")
+            ax.legend(fontsize=7, ncol=2)
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(-0.05, 1.05)
+            ax.set_ylim(-0.05, 1.05)
+
+        plt.tight_layout()
+        plot_path = outdir / f"benchmark_{level}_{score_name}.png"
+        plt.savefig(plot_path, dpi=150)
+        plt.close(fig)
+        print(f"Plot saved to {plot_path}")
+
+
 def main():
     global TESTDATA
     if len(sys.argv) > 1:
@@ -306,33 +414,61 @@ def main():
     available_thresholds = sorted(available_thresholds)
     print(f"Thresholds found: {available_thresholds}")
 
-    # ---- Standard site-level evaluation ----
-    rows = []
+    # ---- Site-level evaluation ----
+    site_rows = []
     for stoich in STOICH_LEVELS:
         for thresh in available_thresholds:
             for mode in ("new", "legacy"):
                 df = load_results(stoich, mode, thresh)
                 if df is None:
                     continue
-                metrics = evaluate(df, gt)
+                metrics = evaluate_site(df, gt)
                 if not metrics:
                     continue
-                rows.append({
+                site_rows.append({
                     "stoichiometry_level": stoich,
                     "mode": mode,
                     "threshold": thresh,
                     **metrics,
                 })
 
-    if not rows:
+    if not site_rows:
         print("No results found. Run run_benchmark.sh first.")
         sys.exit(1)
 
-    summary = pd.DataFrame(rows)
-    print("\n=== Summary Table ===")
+    summary = pd.DataFrame(site_rows)
+    print("\n=== Site-level Summary ===")
     print(summary.to_string(index=False, float_format="%.4f"))
-    summary.to_csv(TESTDATA / "benchmark_summary.csv", index=False)
-    print(f"\nSaved to {TESTDATA / 'benchmark_summary.csv'}")
+    summary.to_csv(TESTDATA / "benchmark_summary_site.csv", index=False)
+    print(f"\nSaved to {TESTDATA / 'benchmark_summary_site.csv'}")
+
+    # ---- Transcript-level evaluation ----
+    tx_rows = []
+    for stoich in STOICH_LEVELS:
+        for thresh in available_thresholds:
+            for mode in ("new", "legacy"):
+                df = load_results(stoich, mode, thresh)
+                if df is None:
+                    continue
+                metrics = evaluate_transcript(df, gt)
+                if not metrics:
+                    continue
+                tx_rows.append({
+                    "stoichiometry_level": stoich,
+                    "mode": mode,
+                    "threshold": thresh,
+                    **metrics,
+                })
+
+    if tx_rows:
+        tx_summary = pd.DataFrame(tx_rows)
+        print("\n=== Transcript-level Summary ===")
+        print(tx_summary.to_string(index=False, float_format="%.4f"))
+        tx_summary.to_csv(TESTDATA / "benchmark_summary_transcript.csv", index=False)
+        print(f"\nSaved to {TESTDATA / 'benchmark_summary_transcript.csv'}")
+    else:
+        tx_summary = None
+        print("\nNo transcript-level results (need multiple contigs with mixed mod status).")
 
     # ---- Read-level export ----
     print("\n=== Exporting read-level results ===")
@@ -419,58 +555,12 @@ def main():
     else:
         print("  No read-level data for stoich=1.0. Run with --keep-intermediate first.")
 
-    # ---- Plot AUPRC vs stoichiometry (per threshold x scoring mode) ----
-    score_col = None
-    for candidate in ["auprc_mean_p_mod", "auprc_mod_ratio", "auprc_effect_size"]:
-        if candidate in summary.columns:
-            score_col = candidate
-            break
+    # ---- Plot: one figure per score column, site-level ----
+    _plot_benchmark(summary, "site", TESTDATA)
 
-    if score_col is None:
-        print("No AUPRC columns available for plotting.")
-        return
-
-    unique_thresholds = sorted(summary["threshold"].unique())
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    styles = {
-        ("new",): "-",
-        ("legacy",): "--",
-    }
-    colors = plt.cm.tab10(np.linspace(0, 1, max(len(unique_thresholds), 1)))
-
-    for ax, metric_prefix, ylabel in [
-        (axes[0], "auprc", "AUPRC"),
-        (axes[1], "auroc", "AUROC"),
-    ]:
-        col = score_col.replace("auprc_", f"{metric_prefix}_")
-        if col not in summary.columns:
-            continue
-        for i, thresh in enumerate(unique_thresholds):
-            for mode, ls in [("new", "-"), ("legacy", "--")]:
-                sub = summary[
-                    (summary["mode"] == mode) & (summary["threshold"] == thresh)
-                ].copy()
-                if sub.empty:
-                    continue
-                sub["x"] = sub["stoichiometry_level"].astype(float)
-                sub = sub.sort_values("x")
-                ax.plot(
-                    sub["x"], sub[col], ls,
-                    color=colors[i], marker="o", markersize=4,
-                    label=f"{mode} t={thresh}",
-                )
-        ax.set_xlabel("Stoichiometry level")
-        ax.set_ylabel(ylabel)
-        ax.set_title(f"{ylabel} vs Stoichiometry ({col.split('_', 1)[1]})")
-        ax.legend(fontsize=7, ncol=2)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(-0.05, 1.05)
-
-    plt.tight_layout()
-    plot_path = TESTDATA / "benchmark_auprc.png"
-    plt.savefig(plot_path, dpi=150)
-    print(f"Plot saved to {plot_path}")
+    # ---- Plot: one figure per score column, transcript-level ----
+    if tx_summary is not None:
+        _plot_benchmark(tx_summary, "transcript", TESTDATA)
 
 
 if __name__ == "__main__":
