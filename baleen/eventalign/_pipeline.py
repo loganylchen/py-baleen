@@ -676,6 +676,10 @@ def run_pipeline(
                 min_depth, use_cuda, rna, padding, threads)
     logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s  cuda_streams=%d",
                 use_open_start, use_open_end, min_mapq, primary_only, num_cuda_streams)
+    logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
+                subsample, subsample_n, gpu_memory_limit)
+    logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
+                cleanup_temp, kmer_model, extra_f5c_args)
     logger.info("=" * 60)
 
     # Validate threads parameter
@@ -965,8 +969,15 @@ def run_pipeline_streaming(
     logger.info("  ref_fasta:    %s", ref_fasta)
     logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
                 min_depth, use_cuda, rna, padding, threads)
-    logger.info("  run_hmm=%s  target_contigs=%s  keep_intermediate=%s",
-                run_hmm, target_contigs, keep_intermediate)
+    logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s  cuda_streams=%d",
+                use_open_start, use_open_end, min_mapq, primary_only, num_cuda_streams)
+    logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
+                subsample, subsample_n, gpu_memory_limit)
+    logger.info("  run_hmm=%s  legacy_scoring=%s  mod_threshold=%.2f",
+                run_hmm, legacy_scoring, mod_threshold)
+    logger.info("  target_contigs=%s  keep_intermediate=%s  cleanup_temp=%s",
+                target_contigs, keep_intermediate, cleanup_temp)
+    logger.info("  kmer_model=%s  extra_f5c_args=%s", kmer_model, extra_f5c_args)
     logger.info("=" * 60)
 
     if threads < 1:
