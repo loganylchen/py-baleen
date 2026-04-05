@@ -20,18 +20,18 @@
     } while (0)
 
 // ============================================================================
-// Cached Device Properties
+// Cached Device Properties (per-device)
 // ============================================================================
 
-static int g_max_threads = 0;
-static bool g_props_cached = false;
+#include <unordered_map>
+static std::unordered_map<int, int> g_max_threads_map;
 
-static int ensure_device_props() {
-    if (!g_props_cached) {
+static int ensure_device_props(int device_id = 0) {
+    if (g_max_threads_map.find(device_id) == g_max_threads_map.end()) {
+        CUDA_CHECK(cudaSetDevice(device_id));
         cudaDeviceProp prop;
-        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-        g_max_threads = prop.maxThreadsPerBlock;
-        g_props_cached = true;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+        g_max_threads_map[device_id] = prop.maxThreadsPerBlock;
     }
     return 0;
 }
@@ -79,8 +79,8 @@ int opendba_dtw_cuda(
 
     // 4. 启动 OpenDBA 原版 DTW 核函数（参数严格对齐）
     // Get device properties to determine thread count
-    ensure_device_props();
-    int max_threads = g_max_threads;
+    ensure_device_props(0);
+    int max_threads = g_max_threads_map[0];
 
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float); // 复用 OpenDBA 的共享内存计算
@@ -145,9 +145,14 @@ int opendba_dtw_cuda(
 
 void opendba_dtw_cleanup()
 {
-    g_props_cached = false;
-    g_max_threads = 0;
-    cudaDeviceReset();
+    g_max_threads_map.clear();
+    int count = 0;
+    if (cudaGetDeviceCount(&count) == cudaSuccess) {
+        for (int i = 0; i < count; i++) {
+            cudaSetDevice(i);
+            cudaDeviceReset();
+        }
+    }
 }
 
 // ============================================================================
@@ -193,8 +198,8 @@ int opendba_dtw_pairwise_batch(
     delete[] h_seq_lengths;
 
     // Allocate temporary buffers for DTW computation
-    ensure_device_props();
-    int max_threads = g_max_threads;
+    ensure_device_props(0);
+    int max_threads = g_max_threads_map[0];
 
     // Query available GPU memory
     size_t free_memory, total_memory;
@@ -404,8 +409,8 @@ int opendba_dtw_pairwise_varlen(
     CUDA_CHECK(cudaMemcpy(d_sequences, sequences, total_seq_size, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_seq_lengths, seq_lengths, num_sequences * sizeof(size_t), cudaMemcpyHostToDevice));
 
-    ensure_device_props();
-    int max_threads = g_max_threads;
+    ensure_device_props(0);
+    int max_threads = g_max_threads_map[0];
 
     size_t max_pairs_parallel = num_sequences - 1;
 
@@ -498,7 +503,8 @@ int opendba_dtw_multi_position_pairwise(
     int use_open_start,
     int use_open_end,
     float *out_distances,
-    int num_cuda_streams)
+    int num_cuda_streams,
+    int device_id)
 {
     if (!all_sequences || !all_seq_lengths || !position_seq_counts ||
         !out_distances || num_positions == 0 || global_max_length == 0)
@@ -507,8 +513,9 @@ int opendba_dtw_multi_position_pairwise(
         return -1;
     }
 
-    ensure_device_props();
-    int max_threads = g_max_threads;
+    CUDA_CHECK(cudaSetDevice(device_id));
+    ensure_device_props(device_id);
+    int max_threads = g_max_threads_map[device_id];
 
     // Compute offsets and sizes
     size_t total_sequences = 0;
@@ -987,18 +994,19 @@ static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, 
     int use_open_start = 0;
     int use_open_end = 0;
     int num_cuda_streams = 16;
+    int device_id = 0;
 
     static char *kwlist[] = {
         (char *)"sequences", (char *)"lengths", (char *)"counts",
         (char *)"use_open_start", (char *)"use_open_end",
-        (char *)"num_cuda_streams", NULL};
+        (char *)"num_cuda_streams", (char *)"device_id", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iii", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iiii", kwlist,
                                      &PyArray_Type, &sequences_array,
                                      &PyArray_Type, &lengths_array,
                                      &PyArray_Type, &counts_array,
                                      &use_open_start, &use_open_end,
-                                     &num_cuda_streams))
+                                     &num_cuda_streams, &device_id))
     {
         return NULL;
     }
@@ -1126,7 +1134,7 @@ static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, 
         sequences_data, h_lengths, h_counts,
         num_positions, global_max_length,
         use_open_start, use_open_end,
-        out_data, num_cuda_streams);
+        out_data, num_cuda_streams, device_id);
 
     delete[] h_lengths;
     delete[] h_counts;

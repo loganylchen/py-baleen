@@ -174,50 +174,81 @@ _MIN_GPU_PER_WORKER = 4 * 1024 ** 3  # 4 GB — minimum for efficient DTW chunks
 
 def _gpu_concurrent_workers(
     threads: int,
-    gpu_mem: int,
-    use_cuda: Optional[bool],
-) -> int:
+    gpu_mems: list[int],
+    cuda_devices: Optional[list[int]],
+) -> tuple[int, list[int]]:
     """Estimate how many workers can run GPU DTW concurrently.
 
-    Returns the number of workers that can each hold a large DTW chunk
-    (``_MIN_GPU_PER_WORKER``) on the GPU simultaneously.  This is used
-    to size chunks (``chunk_mem_limit = gpu_mem * 0.8 / gpu_workers``)
-    so each kernel launch keeps the GPU busy.
+    Returns ``(total_gpu_workers, device_for_worker)`` where
+    ``device_for_worker[i]`` is the CUDA device index for worker *i*.
 
-    Total *threads* is NOT reduced — extra workers run CPU phases
+    Workers are distributed across devices proportional to each device's
+    memory.  Total *threads* is NOT reduced — extra workers run CPU phases
     (f5c, HMM, aggregation) in parallel and naturally stagger their
     DTW phases.
     """
     if threads <= 1:
-        return 1
-    want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
+        devices = cuda_devices if cuda_devices else [0]
+        return 1, [devices[0]]
+
+    want_cuda = cuda_devices is None or len(cuda_devices) > 0
     if not want_cuda:
-        return threads  # CPU mode: no GPU constraint on chunk sizing
-    gpu_workers = max(1, int(gpu_mem * 0.8 / _MIN_GPU_PER_WORKER))
-    gpu_workers = min(gpu_workers, threads)  # never exceed actual threads
-    if gpu_workers < threads:
+        return threads, []  # CPU mode: no GPU constraint on chunk sizing
+
+    if not gpu_mems:
+        gpu_mems = [8 * 1024 ** 3]
+
+    devices = cuda_devices if cuda_devices else list(range(len(gpu_mems)))
+
+    # Compute workers per device proportional to memory
+    total_mem = sum(gpu_mems[d] if d < len(gpu_mems) else gpu_mems[0] for d in devices)
+    device_for_worker: list[int] = []
+    remaining_workers = threads
+
+    for i, dev in enumerate(devices):
+        mem = gpu_mems[dev] if dev < len(gpu_mems) else gpu_mems[0]
+        if i == len(devices) - 1:
+            n_workers = remaining_workers
+        else:
+            n_workers = max(1, round(threads * mem / total_mem))
+            n_workers = min(n_workers, remaining_workers)
+        remaining_workers -= n_workers
+        device_for_worker.extend([dev] * n_workers)
+
+    total_gpu_workers = len(device_for_worker)
+
+    if len(devices) > 1:
+        from collections import Counter
+        dist = Counter(device_for_worker)
         logger.info(
-            "  GPU chunk sizing: %d concurrent GPU workers "
-            "(%.0f GB GPU, %d total threads)",
-            gpu_workers, gpu_mem / 1024 ** 3, threads,
+            "  Multi-GPU: %d workers across %d devices %s",
+            total_gpu_workers, len(devices),
+            {d: dist[d] for d in devices},
         )
-    return gpu_workers
+
+    return total_gpu_workers, device_for_worker
 
 
-def _get_gpu_memory() -> int:
-    """Try to detect total GPU memory in bytes via nvidia-smi."""
-    try:
-        result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=memory.total',
-             '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            mb = int(result.stdout.strip().split('\n')[0])
-            return mb * 1024 * 1024
-    except Exception:
-        pass
-    return 8 * 1024 ** 3  # default 8 GB
+def _get_gpu_memory(cuda_devices: Optional[list[int]] = None) -> list[int]:
+    """Return total GPU memory in bytes per device.
+
+    Parameters
+    ----------
+    cuda_devices : list[int] or None
+        If given, only return memory for these device indices.
+        If None, return memory for all visible devices.
+
+    Returns
+    -------
+    list[int]
+        Memory in bytes per device.  Falls back to ``[8 GB]`` on failure.
+    """
+    all_mems = _cuda_dtw.get_per_device_memory()
+    if not all_mems:
+        return [8 * 1024 ** 3]
+    if cuda_devices is not None:
+        return [all_mems[d] for d in cuda_devices if d < len(all_mems)]
+    return all_mems
 
 
 def save_results(
@@ -276,6 +307,7 @@ def _process_contig(
     gpu_memory_bytes: Optional[int] = None,
     num_workers: int = 1,
     show_progress: bool = True,
+    cuda_device: int = 0,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -463,6 +495,7 @@ def _process_contig(
                 use_open_end=use_open_end,
                 use_cuda=use_cuda,
                 num_streams=num_cuda_streams,
+                device_id=cuda_device,
             )
 
             all_matrices.extend(chunk_matrices)
@@ -554,6 +587,7 @@ def _process_contig_streaming(
     num_workers: int = 1,
     mod_threshold: float = 0.9,
     show_progress: bool = True,
+    cuda_device: int = 0,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -614,6 +648,7 @@ def _process_contig_streaming(
         gpu_memory_bytes=gpu_memory_bytes,
         num_workers=num_workers,
         show_progress=show_progress,
+        cuda_device=cuda_device,
     )
 
     # Stage 2: HMM smoothing
@@ -648,6 +683,7 @@ def run_pipeline(
     *,
     min_depth: int = 15,
     use_cuda: Optional[bool] = None,
+    cuda_devices: Optional[list[int]] = None,
     use_open_start: bool = False,
     use_open_end: bool = False,
     padding: int = 1,
@@ -690,6 +726,17 @@ def run_pipeline(
     # Validate threads parameter
     if threads < 1:
         raise ValueError(f"threads must be >= 1, got {threads}")
+
+    # Resolve cuda_devices from legacy use_cuda if needed
+    if cuda_devices is None and use_cuda is not None:
+        if use_cuda is True:
+            cuda_devices = None  # auto-detect all GPUs
+        elif use_cuda is False:
+            cuda_devices = []  # CPU mode
+    # Derive use_cuda bool for backward compat in internal code
+    if cuda_devices is not None:
+        use_cuda = len(cuda_devices) > 0 if cuda_devices else False
+    # else: use_cuda stays None (auto-detect)
 
     native_bam = Path(native_bam)
     native_fastq = Path(native_fastq)
@@ -783,8 +830,8 @@ def run_pipeline(
     tmp_root = Path(tempfile.mkdtemp(prefix="baleen-eventalign-"))
     logger.debug("  Temporary directory: %s", tmp_root)
 
-    resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    gpu_workers = _gpu_concurrent_workers(threads, resolved_gpu_mem, use_cuda)
+    gpu_mems = _get_gpu_memory(cuda_devices) if gpu_memory_limit is None else [gpu_memory_limit]
+    gpu_workers, device_for_worker = _gpu_concurrent_workers(threads, gpu_mems, cuda_devices)
 
     try:
         if threads > 1:
@@ -821,9 +868,10 @@ def run_pipeline(
                         num_cuda_streams=num_cuda_streams,
                         subsample=subsample,
                         subsample_n=subsample_n,
-                        gpu_memory_bytes=resolved_gpu_mem,
+                        gpu_memory_bytes=gpu_mems[0] if gpu_mems else 8 * 1024 ** 3,
                         num_workers=gpu_workers,
                         show_progress=False,
+                        cuda_device=device_for_worker[idx - 1] if device_for_worker else 0,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
@@ -879,7 +927,8 @@ def run_pipeline(
                     num_cuda_streams=num_cuda_streams,
                     subsample=subsample,
                     subsample_n=subsample_n,
-                    gpu_memory_bytes=resolved_gpu_mem,
+                    gpu_memory_bytes=gpu_mems[0] if gpu_mems else 8 * 1024 ** 3,
+                    cuda_device=device_for_worker[0] if device_for_worker else 0,
                 )
                 results[contig_name] = contig_result
     finally:
@@ -914,6 +963,7 @@ def run_pipeline_streaming(
     *,
     min_depth: int = 15,
     use_cuda: Optional[bool] = None,
+    cuda_devices: Optional[list[int]] = None,
     use_open_start: bool = False,
     use_open_end: bool = False,
     padding: int = 1,
@@ -987,6 +1037,15 @@ def run_pipeline_streaming(
 
     if threads < 1:
         raise ValueError(f"threads must be >= 1, got {threads}")
+
+    # Resolve cuda_devices from legacy use_cuda if needed
+    if cuda_devices is None and use_cuda is not None:
+        if use_cuda is True:
+            cuda_devices = None  # auto-detect all GPUs
+        elif use_cuda is False:
+            cuda_devices = []  # CPU mode
+    if cuda_devices is not None:
+        use_cuda = len(cuda_devices) > 0 if cuda_devices else False
 
     native_bam = Path(native_bam)
     native_fastq = Path(native_fastq)
@@ -1065,8 +1124,8 @@ def run_pipeline_streaming(
     if keep_intermediate and output_dir is not None:
         intermediate_dir = Path(output_dir) / "intermediate"
 
-    resolved_gpu_mem = gpu_memory_limit if gpu_memory_limit is not None else _get_gpu_memory()
-    gpu_workers = _gpu_concurrent_workers(threads, resolved_gpu_mem, use_cuda)
+    gpu_mems = _get_gpu_memory(cuda_devices) if gpu_memory_limit is None else [gpu_memory_limit]
+    gpu_workers, device_for_worker = _gpu_concurrent_workers(threads, gpu_mems, cuda_devices)
 
     try:
         worker_kwargs = dict(
@@ -1097,7 +1156,7 @@ def run_pipeline_streaming(
             intermediate_dir=intermediate_dir,
             subsample=subsample,
             subsample_n=subsample_n,
-            gpu_memory_bytes=resolved_gpu_mem,
+            gpu_memory_bytes=gpu_mems[0] if gpu_mems else 8 * 1024 ** 3,
             legacy_scoring=legacy_scoring,
             num_workers=gpu_workers,
             mod_threshold=mod_threshold,
@@ -1114,6 +1173,7 @@ def run_pipeline_streaming(
                         contig=contig,
                         contig_idx=idx,
                         total_contigs=len(passed_contigs),
+                        cuda_device=device_for_worker[(idx - 1) % len(device_for_worker)] if device_for_worker else 0,
                         **worker_kwargs,
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
@@ -1147,6 +1207,7 @@ def run_pipeline_streaming(
                     contig=contig,
                     contig_idx=contig_idx,
                     total_contigs=len(passed_contigs),
+                    cuda_device=device_for_worker[0] if device_for_worker else 0,
                     **worker_kwargs,
                 )
                 hmm_results[contig_name] = cmr
