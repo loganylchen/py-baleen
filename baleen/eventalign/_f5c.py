@@ -204,6 +204,7 @@ def run_eventalign(
     rna: bool = True,
     kmer_model: Optional[str] = None,
     extra_args: Optional[list[str]] = None,
+    min_mapq: int = 0,
 ) -> Path:
     """Run ``f5c eventalign`` and write TSV output.
 
@@ -225,6 +226,10 @@ def run_eventalign(
         Optional k-mer model path/name passed via ``--kmer-model``.
     extra_args : list of str, optional
         Additional command-line arguments appended as-is.
+    min_mapq : int, optional
+        Minimum mapping quality passed to ``f5c --min-mapq``.  Defaults to
+        ``0`` so that f5c does not apply its own MAPQ filter (the pipeline
+        already filters reads during BAM splitting).
 
     Returns
     -------
@@ -263,6 +268,7 @@ def run_eventalign(
         cmd.append("--rna")
     if kmer_model is not None:
         cmd.extend(["--kmer-model", kmer_model])
+    cmd.extend(["--min-mapq", str(min_mapq)])
     if extra_args:
         cmd.extend(extra_args)
 

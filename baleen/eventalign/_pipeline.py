@@ -349,6 +349,7 @@ def _process_contig(
         rna=rna,
         kmer_model=kmer_model,
         extra_args=extra_f5c_args,
+        min_mapq=min_mapq,
     )
     logger.info("    Running f5c eventalign (IVT)...")
     _ = _f5c.run_eventalign(
@@ -360,6 +361,7 @@ def _process_contig(
         rna=rna,
         kmer_model=kmer_model,
         extra_args=extra_f5c_args,
+        min_mapq=min_mapq,
     )
     logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
 
