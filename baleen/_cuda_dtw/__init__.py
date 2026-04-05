@@ -11,6 +11,7 @@ CPU backend strategy:
 """
 
 import logging
+import subprocess
 import numpy as np
 from typing import Union, Optional
 
@@ -500,6 +501,7 @@ def dtw_multi_position_pairwise(
     use_open_end: bool = False,
     use_cuda: Optional[bool] = None,
     num_streams: int = 16,
+    device_id: int = 0,
 ) -> list[np.ndarray]:
     """
     Batch-compute pairwise DTW distances for multiple positions in one GPU call.
@@ -564,6 +566,7 @@ def dtw_multi_position_pairwise(
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
             num_cuda_streams=num_streams,
+            device_id=device_id,
         )
 
         result_list: list[np.ndarray] = []
@@ -654,6 +657,38 @@ def estimate_gpu_memory(position_signals: list[list[np.ndarray]]) -> int:
     return int(total * 1.2)
 
 
+def get_device_count() -> int:
+    """Return number of visible CUDA devices."""
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return len([l for l in result.stdout.strip().split('\n') if l.strip()])
+    except Exception:
+        pass
+    return 1 if CUDA_AVAILABLE else 0
+
+
+def get_per_device_memory() -> list[int]:
+    """Return total GPU memory in bytes for each visible CUDA device."""
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.total',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+            return [int(mb) * 1024 * 1024 for mb in lines]
+    except Exception:
+        pass
+    if CUDA_AVAILABLE:
+        return [8 * 1024 ** 3]  # default 8 GB
+    return []
+
+
 __all__ = [
     "dtw_distance",
     "dtw_pairwise",
@@ -663,5 +698,7 @@ __all__ = [
     "cleanup",
     "is_available",
     "backend",
+    "get_device_count",
+    "get_per_device_memory",
     "CUDA_AVAILABLE",
 ]

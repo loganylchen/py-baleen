@@ -93,7 +93,8 @@ extern "C"
         int use_open_start,
         int use_open_end,
         float *out_distances,
-        int num_cuda_streams);
+        int num_cuda_streams,
+        int device_id);
 
     /**
      * @brief 清理 CUDA 资源

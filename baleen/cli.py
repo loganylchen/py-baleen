@@ -38,6 +38,24 @@ from baleen.eventalign import (
 from baleen.eventalign._read_bam import write_mod_bam
 
 
+def _parse_cuda_devices(spec: str) -> list[int]:
+    """Parse device spec: '0', '0,1', '0-3', 'all'."""
+    from baleen._cuda_dtw import get_device_count
+
+    spec = spec.strip().lower()
+    if spec == "all":
+        return list(range(get_device_count()))
+    devices: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            start, end = part.split("-", 1)
+            devices.extend(range(int(start), int(end) + 1))
+        else:
+            devices.append(int(part))
+    return sorted(set(devices))
+
+
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments for the ``run`` sub-command."""
     # Required inputs
@@ -96,12 +114,11 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
 
     # DTW options
     dtw = parser.add_argument_group("DTW options")
-    cuda_group = dtw.add_mutually_exclusive_group()
-    cuda_group.add_argument(
-        "--cuda", action="store_true", default=False,
-        help="Force CUDA for DTW computation",
+    dtw.add_argument(
+        "--cuda", nargs="?", const="all", default=None, metavar="DEVICES",
+        help="CUDA device(s): 0, 0,1, 0-3, or all (default: auto-detect)",
     )
-    cuda_group.add_argument(
+    dtw.add_argument(
         "--no-cuda", action="store_true", default=False,
         help="Force CPU for DTW computation",
     )
@@ -239,12 +256,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
     # Validate input files exist
     _validate_input_files(args)
 
-    # Resolve CUDA option
-    use_cuda: bool | None = None
-    if args.cuda:
-        use_cuda = True
-    elif args.no_cuda:
-        use_cuda = False
+    # Resolve CUDA devices
+    cuda_devices: list[int] | None = None  # None = auto-detect
+    if args.no_cuda:
+        cuda_devices = []  # force CPU
+    elif args.cuda is not None:
+        cuda_devices = _parse_cuda_devices(args.cuda)
 
     # Parse --target
     target_contigs = None
@@ -289,7 +306,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         ivt_blow5=args.ivt_blow5,
         ref_fasta=args.ref,
         min_depth=args.min_depth,
-        use_cuda=use_cuda,
+        cuda_devices=cuda_devices,
         use_open_start=args.open_start,
         use_open_end=args.open_end,
         padding=args.padding,
