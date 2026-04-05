@@ -564,7 +564,8 @@ def _anchored_mixture_em(
 
     pi = 0.1
 
-    for _ in range(max_iter):
+    n_iters = 0
+    for n_iters in range(1, max_iter + 1):  # noqa: B007
         f0 = _normal_pdf(z_native, mu0, sigma0)
         f1 = _normal_pdf(z_native, mu1, sigma1)
         denom = (1.0 - pi) * f0 + pi * f1 + _EPS
@@ -601,6 +602,8 @@ def _anchored_mixture_em(
             pi = pi_new
             break
         pi = pi_new
+
+    logger.debug("EM converged in %d/%d iterations (pi=%.4f)", n_iters, max_iter, pi)
 
     # Clamp pi to prevent degenerate posteriors (consistent with _calibrate_normal)
     pi_post = min(max(pi, 0.01), 0.7)
@@ -811,6 +814,14 @@ def _forward_backward(
     else:
         _trans_fn = _gap_transition_matrix
 
+    # Pre-compute transition matrices for all unique gaps
+    _trans_cache: dict[int, NDArray[np.float64]] = {}
+
+    def _cached_trans(gap: int) -> NDArray[np.float64]:
+        if gap not in _trans_cache:
+            _trans_cache[gap] = _trans_fn(gap, p_stay_per_base)
+        return _trans_cache[gap]
+
     # Forward pass
     alpha = np.zeros((T, N), dtype=np.float64)
     scale = np.zeros(T, dtype=np.float64)
@@ -825,7 +836,7 @@ def _forward_backward(
 
     for t in range(1, T):
         gap = positions[t] - positions[t - 1]
-        trans = _trans_fn(gap, p_stay_per_base)
+        trans = _cached_trans(gap)
         alpha[t] = (alpha[t - 1] @ trans) * emissions[t]
         scale[t] = alpha[t].sum()
         if scale[t] > 0:
@@ -841,7 +852,7 @@ def _forward_backward(
 
     for t in range(T - 2, -1, -1):
         gap = positions[t + 1] - positions[t]
-        trans = _trans_fn(gap, p_stay_per_base)
+        trans = _cached_trans(gap)
         beta_raw = trans @ (emissions[t + 1] * beta[t + 1])
         # Normalize by forward scale factor at t+1 (standard scaled F-B)
         if scale[t + 1] > _EPS:

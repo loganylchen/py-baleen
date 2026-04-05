@@ -58,7 +58,13 @@ def _parse_float(value: Optional[str], default: float = 0.0) -> float:
 def _parse_samples(value: Optional[str]) -> NDArray[np.float32]:
     if value is None or value.strip() == "":
         return np.array([], dtype=np.float32)
-    return np.array([float(token) for token in value.split(",") if token != ""], dtype=np.float32)
+    try:
+        return np.fromstring(value, dtype=np.float32, sep=",")
+    except ValueError:
+        return np.array(
+            [float(token) for token in value.split(",") if token != ""],
+            dtype=np.float32,
+        )
 
 
 def parse_eventalign(tsv_path: Path) -> Generator[EventalignRow, None, None]:
