@@ -286,15 +286,13 @@ def _cmd_run(args: argparse.Namespace) -> None:
     if f5c_threads is None:
         total_cores = os.cpu_count() or 4
         f5c_threads = max(2, min(16, total_cores // max(args.threads, 1)))
-    # Inject into extra_f5c_args (f5c uses -t for threads, --iop for I/O threads)
+    # Inject into extra_f5c_args (f5c uses -t for threads)
+    # NOTE: --iop is only for fast5, not slow5 — omit it to avoid f5c errors
     extra_f5c_args = []
     if '-t' not in extra_f5c_args:
         extra_f5c_args.extend(['-t', str(f5c_threads)])
-    iop_threads = max(1, f5c_threads // 2)
-    if '--iop' not in extra_f5c_args:
-        extra_f5c_args.extend(['--iop', str(iop_threads)])
-    logger.info("f5c threads: -t %d --iop %d (pipeline workers: %d)",
-                f5c_threads, iop_threads, args.threads)
+    logger.info("f5c threads: -t %d (pipeline workers: %d)",
+                f5c_threads, args.threads)
 
     # Run streaming pipeline (DTW → HMM → aggregation fused per contig)
     hmm_results, sites, metadata = run_pipeline_streaming(
