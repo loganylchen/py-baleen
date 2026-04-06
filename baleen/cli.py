@@ -257,11 +257,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
     _validate_input_files(args)
 
     # Resolve CUDA devices
+    # args.cuda is None (not specified), "all" (--cuda with no value), or a string like "0,1"
     cuda_devices: list[int] | None = None  # None = auto-detect
     if args.no_cuda:
         cuda_devices = []  # force CPU
     elif args.cuda is not None:
-        cuda_devices = _parse_cuda_devices(args.cuda)
+        cuda_devices = _parse_cuda_devices(str(args.cuda))
 
     # Parse --target
     target_contigs = None
