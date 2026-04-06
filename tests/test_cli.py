@@ -33,7 +33,7 @@ def sample_args_run():
         padding=0,
         min_depth=15,
         min_mapq=0,
-        cuda=False,
+        cuda=None,
         no_cuda=False,
         open_start=False,
         open_end=False,
@@ -129,29 +129,33 @@ class TestAddRunArgs:
         assert args.native_bam == "n.bam"
         assert args.ref == "r.fa"
         assert args.min_depth == 15  # default
-        assert args.cuda is False
+        assert args.cuda is None
         assert args.no_cuda is False
 
-    def test_cuda_mutual_exclusion(self):
-        """Test that --cuda and --no-cuda cannot both be specified."""
+    def test_cuda_device_spec(self):
+        """Test that --cuda accepts device specs."""
         parser = argparse.ArgumentParser()
         _add_run_args(parser)
 
-        with pytest.raises(SystemExit):
-            parser.parse_args(
-                [
-                    "run",
-                    "--cuda",
-                    "--no-cuda",
-                    "--native-bam", "n.bam",
-                    "--native-fastq", "n.fq",
-                    "--native-blow5", "n.blow5",
-                    "--ivt-bam", "i.bam",
-                    "--ivt-fastq", "i.fq",
-                    "--ivt-blow5", "i.blow5",
-                    "--ref", "r.fa",
-                ]
-            )
+        # --cuda with no value → const "all"
+        args = parser.parse_args([
+            "--cuda",
+            "--native-bam", "n.bam", "--native-fastq", "n.fq",
+            "--native-blow5", "n.blow5", "--ivt-bam", "i.bam",
+            "--ivt-fastq", "i.fq", "--ivt-blow5", "i.blow5",
+            "--ref", "r.fa",
+        ])
+        assert args.cuda == "all"
+
+        # --cuda 0,1 → "0,1"
+        args = parser.parse_args([
+            "--cuda", "0,1",
+            "--native-bam", "n.bam", "--native-fastq", "n.fq",
+            "--native-blow5", "n.blow5", "--ivt-bam", "i.bam",
+            "--ivt-fastq", "i.fq", "--ivt-blow5", "i.blow5",
+            "--ref", "r.fa",
+        ])
+        assert args.cuda == "0,1"
 
 
 class TestAddAggregateArgs:
@@ -253,7 +257,7 @@ class TestCmdRun:
     ):
         """Test that CUDA flag is handled correctly."""
         sample_args_run.output_dir = str(tmp_path)
-        sample_args_run.cuda = True
+        sample_args_run.cuda = "0"
         sample_args_run.no_cuda = False
 
         mock_pipeline.return_value = ({}, [], Mock())
@@ -261,7 +265,7 @@ class TestCmdRun:
         _cmd_run(sample_args_run)
 
         call_kwargs = mock_pipeline.call_args[1]
-        assert call_kwargs["use_cuda"] is True
+        assert call_kwargs["cuda_devices"] == [0]
 
 
 class TestCmdAggregate:
