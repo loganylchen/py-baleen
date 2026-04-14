@@ -614,7 +614,7 @@ def _process_contig_streaming(
         ``(contig_name, hmm_result, per_site_results)`` — distance matrices
         are **not** included.
     """
-    from baleen.eventalign._aggregation import aggregate_contig
+    from baleen.eventalign._aggregation import aggregate_contig, _benjamini_hochberg
     from baleen.eventalign._hierarchical import compute_sequential_modification_probabilities
 
     # Stage 1: DTW
@@ -658,8 +658,13 @@ def _process_contig_streaming(
         show_progress=show_progress,
     )
 
-    # Stage 3: Site-level aggregation (no FDR — done globally later)
+    # Stage 3: Site-level aggregation with per-transcript FDR
     sites = aggregate_contig(cmr, mod_threshold=mod_threshold)
+    if sites:
+        pvalues = np.array([s.pvalue for s in sites], dtype=np.float64)
+        padj = _benjamini_hochberg(pvalues)
+        for site, adj in zip(sites, padj):
+            site.padj = float(adj)
 
     # Optionally save intermediate ContigResult
     if keep_intermediate and intermediate_dir is not None:
@@ -1008,9 +1013,9 @@ def run_pipeline_streaming(
     Returns
     -------
     tuple[dict[str, ContigModificationResult], list[SiteResult], PipelineMetadata]
-        ``(hmm_results, fdr_corrected_sites, metadata)``
+        ``(hmm_results, per_transcript_fdr_sites, metadata)``
     """
-    from baleen.eventalign._aggregation import SiteResult, _benjamini_hochberg
+    from baleen.eventalign._aggregation import SiteResult
 
     pipeline_t0 = time.perf_counter()
     logger.info("=" * 60)
@@ -1215,13 +1220,6 @@ def run_pipeline_streaming(
     finally:
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
-
-    # ---- FDR correction across all sites ----
-    if all_sites:
-        pvalues = np.array([s.pvalue for s in all_sites], dtype=np.float64)
-        padj = _benjamini_hochberg(pvalues)
-        for site, adj in zip(all_sites, padj):
-            site.padj = float(adj)
 
     total_positions = sum(len(cmr.position_stats) for cmr in hmm_results.values())
     pipeline_elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)

@@ -5,7 +5,7 @@ into transcript-level modification calls with:
 
 - **Modification ratio** (stoichiometry) via Beta-Binomial soft counts
 - **P-value** via one-sided Mann-Whitney U test (native vs IVT)
-- **FDR-adjusted p-value** via Benjamini-Hochberg correction
+- **FDR-adjusted p-value** via per-transcript Benjamini-Hochberg correction
 - **95% credible interval** from Beta posterior
 
 Output is a TSV compatible with other nanopore modification detection
@@ -18,7 +18,7 @@ SiteResult
 aggregate_contig
     Aggregate one contig's per-read results into site-level calls.
 aggregate_all
-    Aggregate all contigs, applying FDR correction across all sites.
+    Aggregate all contigs, applying per-transcript FDR correction.
 write_site_tsv
     Write site-level results to a TSV file.
 """
@@ -242,7 +242,7 @@ def aggregate_all(
     score_field: str = "p_mod_hmm",
     mod_threshold: float = 0.9,
 ) -> list[SiteResult]:
-    """Aggregate all contigs and apply FDR correction across all sites.
+    """Aggregate all contigs and apply per-transcript FDR correction.
 
     Parameters
     ----------
@@ -257,23 +257,21 @@ def aggregate_all(
     -------
     list[SiteResult]
         All sites across all contigs, sorted by contig then position,
-        with ``padj`` set via Benjamini-Hochberg.
+        with ``padj`` set via per-transcript Benjamini-Hochberg.
     """
     all_sites: list[SiteResult] = []
     for contig in sorted(results.keys()):
-        all_sites.extend(
-            aggregate_contig(results[contig], score_field=score_field,
-                             mod_threshold=mod_threshold)
+        contig_sites = aggregate_contig(
+            results[contig], score_field=score_field,
+            mod_threshold=mod_threshold,
         )
-
-    if not all_sites:
-        return all_sites
-
-    # Apply BH FDR correction
-    pvalues = np.array([s.pvalue for s in all_sites], dtype=np.float64)
-    padj = _benjamini_hochberg(pvalues)
-    for site, adj in zip(all_sites, padj):
-        site.padj = float(adj)
+        if contig_sites:
+            # Apply BH FDR correction per transcript
+            pvalues = np.array([s.pvalue for s in contig_sites], dtype=np.float64)
+            padj = _benjamini_hochberg(pvalues)
+            for site, adj in zip(contig_sites, padj):
+                site.padj = float(adj)
+            all_sites.extend(contig_sites)
 
     return all_sites
 
