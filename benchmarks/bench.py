@@ -36,6 +36,8 @@ ALL_STOICH = ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5",
 KNOWN_MODS_FILE = TESTDATA_DIR / "known_modifications.tsv"
 
 METRICS = ["mod_ratio", "mean_p_mod", "effect_size", "stoichiometry"]
+# p-value metrics need -log10 transform (lower p = more modified)
+PVAL_METRICS = ["pvalue", "padj"]
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +148,7 @@ def _load_known_mods() -> set[tuple[str, int]]:
 
 def _compute_accuracy(sites: list, known_mods: set[tuple[str, int]]) -> dict:
     """Compute AUPRC and AUROC for each metric."""
+    import math
     from sklearn.metrics import average_precision_score, roc_auc_score
 
     if not sites:
@@ -153,12 +156,17 @@ def _compute_accuracy(sites: list, known_mods: set[tuple[str, int]]) -> dict:
 
     labels = []
     values: dict[str, list[float]] = {m: [] for m in METRICS}
+    pvalues: dict[str, list[float]] = {m: [] for m in PVAL_METRICS}
 
     for site in sites:
         is_mod = 1 if (site.contig, site.position) in known_mods else 0
         labels.append(is_mod)
         for m in METRICS:
             values[m].append(getattr(site, m))
+        for m in PVAL_METRICS:
+            raw = getattr(site, m)
+            # -log10 transform: clamp to avoid log10(0)
+            pvalues[m].append(-math.log10(max(raw, 1e-300)))
 
     if len(set(labels)) < 2:
         return {}
@@ -170,6 +178,15 @@ def _compute_accuracy(sites: list, known_mods: set[tuple[str, int]]) -> dict:
                 average_precision_score(labels, values[m]), 4)
             result[f"auroc_{m}"] = round(
                 roc_auc_score(labels, values[m]), 4)
+        except ValueError:
+            pass
+    for m in PVAL_METRICS:
+        key = f"nlog10_{m}"
+        try:
+            result[f"auprc_{key}"] = round(
+                average_precision_score(labels, pvalues[m]), 4)
+            result[f"auroc_{key}"] = round(
+                roc_auc_score(labels, pvalues[m]), 4)
         except ValueError:
             pass
     return result
