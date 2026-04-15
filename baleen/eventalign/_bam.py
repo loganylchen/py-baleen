@@ -197,6 +197,7 @@ def get_contig_stats(
     *,
     min_mapq: int = 0,
     primary_only: bool = True,
+    _validated: bool = False,
 ) -> dict[str, ContigStats]:
     """Collect mapped-read and mean-depth statistics per contig.
 
@@ -216,7 +217,8 @@ def get_contig_stats(
         Contigs with zero mapped reads after filtering are omitted.
     """
     bam_path = Path(bam_path)
-    validate_bam(bam_path)
+    if not _validated:
+        validate_bam(bam_path)
 
     stats: dict[str, ContigStats] = {}
     t0 = time.perf_counter()
@@ -399,6 +401,7 @@ def split_bam_contig(
     primary_only: bool = True,
     min_mapq: int = 0,
     max_reads: Optional[int] = None,
+    _validated: bool = False,
 ) -> Path:
     """Extract one contig into a sorted and indexed BAM.
 
@@ -422,7 +425,8 @@ def split_bam_contig(
     """
     bam_path = Path(bam_path)
     output_dir = Path(output_dir)
-    validate_bam(bam_path)
+    if not _validated:
+        validate_bam(bam_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     unsorted_bam = output_dir / f"{contig}.unsorted.bam"

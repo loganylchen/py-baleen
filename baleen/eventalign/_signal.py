@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import csv
 import logging
 import time
-import typing
 from collections import defaultdict
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -69,24 +67,35 @@ def _parse_samples(value: Optional[str]) -> NDArray[np.float32]:
 
 def parse_eventalign(tsv_path: Path) -> Generator[EventalignRow, None, None]:
     with tsv_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
-            row_dict = typing.cast(dict[str, Optional[str]], row)
+        header_line = handle.readline()
+        if not header_line:
+            return
+        col_idx = {name: i for i, name in enumerate(header_line.rstrip("\n\r").split("\t"))}
+        _g = col_idx.get
+        ic, ip, ik, ir = _g("contig"), _g("position"), _g("reference_kmer"), _g("read_name")
+        ist, iei = _g("strand"), _g("event_index")
+        ielm, ies, ied = _g("event_level_mean"), _g("event_stdv"), _g("event_duration")
+        imp, ims = _g("model_predict"), _g("model_stdv")
+        isa, isi, iend = _g("samples"), _g("start_idx"), _g("end_idx")
+
+        for line in handle:
+            f = line.rstrip("\n\r").split("\t")
+            n = len(f)
             yield EventalignRow(
-                contig=row_dict.get("contig", "") or "",
-                position=_parse_int(row_dict.get("position"), default=0) or 0,
-                reference_kmer=row_dict.get("reference_kmer", "") or "",
-                read_name=row_dict.get("read_name", "") or "",
-                strand=row_dict.get("strand", "") or "",
-                event_index=_parse_int(row_dict.get("event_index"), default=0) or 0,
-                event_level_mean=_parse_float(row_dict.get("event_level_mean"), default=0.0),
-                event_stdv=_parse_float(row_dict.get("event_stdv"), default=0.0),
-                event_duration=_parse_float(row_dict.get("event_duration"), default=0.0),
-                model_predict=_parse_float(row_dict.get("model_predict"), default=0.0),
-                model_stdv=_parse_float(row_dict.get("model_stdv"), default=0.0),
-                samples=_parse_samples(row_dict.get("samples")),
-                start_idx=_parse_int(row_dict.get("start_idx"), default=None),
-                end_idx=_parse_int(row_dict.get("end_idx"), default=None),
+                contig=f[ic] if ic is not None and ic < n and f[ic] else "",
+                position=int(f[ip]) if ip is not None and ip < n and f[ip] else 0,
+                reference_kmer=f[ik] if ik is not None and ik < n and f[ik] else "",
+                read_name=f[ir] if ir is not None and ir < n and f[ir] else "",
+                strand=f[ist] if ist is not None and ist < n and f[ist] else "",
+                event_index=int(f[iei]) if iei is not None and iei < n and f[iei] else 0,
+                event_level_mean=float(f[ielm]) if ielm is not None and ielm < n and f[ielm] else 0.0,
+                event_stdv=float(f[ies]) if ies is not None and ies < n and f[ies] else 0.0,
+                event_duration=float(f[ied]) if ied is not None and ied < n and f[ied] else 0.0,
+                model_predict=float(f[imp]) if imp is not None and imp < n and f[imp] else 0.0,
+                model_stdv=float(f[ims]) if ims is not None and ims < n and f[ims] else 0.0,
+                samples=_parse_samples(f[isa] if isa is not None and isa < n else None),
+                start_idx=int(f[isi]) if isi is not None and isi < n and f[isi] else None,
+                end_idx=int(f[iend]) if iend is not None and iend < n and f[iend] else None,
             )
 
 
@@ -117,25 +126,47 @@ def group_signals_by_position(tsv_path: Path) -> dict[int, PositionSignals]:
 
     t0 = time.perf_counter()
     n_rows = 0
-    for event in parse_eventalign(tsv_path):
-        n_rows += 1
-        # Shift from 0-based first-of-kmer to 1-based center-of-kmer
-        shifted = event.position + len(event.reference_kmer) // 2 + 1
-        if shifted not in grouped:
-            grouped[shifted] = PositionSignals(
-                contig=event.contig,
-                position=shifted,
-                reference_kmer=event.reference_kmer,
-                read_signals={},
-                read_names=[],
-            )
 
-        pos_signals = grouped[shifted]
-        if event.read_name not in pos_signals.read_signals:
-            pos_signals.read_signals[event.read_name] = np.array([], dtype=np.float32)
-            pos_signals.read_names.append(event.read_name)
+    with tsv_path.open("r", encoding="utf-8", newline="") as handle:
+        header_line = handle.readline()
+        if not header_line:
+            return grouped
+        col_idx = {name: i for i, name in enumerate(header_line.rstrip("\n\r").split("\t"))}
+        ic = col_idx["contig"]
+        ip = col_idx["position"]
+        ik = col_idx["reference_kmer"]
+        ir = col_idx["read_name"]
+        isi = col_idx.get("start_idx")
+        isa = col_idx["samples"]
 
-        pending[shifted][event.read_name].append((event.start_idx, event.samples))
+        for line in handle:
+            n_rows += 1
+            f = line.rstrip("\n\r").split("\t")
+            contig = f[ic]
+            position = int(f[ip])
+            reference_kmer = f[ik]
+            read_name = f[ir]
+            si_str = f[isi] if isi is not None else ""
+            start_idx: Optional[int] = int(si_str) if si_str else None
+            samples = _parse_samples(f[isa])
+
+            # Shift from 0-based first-of-kmer to 1-based center-of-kmer
+            shifted = position + len(reference_kmer) // 2 + 1
+            if shifted not in grouped:
+                grouped[shifted] = PositionSignals(
+                    contig=contig,
+                    position=shifted,
+                    reference_kmer=reference_kmer,
+                    read_signals={},
+                    read_names=[],
+                )
+
+            pos_signals = grouped[shifted]
+            if read_name not in pos_signals.read_signals:
+                pos_signals.read_signals[read_name] = np.array([], dtype=np.float32)
+                pos_signals.read_names.append(read_name)
+
+            pending[shifted][read_name].append((start_idx, samples))
 
     for position, per_read in pending.items():
         for read_name, chunks in per_read.items():

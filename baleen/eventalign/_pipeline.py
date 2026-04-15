@@ -356,6 +356,7 @@ def _process_contig(
         primary_only=primary_only,
         min_mapq=min_mapq,
         max_reads=_max_reads,
+        _validated=True,
     )
     logger.info("    Splitting BAM → IVT contig BAM...")
     ivt_contig_bam = _bam.split_bam_contig(
@@ -365,6 +366,7 @@ def _process_contig(
         primary_only=primary_only,
         min_mapq=min_mapq,
         max_reads=_max_reads,
+        _validated=True,
     )
 
     native_tsv = contig_tmp / "native.eventalign.tsv"
@@ -780,12 +782,14 @@ def run_pipeline(
         native_bam,
         min_mapq=min_mapq,
         primary_only=primary_only,
+        _validated=True,
     )
     logger.info("  Computing IVT BAM contig stats...")
     ivt_stats = _bam.get_contig_stats(
         ivt_bam,
         min_mapq=min_mapq,
         primary_only=primary_only,
+        _validated=True,
     )
     logger.info("[Step 3/6] BAM stats complete: %d native contigs, %d IVT contigs (%s)",
                 len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
@@ -1079,8 +1083,8 @@ def run_pipeline_streaming(
     step_t0 = time.perf_counter()
     _bam.validate_bam(native_bam)
     _bam.validate_bam(ivt_bam)
-    native_stats = _bam.get_contig_stats(native_bam, min_mapq=min_mapq, primary_only=primary_only)
-    ivt_stats = _bam.get_contig_stats(ivt_bam, min_mapq=min_mapq, primary_only=primary_only)
+    native_stats = _bam.get_contig_stats(native_bam, min_mapq=min_mapq, primary_only=primary_only, _validated=True)
+    ivt_stats = _bam.get_contig_stats(ivt_bam, min_mapq=min_mapq, primary_only=primary_only, _validated=True)
     logger.info("[Step 3/5] BAM stats complete: %d native contigs, %d IVT contigs (%s)",
                 len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
 
