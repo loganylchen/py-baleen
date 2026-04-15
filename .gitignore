@@ -14,6 +14,9 @@ build/
 *.pkl
 baleen_output/
 
+# Benchmark results
+benchmarks/results.jsonl
+
 # IDE
 .vscode/
 .idea/
