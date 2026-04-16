@@ -490,22 +490,30 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     try:
         for stoich in stoich_levels:
-            print(f"  [{stoich}] running...", end=" ", flush=True)
+            suffix = f" x{args.repeat}" if args.repeat > 1 else ""
+            print(f"  [{stoich}]{suffix} running...", end=" ", flush=True)
             log_capture.reset()
 
-            _hmm, sites, wall_s = _run_single_stoich(
-                stoich,
-                use_cuda=use_cuda,
-                threads=threads,
-                mod_threshold=args.threshold,
-                testdata=testdata,
-                profile=profiler,
-            )
-            n_sites = len(sites)
+            wall_s_total = 0.0
+            sites_first: list | None = None
+            for _r in range(args.repeat):
+                _hmm, sites, wall_s = _run_single_stoich(
+                    stoich,
+                    use_cuda=use_cuda,
+                    threads=threads,
+                    mod_threshold=args.threshold,
+                    testdata=testdata,
+                    profile=profiler,
+                )
+                wall_s_total += wall_s
+                if sites_first is None:
+                    sites_first = sites
+            n_sites = len(sites_first) if sites_first is not None else 0
 
             per_stoich_timing[stoich] = {
-                "wall_s": round(wall_s, 2),
+                "wall_s": round(wall_s_total, 2),
                 "n_sites": n_sites,
+                "n_repeats": args.repeat,
                 "stages_s": {k: round(v, 2)
                              for k, v in log_capture.stages.items()},
                 "per_contig": {
@@ -513,10 +521,11 @@ def cmd_run(args: argparse.Namespace) -> None:
                     for k, v in log_capture.per_contig.items()
                 },
             }
-            acc = _compute_accuracy(sites, known_mods)
+            acc = _compute_accuracy(sites_first or [], known_mods)
             if acc:
                 per_stoich_accuracy[stoich] = acc
-            all_sites.extend(sites)
+            if sites_first is not None:
+                all_sites.extend(sites_first)
 
             stages = log_capture.stages
             n_contigs = len(log_capture.per_contig["contig_total"])
@@ -526,7 +535,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 f"filt={stages.get('filtering', 0):.1f}s "
                 f"stream={stages.get('streaming', 0):.1f}s"
             )
-            print(f"{wall_s:.1f}s, {n_sites} sites, {n_contigs} contigs "
+            print(f"{wall_s_total:.1f}s, {n_sites} sites, {n_contigs} contigs "
                   f"[{stage_summary}]")
     finally:
         root_logger.removeHandler(log_capture)
@@ -557,6 +566,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             "stoich_levels": stoich_levels,
             "use_cuda": use_cuda,
             "profile": args.profile,
+            "repeat": args.repeat,
         },
         "timing": {
             "total_wall_s": round(total_wall, 2),
@@ -875,6 +885,10 @@ def main() -> None:
                             "Saves a .prof file under benchmarks/profiles/.")
     p_run.add_argument("--profile-top", type=int, default=20,
                        help="Top-N functions to capture when --profile is on (default: 20)")
+    p_run.add_argument("--repeat", type=int, default=1,
+                       help="Repeat each stoich N times back-to-back (multiplies effective "
+                            "contig count for scaling tests). Timings are accumulated; accuracy "
+                            "is measured once (outputs are deterministic). Default: 1.")
 
     # -- compare --
     p_cmp = sub.add_parser("compare", help="Compare recent runs")
