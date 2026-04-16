@@ -30,6 +30,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import gammaln
 from scipy.stats import norm as _norm_dist
 
 logger = logging.getLogger(__name__)
@@ -136,18 +137,22 @@ def _fit_normal(x: NDArray[np.float64]) -> tuple[float, float]:
     return mu, sigma
 
 
+def _beta_logpdf(x: NDArray[np.float64], a: float, b: float) -> NDArray[np.float64]:
+    """Vectorised Beta log-PDF (avoids underflow).
+
+    Computed directly via ``scipy.special.gammaln`` to bypass the
+    ``scipy.stats.beta`` dispatch layer (broadcast/mask machinery) which
+    dominated profiles.  Mathematically identical to
+    ``scipy.stats.beta.logpdf`` for ``x ∈ (0, 1)``.
+    """
+    x_safe = np.clip(x, 1e-10, 1.0 - 1e-10)
+    log_norm = gammaln(a + b) - gammaln(a) - gammaln(b)
+    return log_norm + (a - 1.0) * np.log(x_safe) + (b - 1.0) * np.log1p(-x_safe)
+
+
 def _beta_pdf(x: NDArray[np.float64], a: float, b: float) -> NDArray[np.float64]:
     """Vectorised Beta PDF with clamping."""
-    from scipy.stats import beta as beta_dist
-    x_safe = np.clip(x, 1e-10, 1.0 - 1e-10)
-    return beta_dist.pdf(x_safe, a, b)
-
-
-def _beta_logpdf(x: NDArray[np.float64], a: float, b: float) -> NDArray[np.float64]:
-    """Vectorised Beta log-PDF (avoids underflow)."""
-    from scipy.stats import beta as beta_dist
-    x_safe = np.clip(x, 1e-10, 1.0 - 1e-10)
-    return beta_dist.logpdf(x_safe, a, b)
+    return np.exp(_beta_logpdf(x, a, b))
 
 
 def _beta_log_likelihood(x: NDArray[np.float64], a: float, b: float) -> float:
