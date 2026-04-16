@@ -47,6 +47,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Optional numba JIT for the 2-state forward-backward hot loop.  Identical
+# IEEE-754 arithmetic (no fastmath), so results are bit-exact with the pure
+# Python fallback.
+try:
+    from numba import njit as _njit
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover - exercised only in CPU-only envs
+    _HAS_NUMBA = False
+
+    def _njit(*args, **kwargs):
+        """No-op decorator when numba is unavailable."""
+        def _decorator(fn):
+            return fn
+        if args and callable(args[0]) and not kwargs:
+            return args[0]
+        return _decorator
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -869,9 +886,111 @@ def _forward_backward(
     return gamma[:, N - 1]  # P(state=Modified) — last column for both 2 and 3 state
 
 
+@_njit(cache=True)
+def _fb_2state_kernel(
+    emissions: NDArray[np.float64],
+    positions: NDArray[np.int64],
+    ip0: float,
+    ip1: float,
+    p_stay_per_base: float,
+    eps: float,
+) -> NDArray[np.float64]:
+    """JIT-able kernel: scalar 2-state forward-backward.
+
+    All arithmetic is plain IEEE-754 (no fastmath), so the output is bit-exact
+    with the non-JIT Python version.
+    """
+    T = emissions.shape[0]
+    alpha0 = np.empty(T, dtype=np.float64)
+    alpha1 = np.empty(T, dtype=np.float64)
+    scale = np.empty(T, dtype=np.float64)
+
+    # Forward pass — carry a0,a1 as scalars
+    a0 = ip0 * emissions[0, 0]
+    a1 = ip1 * emissions[0, 1]
+    s = a0 + a1
+    if s > 0.0:
+        a0 = a0 / s
+        a1 = a1 / s
+    else:
+        a0 = 0.5
+        a1 = 0.5
+        s = eps
+    alpha0[0] = a0
+    alpha1[0] = a1
+    scale[0] = s
+
+    for t in range(1, T):
+        gap = positions[t] - positions[t - 1]
+        if gap < 1:
+            gap = 1
+        p_stay = p_stay_per_base ** gap
+        if p_stay > 1.0 - eps:
+            p_stay = 1.0 - eps
+        elif p_stay < eps:
+            p_stay = eps
+        p_switch = 1.0 - p_stay
+        raw0 = (a0 * p_stay + a1 * p_switch) * emissions[t, 0]
+        raw1 = (a0 * p_switch + a1 * p_stay) * emissions[t, 1]
+        s = raw0 + raw1
+        if s > 0.0:
+            a0 = raw0 / s
+            a1 = raw1 / s
+        else:
+            a0 = 0.5
+            a1 = 0.5
+            s = eps
+        alpha0[t] = a0
+        alpha1[t] = a1
+        scale[t] = s
+
+    # Backward pass
+    beta0 = np.empty(T, dtype=np.float64)
+    beta1 = np.empty(T, dtype=np.float64)
+    beta0[T - 1] = 1.0
+    beta1[T - 1] = 1.0
+    b0 = 1.0
+    b1 = 1.0
+
+    for t in range(T - 2, -1, -1):
+        gap = positions[t + 1] - positions[t]
+        if gap < 1:
+            gap = 1
+        p_stay = p_stay_per_base ** gap
+        if p_stay > 1.0 - eps:
+            p_stay = 1.0 - eps
+        elif p_stay < eps:
+            p_stay = eps
+        p_switch = 1.0 - p_stay
+        eb0 = emissions[t + 1, 0] * b0
+        eb1 = emissions[t + 1, 1] * b1
+        raw0 = p_stay * eb0 + p_switch * eb1
+        raw1 = p_switch * eb0 + p_stay * eb1
+        s_t1 = scale[t + 1]
+        if s_t1 > eps:
+            b0 = raw0 / s_t1
+            b1 = raw1 / s_t1
+        else:
+            b0 = 1.0
+            b1 = 1.0
+        beta0[t] = b0
+        beta1[t] = b1
+
+    # Posterior: gamma ∝ alpha * beta; return P(state=Modified)
+    out = np.empty(T, dtype=np.float64)
+    for t in range(T):
+        g0 = alpha0[t] * beta0[t]
+        g1 = alpha1[t] * beta1[t]
+        gs = g0 + g1
+        if gs < eps:
+            gs = eps
+        out[t] = g1 / gs
+    return out
+
+
 def _forward_backward_2state(
     emissions: NDArray[np.float64],
-    positions: list[int],
+    positions: list[int] | NDArray[np.int64],
     *,
     init_prob: NDArray[np.float64] | None = None,
     p_stay_per_base: float = 0.98,
@@ -882,6 +1001,10 @@ def _forward_backward_2state(
     numpy dispatch/shape-check overhead that dominates 2×2 matmul for short
     trajectories.  Transition matrices are row-stochastic symmetric 2×2
     matrices of the form ``[[p_stay, p_switch], [p_switch, p_stay]]``.
+
+    When numba is installed, the inner loops run as a JIT-compiled kernel
+    (bit-exact, no fastmath).  Without numba, the same code runs in pure
+    Python.
     """
     T = emissions.shape[0]
     if T == 0:
@@ -894,87 +1017,14 @@ def _forward_backward_2state(
         ip0 = float(init_prob[0])
         ip1 = float(init_prob[1])
 
-    # Pre-compute per-gap (p_stay, p_switch) scalar tuples
-    _trans_cache: dict[int, tuple[float, float]] = {}
-
-    def _cached_trans(gap: int) -> tuple[float, float]:
-        cached = _trans_cache.get(gap)
-        if cached is None:
-            p_stay = p_stay_per_base ** max(gap, 1)
-            p_stay = max(min(p_stay, 1.0 - _EPS), _EPS)
-            cached = (p_stay, 1.0 - p_stay)
-            _trans_cache[gap] = cached
-        return cached
-
-    # Forward pass — carry a0,a1 as scalars, store into pre-allocated arrays
-    alpha0 = np.empty(T, dtype=np.float64)
-    alpha1 = np.empty(T, dtype=np.float64)
-    scale = np.empty(T, dtype=np.float64)
-
-    a0 = ip0 * emissions[0, 0]
-    a1 = ip1 * emissions[0, 1]
-    s = a0 + a1
-    if s > 0:
-        a0 /= s
-        a1 /= s
+    if isinstance(positions, np.ndarray):
+        pos_arr = positions.astype(np.int64, copy=False)
     else:
-        a0 = 0.5
-        a1 = 0.5
-        s = _EPS
-    alpha0[0] = a0
-    alpha1[0] = a1
-    scale[0] = s
+        pos_arr = np.asarray(positions, dtype=np.int64)
 
-    for t in range(1, T):
-        gap = positions[t] - positions[t - 1]
-        p_stay, p_switch = _cached_trans(gap)
-        # (alpha[t-1] @ trans) * emissions[t]
-        # trans[0,0]=p_stay, trans[0,1]=p_switch, trans[1,0]=p_switch, trans[1,1]=p_stay
-        raw0 = (a0 * p_stay + a1 * p_switch) * emissions[t, 0]
-        raw1 = (a0 * p_switch + a1 * p_stay) * emissions[t, 1]
-        s = raw0 + raw1
-        if s > 0:
-            a0 = raw0 / s
-            a1 = raw1 / s
-        else:
-            a0 = 0.5
-            a1 = 0.5
-            s = _EPS
-        alpha0[t] = a0
-        alpha1[t] = a1
-        scale[t] = s
-
-    # Backward pass — also scalar, normalized by forward scale factors
-    beta0 = np.empty(T, dtype=np.float64)
-    beta1 = np.empty(T, dtype=np.float64)
-    beta0[T - 1] = 1.0
-    beta1[T - 1] = 1.0
-    b0 = 1.0
-    b1 = 1.0
-
-    for t in range(T - 2, -1, -1):
-        gap = positions[t + 1] - positions[t]
-        p_stay, p_switch = _cached_trans(gap)
-        eb0 = emissions[t + 1, 0] * b0
-        eb1 = emissions[t + 1, 1] * b1
-        # trans @ (emissions[t+1] * beta[t+1])
-        raw0 = p_stay * eb0 + p_switch * eb1
-        raw1 = p_switch * eb0 + p_stay * eb1
-        s_t1 = scale[t + 1]
-        if s_t1 > _EPS:
-            b0 = raw0 / s_t1
-            b1 = raw1 / s_t1
-        else:
-            b0 = 1.0
-            b1 = 1.0
-        beta0[t] = b0
-        beta1[t] = b1
-
-    # Posterior: gamma ∝ alpha * beta; return P(state=Modified)
-    gamma0 = alpha0 * beta0
-    gamma1 = alpha1 * beta1
-    gamma_sum = np.maximum(gamma0 + gamma1, _EPS)
-    return gamma1 / gamma_sum
+    return _fb_2state_kernel(
+        emissions, pos_arr, ip0, ip1, float(p_stay_per_base), _EPS
+    )
 
 
 def _run_hmm_on_trajectories(
