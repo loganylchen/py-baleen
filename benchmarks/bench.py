@@ -23,7 +23,10 @@ Every run captures:
 
 With ``--profile`` (optional, forces ``--threads 1`` for accurate attribution),
 cProfile runs on the pipeline and time is bucketed by module:
-  f5c, bam, signal, dtw, hmm, aggregation, hmm_training, other.
+  dtw, hmm, hmm_training, probability, aggregation, signal, f5c, bam,
+  pipeline, io, tslearn, scipy, numpy, other.
+Built-in C extensions (e.g. the CUDA DTW kernel) are matched by their
+funcname since cProfile reports an empty filepath for them.
 """
 
 from __future__ import annotations
@@ -258,22 +261,37 @@ def _summarize_per_contig(values: list[float]) -> dict:
 # cProfile bucketed breakdown
 # ---------------------------------------------------------------------------
 
-# Match by filename / module-path fragment. Order matters (first match wins).
-_BUCKET_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("dtw", ("_cuda_dtw",)),  # before bam so _cuda_dtw/__init__.py wins
-    ("hmm_training", ("_hmm_training.py",)),
-    ("hmm", ("_hierarchical.py",)),
-    ("aggregation", ("_aggregation.py",)),
-    ("signal", ("_signal.py",)),
-    ("f5c", ("_f5c.py",)),
-    ("bam", ("_bam.py", "pysam/")),
-    ("tslearn", ("tslearn/",)),
+# Classification tiers. Order matters (first match wins).
+# Each tier is (bucket_name, filepath_fragments, funcname_fragments).
+# Funcname matching catches built-in C extensions where filepath is "~",
+# e.g. "{built-in method baleen._cuda_dtw._cuda_dtw.dtw_multi_position_pairwise}".
+_BUCKET_PATTERNS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
+    # Baleen project modules — match by filename fragment, also by funcname
+    # so built-ins like _cuda_dtw's C kernel land in the right bucket.
+    ("dtw",          ("_cuda_dtw",),                          ("_cuda_dtw",)),
+    ("hmm_training", ("_hmm_training.py",),                   ()),
+    ("hmm",          ("_hierarchical.py",),                   ()),
+    ("probability",  ("_probability.py",),                    ()),
+    ("aggregation",  ("_aggregation.py",),                    ()),
+    ("signal",       ("_signal.py",),                         ()),
+    ("f5c",          ("_f5c.py",),                            ()),
+    ("bam",          ("_bam.py", "pysam/"),                   ()),
+    ("pipeline",     ("_pipeline.py",),                       ()),
+    # IO / subprocess — typically f5c output reads and subprocess plumbing.
+    ("io",           ("subprocess.py", "/selectors.py"),
+                     ("TextIOWrapper", "BufferedReader", "_posixsubprocess")),
+    # Third-party libraries
+    ("tslearn",      ("tslearn/",),                           ()),
+    ("scipy",        ("scipy/",),                             ()),
+    ("numpy",        ("numpy/",),                             ("numpy.",)),
 ]
 
 
-def _bucket_for_path(path: str) -> str:
-    for name, fragments in _BUCKET_PATTERNS:
-        if any(frag in path for frag in fragments):
+def _bucket_for(filepath: str, funcname: str) -> str:
+    for name, path_frags, func_frags in _BUCKET_PATTERNS:
+        if any(frag in filepath for frag in path_frags):
+            return name
+        if func_frags and any(frag in funcname for frag in func_frags):
             return name
     return "other"
 
@@ -282,8 +300,8 @@ def _profile_buckets(prof: cProfile.Profile) -> dict:
     """Aggregate cProfile stats into named buckets (self time per module)."""
     stats = pstats.Stats(prof)
     buckets: dict[str, float] = {}
-    for (filepath, _lineno, _funcname), (_cc, _nc, tt, _ct, _callers) in stats.stats.items():
-        key = _bucket_for_path(str(filepath))
+    for (filepath, _lineno, funcname), (_cc, _nc, tt, _ct, _callers) in stats.stats.items():
+        key = _bucket_for(str(filepath), str(funcname))
         buckets[key] = buckets.get(key, 0.0) + tt
 
     total = sum(buckets.values())
