@@ -22,7 +22,8 @@ extern "C"
         const float *seq2, size_t len2,
         int use_open_start,
         int use_open_end,
-        float *out_distance);
+        float *out_distance,
+        int sakoe_band);
 
     /**
      * @brief Compute pairwise DTW distances for a batch of sequences (all same length)
@@ -40,7 +41,8 @@ extern "C"
         size_t seq_length,
         int use_open_start,
         int use_open_end,
-        float *out_distances);
+        float *out_distances,
+        int sakoe_band);
 
     /**
      * @brief Compute pairwise DTW distances for variable-length sequences
@@ -65,7 +67,8 @@ extern "C"
         size_t max_length,
         int use_open_start,
         int use_open_end,
-        float *out_distances);
+        float *out_distances,
+        int sakoe_band);
 
     /**
      * @brief Compute pairwise DTW for multiple positions in one batched GPU call.
@@ -94,7 +97,8 @@ extern "C"
         int use_open_end,
         float *out_distances,
         int num_cuda_streams,
-        int device_id);
+        int device_id,
+        int sakoe_band);
 
     /**
      * @brief 清理 CUDA 资源
