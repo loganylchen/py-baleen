@@ -81,6 +81,49 @@ def _get_nvcc():
     return None
 
 
+# Default arch list covers Pascal (1050 Ti / 1080 Ti) through Hopper (H100).
+# Override with BALEEN_CUDA_ARCHS=61,75,86 (comma-separated compute capabilities
+# without the dot: e.g. "61" = sm_61 = compute capability 6.1). The highest arch
+# also gets PTX embedded for forward-compat with future GPUs.
+_DEFAULT_CUDA_ARCHS = ["61", "75", "80", "86", "89", "90"]
+
+
+def _get_cuda_archs():
+    """Return list of compute capability codes to target (e.g. ['61', '86'])."""
+    env = os.environ.get("BALEEN_CUDA_ARCHS", "").strip()
+    if not env:
+        return list(_DEFAULT_CUDA_ARCHS)
+    if env.lower() == "native":
+        # Auto-detect via nvidia-smi; fall back to defaults on failure
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            caps = sorted({line.strip().replace(".", "")
+                           for line in out.splitlines() if line.strip()})
+            if caps:
+                return caps
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired):
+            pass
+        return list(_DEFAULT_CUDA_ARCHS)
+    return [a.strip() for a in env.replace(";", ",").split(",") if a.strip()]
+
+
+def _gencode_flags():
+    """Build -gencode flag list for nvcc. Highest arch also embeds PTX."""
+    archs = _get_cuda_archs()
+    if not archs:
+        return []
+    flags = []
+    for arch in archs:
+        flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
+    highest = max(archs, key=lambda a: int(a))
+    flags.extend(["-gencode", f"arch=compute_{highest},code=compute_{highest}"])
+    return flags
+
+
 # ---------------------------------------------------------------------------
 # Custom build_ext that compiles CUDA extensions with nvcc
 # ---------------------------------------------------------------------------
@@ -181,6 +224,10 @@ class CUDABuildExt(build_ext):
         os.makedirs(os.path.dirname(ext_path), exist_ok=True)
 
         # ── Compile each source ──
+        gencode = _gencode_flags()
+        if gencode:
+            archs_disp = ",".join(_get_cuda_archs())
+            print(f"  [baleen] nvcc targets: sm_{{{archs_disp}}} (+PTX)")
         objects = []
         for src in ext.sources:
             obj = src + ".o"
@@ -189,6 +236,7 @@ class CUDABuildExt(build_ext):
                 "-std=c++17",
                 "-O3",
                 "-Xcompiler", "-fPIC",
+                *gencode,
                 "-c", src,
                 "-o", obj,
             ]
