@@ -4,15 +4,40 @@
 Subcommands:
   run     — run pipeline on testdata, profile resources, compute accuracy
   compare — compare recent runs in a table
+
+Timing granularity
+------------------
+Every run captures:
+  - Total wall time (per stoichiometry level and across the whole run)
+  - Per-stage timings parsed from pipeline logs:
+      * indexing (FASTQ + BLOW5)
+      * BAM validation + contig stats
+      * contig filtering
+      * streaming (DTW → HMM → aggregation)
+  - Per-contig timings aggregated (mean / median / total):
+      * BAM splitting
+      * eventalign (f5c)
+      * DTW
+      * HMM smoothing
+      * site aggregation + FDR
+
+With ``--profile`` (optional, forces ``--threads 1`` for accurate attribution),
+cProfile runs on the pipeline and time is bucketed by module:
+  f5c, bam, signal, dtw, hmm, aggregation, hmm_training, other.
 """
 
 from __future__ import annotations
 
 import argparse
+import cProfile
 import json
+import logging
 import os
 import platform
+import pstats
+import re
 import resource
+import statistics
 import subprocess
 import sys
 import threading
@@ -29,6 +54,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 TESTDATA_DIR = PROJECT_ROOT / "testdata"
 RESULTS_FILE = SCRIPT_DIR / "results.jsonl"
+PROFILE_DIR = SCRIPT_DIR / "profiles"
 
 ALL_STOICH = ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5",
               "0.6", "0.7", "0.8", "0.9", "1.0"]
@@ -131,6 +157,163 @@ class GpuMemoryMonitor:
 
 
 # ---------------------------------------------------------------------------
+# Log timing capture
+# ---------------------------------------------------------------------------
+
+_ELAPSED_RE = re.compile(r"(?:(\d+)m)?(\d+(?:\.\d+)?)s")
+
+
+def _parse_elapsed(s: str) -> float:
+    """Parse `_fmt_elapsed` output back into seconds. Accepts e.g. '1.5s' or '2m30.5s'."""
+    m = _ELAPSED_RE.fullmatch(s.strip())
+    if not m:
+        return 0.0
+    mins = int(m.group(1)) if m.group(1) else 0
+    secs = float(m.group(2))
+    return mins * 60.0 + secs
+
+
+# Single-shot pipeline stages (one value per pipeline run)
+_STAGE_PATTERNS = {
+    "indexing": re.compile(r"\[Step 2/5\] Indexing complete \(([^)]+)\)"),
+    "bam_stats": re.compile(r"\[Step 3/5\] BAM stats complete:.*\(([^)]+)\)"),
+    "filtering": re.compile(r"\[Step 4/5\] \d+ contigs to process \(([^)]+)\)"),
+    "streaming": re.compile(r"\[Step 5/5\] Streaming complete \(([^)]+)\)"),
+}
+
+# Per-contig patterns (collected as a list; aggregated later)
+_CONTIG_PATTERNS = {
+    "bam_split": re.compile(r"Extracted \d+ reads for contig \S+ into \S+ \(([^)]+)\)"),
+    "eventalign": re.compile(r"Eventalign done \(([^)]+)\)"),
+    "hmm": re.compile(r"\[Contig [^\]]+\] HMM done \(([^)]+)\)"),
+    "aggregation": re.compile(r"\[Contig [^\]]+\] Aggregation done: \d+ sites \(([^)]+)\)"),
+}
+# DTW + total per contig come from one message: "[Contig X/Y] NAME done: ..., DTW in T1, total T2"
+_CONTIG_DONE_RE = re.compile(
+    r"\[Contig \d+/\d+\] \S+ done: \d+ positions \(\d+ skipped\), DTW in (\S+), total (\S+)"
+)
+
+
+class LogTimingCapture(logging.Handler):
+    """Parse pipeline log messages into structured timing data.
+
+    Hooks into the `baleen` root logger and regex-matches formatted messages.
+    Works for both threaded and single-threaded pipeline runs because the
+    pipeline already routes per-contig log messages back to the main process.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        # Single-shot pipeline stages (each captured once per stoich run)
+        self.stages: dict[str, float] = {}
+        # Per-contig aggregations (one list per contig, aggregated at end)
+        self.per_contig: dict[str, list[float]] = {
+            k: [] for k in list(_CONTIG_PATTERNS) + ["dtw", "contig_total"]
+        }
+
+    def reset(self) -> None:
+        self.stages.clear()
+        for k in self.per_contig:
+            self.per_contig[k] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return
+
+        for key, pat in _STAGE_PATTERNS.items():
+            m = pat.search(msg)
+            if m:
+                self.stages[key] = _parse_elapsed(m.group(1))
+                return
+
+        for key, pat in _CONTIG_PATTERNS.items():
+            m = pat.search(msg)
+            if m:
+                self.per_contig[key].append(_parse_elapsed(m.group(1)))
+                return
+
+        m = _CONTIG_DONE_RE.search(msg)
+        if m:
+            self.per_contig["dtw"].append(_parse_elapsed(m.group(1)))
+            self.per_contig["contig_total"].append(_parse_elapsed(m.group(2)))
+
+
+def _summarize_per_contig(values: list[float]) -> dict:
+    """Return total/mean/median/max over a list of per-contig times."""
+    if not values:
+        return {"n": 0, "total_s": 0.0, "mean_s": 0.0,
+                "median_s": 0.0, "max_s": 0.0}
+    return {
+        "n": len(values),
+        "total_s": round(sum(values), 2),
+        "mean_s": round(statistics.mean(values), 3),
+        "median_s": round(statistics.median(values), 3),
+        "max_s": round(max(values), 3),
+    }
+
+
+# ---------------------------------------------------------------------------
+# cProfile bucketed breakdown
+# ---------------------------------------------------------------------------
+
+# Match by filename / module-path fragment. Order matters (first match wins).
+_BUCKET_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("dtw", ("_cuda_dtw",)),  # before bam so _cuda_dtw/__init__.py wins
+    ("hmm_training", ("_hmm_training.py",)),
+    ("hmm", ("_hierarchical.py",)),
+    ("aggregation", ("_aggregation.py",)),
+    ("signal", ("_signal.py",)),
+    ("f5c", ("_f5c.py",)),
+    ("bam", ("_bam.py", "pysam/")),
+    ("tslearn", ("tslearn/",)),
+]
+
+
+def _bucket_for_path(path: str) -> str:
+    for name, fragments in _BUCKET_PATTERNS:
+        if any(frag in path for frag in fragments):
+            return name
+    return "other"
+
+
+def _profile_buckets(prof: cProfile.Profile) -> dict:
+    """Aggregate cProfile stats into named buckets (self time per module)."""
+    stats = pstats.Stats(prof)
+    buckets: dict[str, float] = {}
+    for (filepath, _lineno, _funcname), (_cc, _nc, tt, _ct, _callers) in stats.stats.items():
+        key = _bucket_for_path(str(filepath))
+        buckets[key] = buckets.get(key, 0.0) + tt
+
+    total = sum(buckets.values())
+    return {
+        "self_time_s": {k: round(v, 2) for k, v in sorted(buckets.items(),
+                                                          key=lambda x: -x[1])},
+        "pct": {k: round(v / total * 100, 1) if total > 0 else 0.0
+                for k, v in sorted(buckets.items(), key=lambda x: -x[1])},
+        "total_self_s": round(total, 2),
+    }
+
+
+def _profile_top_functions(prof: cProfile.Profile, n: int = 20) -> list[dict]:
+    """Return top-N functions by cumulative time."""
+    stats = pstats.Stats(prof)
+    entries = []
+    for (filepath, lineno, funcname), (_cc, nc, tt, ct, _callers) in stats.stats.items():
+        entries.append({
+            "func": funcname,
+            "file": Path(str(filepath)).name,
+            "line": lineno,
+            "calls": nc,
+            "self_s": round(tt, 3),
+            "cum_s": round(ct, 3),
+        })
+    entries.sort(key=lambda e: -e["cum_s"])
+    return entries[:n]
+
+
+# ---------------------------------------------------------------------------
 # Ground truth + accuracy
 # ---------------------------------------------------------------------------
 
@@ -203,6 +386,7 @@ def _run_single_stoich(
     threads: int,
     mod_threshold: float,
     testdata: Path,
+    profile: cProfile.Profile | None,
 ) -> tuple[dict, list, float]:
     """Run pipeline for one stoichiometry level. Returns (hmm_results, sites, wall_s)."""
     from baleen.eventalign._pipeline import run_pipeline_streaming
@@ -211,8 +395,7 @@ def _run_single_stoich(
     native_dir = stoich_dir / "native_1"
     control_dir = stoich_dir / "control_1"
 
-    t0 = time.perf_counter()
-    _hmm_results, sites, _metadata = run_pipeline_streaming(
+    call_kwargs = dict(
         native_bam=native_dir / "native_1.bam",
         native_fastq=native_dir / "fastq" / "pass.fq.gz",
         native_blow5=native_dir / "blow5" / "nanopore.blow5",
@@ -225,6 +408,16 @@ def _run_single_stoich(
         mod_threshold=mod_threshold,
         output_dir=None,
     )
+
+    t0 = time.perf_counter()
+    if profile is not None:
+        profile.enable()
+        try:
+            _hmm_results, sites, _metadata = run_pipeline_streaming(**call_kwargs)
+        finally:
+            profile.disable()
+    else:
+        _hmm_results, sites, _metadata = run_pipeline_streaming(**call_kwargs)
     wall_s = time.perf_counter() - t0
     return _hmm_results, sites, wall_s
 
@@ -246,15 +439,30 @@ def cmd_run(args: argparse.Namespace) -> None:
     elif args.no_cuda:
         use_cuda = False
 
+    threads = args.threads
+    if args.profile and threads != 1:
+        print(f"WARNING: --profile forces --threads 1 "
+              f"(cProfile cannot see worker processes; was {threads})")
+        threads = 1
+
     print(f"Benchmark: {len(stoich_levels)} stoich levels, "
-          f"threshold={args.threshold}, threads={args.threads}, "
-          f"cuda={use_cuda}")
+          f"threshold={args.threshold}, threads={threads}, "
+          f"cuda={use_cuda}, profile={args.profile}")
 
     env = _env_snapshot()
     known_mods = _load_known_mods()
 
+    # Install log timing capture on the baleen logger
+    log_capture = LogTimingCapture()
+    root_logger = logging.getLogger("baleen")
+    prev_level = root_logger.level
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(log_capture)
+
     gpu_mon = GpuMemoryMonitor()
     gpu_mon.start()
+
+    profiler = cProfile.Profile() if args.profile else None
 
     all_sites: list = []
     per_stoich_timing: dict[str, dict] = {}
@@ -262,23 +470,49 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     total_t0 = time.perf_counter()
 
-    for stoich in stoich_levels:
-        print(f"  [{stoich}] running...", end=" ", flush=True)
-        _hmm, sites, wall_s = _run_single_stoich(
-            stoich,
-            use_cuda=use_cuda,
-            threads=args.threads,
-            mod_threshold=args.threshold,
-            testdata=testdata,
-        )
-        n_sites = len(sites)
-        per_stoich_timing[stoich] = {"wall_s": round(wall_s, 2),
-                                     "n_sites": n_sites}
-        acc = _compute_accuracy(sites, known_mods)
-        if acc:
-            per_stoich_accuracy[stoich] = acc
-        all_sites.extend(sites)
-        print(f"{wall_s:.1f}s, {n_sites} sites")
+    try:
+        for stoich in stoich_levels:
+            print(f"  [{stoich}] running...", end=" ", flush=True)
+            log_capture.reset()
+
+            _hmm, sites, wall_s = _run_single_stoich(
+                stoich,
+                use_cuda=use_cuda,
+                threads=threads,
+                mod_threshold=args.threshold,
+                testdata=testdata,
+                profile=profiler,
+            )
+            n_sites = len(sites)
+
+            per_stoich_timing[stoich] = {
+                "wall_s": round(wall_s, 2),
+                "n_sites": n_sites,
+                "stages_s": {k: round(v, 2)
+                             for k, v in log_capture.stages.items()},
+                "per_contig": {
+                    k: _summarize_per_contig(v)
+                    for k, v in log_capture.per_contig.items()
+                },
+            }
+            acc = _compute_accuracy(sites, known_mods)
+            if acc:
+                per_stoich_accuracy[stoich] = acc
+            all_sites.extend(sites)
+
+            stages = log_capture.stages
+            n_contigs = len(log_capture.per_contig["contig_total"])
+            stage_summary = (
+                f"idx={stages.get('indexing', 0):.1f}s "
+                f"stats={stages.get('bam_stats', 0):.1f}s "
+                f"filt={stages.get('filtering', 0):.1f}s "
+                f"stream={stages.get('streaming', 0):.1f}s"
+            )
+            print(f"{wall_s:.1f}s, {n_sites} sites, {n_contigs} contigs "
+                  f"[{stage_summary}]")
+    finally:
+        root_logger.removeHandler(log_capture)
+        root_logger.setLevel(prev_level)
 
     total_wall = time.perf_counter() - total_t0
     peak_gpu_mb = gpu_mon.stop()
@@ -288,17 +522,32 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     summary_accuracy = _compute_accuracy(all_sites, known_mods)
 
-    result = {
+    # Aggregate pipeline-level stages across stoich levels
+    aggregate_stages: dict[str, float] = {}
+    aggregate_per_contig: dict[str, list[float]] = {}
+    for stoich, t in per_stoich_timing.items():
+        for name, secs in t["stages_s"].items():
+            aggregate_stages[name] = aggregate_stages.get(name, 0.0) + secs
+        for name, summary in t["per_contig"].items():
+            aggregate_per_contig.setdefault(name, []).append(summary["total_s"])
+
+    result: dict = {
         "env": env,
         "params": {
             "threshold": args.threshold,
-            "threads": args.threads,
+            "threads": threads,
             "stoich_levels": stoich_levels,
             "use_cuda": use_cuda,
+            "profile": args.profile,
         },
         "timing": {
             "total_wall_s": round(total_wall, 2),
             "per_stoich": per_stoich_timing,
+            "aggregate_stages_s": {k: round(v, 2)
+                                   for k, v in aggregate_stages.items()},
+            "aggregate_per_contig_total_s": {
+                k: round(sum(v), 2) for k, v in aggregate_per_contig.items()
+            },
         },
         "resources": {
             "peak_rss_mb": peak_rss_mb,
@@ -311,6 +560,18 @@ def cmd_run(args: argparse.Namespace) -> None:
         "label": args.label or "",
     }
 
+    if profiler is not None:
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        label_slug = (args.label or "run").replace("/", "_").replace(" ", "_")
+        prof_path = PROFILE_DIR / f"{ts}_{label_slug}.prof"
+        profiler.dump_stats(str(prof_path))
+        result["profile"] = {
+            "file": str(prof_path.relative_to(PROJECT_ROOT)),
+            "buckets": _profile_buckets(profiler),
+            "top_functions": _profile_top_functions(profiler, n=args.profile_top),
+        }
+
     with open(RESULTS_FILE, "a") as f:
         f.write(json.dumps(result) + "\n")
 
@@ -320,7 +581,36 @@ def cmd_run(args: argparse.Namespace) -> None:
         auprc = summary_accuracy.get("auprc_mod_ratio", "n/a")
         auroc = summary_accuracy.get("auroc_mod_ratio", "n/a")
         print(f"AUPRC(mod_ratio)={auprc}  AUROC(mod_ratio)={auroc}")
-    print(f"Saved to {RESULTS_FILE}")
+
+    # Print stage breakdown
+    if aggregate_stages:
+        print("\nPipeline stages (summed across stoich levels):")
+        for name in ("indexing", "bam_stats", "filtering", "streaming"):
+            if name in aggregate_stages:
+                print(f"  {name:<12} {aggregate_stages[name]:>8.2f}s")
+    if aggregate_per_contig:
+        print("\nPer-contig stage totals (summed):")
+        rows = [
+            ("bam_split", aggregate_per_contig.get("bam_split", [])),
+            ("eventalign", aggregate_per_contig.get("eventalign", [])),
+            ("dtw", aggregate_per_contig.get("dtw", [])),
+            ("hmm", aggregate_per_contig.get("hmm", [])),
+            ("aggregation", aggregate_per_contig.get("aggregation", [])),
+            ("contig_total", aggregate_per_contig.get("contig_total", [])),
+        ]
+        for name, values in rows:
+            if values:
+                print(f"  {name:<13} {sum(values):>8.2f}s")
+
+    if profiler is not None:
+        print("\ncProfile self-time buckets:")
+        buckets = result["profile"]["buckets"]
+        for name, secs in buckets["self_time_s"].items():
+            pct = buckets["pct"].get(name, 0.0)
+            print(f"  {name:<13} {secs:>8.2f}s  ({pct:>5.1f}%)")
+        print(f"  {'TOTAL':<13} {buckets['total_self_s']:>8.2f}s")
+
+    print(f"\nSaved to {RESULTS_FILE}")
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +638,8 @@ def cmd_compare(args: argparse.Namespace) -> None:
 
     if args.detail:
         _print_detail_table(runs)
+    elif args.steps:
+        _print_steps_table(runs)
     else:
         _print_summary_table(runs)
 
@@ -391,8 +683,90 @@ def _print_summary_table(runs: list[dict]) -> None:
               f"{delta_s:>7}")
 
 
+def _print_steps_table(runs: list[dict]) -> None:
+    """Print pipeline-stage + per-contig timing table across runs."""
+    print(f"{'Commit':<9} {'Label':<18} {'Wall':>7}"
+          f"  {'Idx':>6} {'Stats':>6} {'Filt':>6} {'Stream':>7}"
+          f"  {'BAM':>6} {'Eval':>6} {'DTW':>6} {'HMM':>6} {'Agg':>6}")
+    print("-" * 100)
+    baseline: dict[str, float] | None = None
+
+    for run in runs:
+        env = run["env"]
+        commit = env.get("git_commit", "?")[:7]
+        dirty = "*" if env.get("git_dirty") else ""
+        label = (run.get("label") or "")[:18]
+        t = run["timing"]
+        stages = t.get("aggregate_stages_s", {})
+        pc = t.get("aggregate_per_contig_total_s", {})
+
+        vals = {
+            "wall": t.get("total_wall_s", 0.0),
+            "indexing": stages.get("indexing", 0.0),
+            "bam_stats": stages.get("bam_stats", 0.0),
+            "filtering": stages.get("filtering", 0.0),
+            "streaming": stages.get("streaming", 0.0),
+            "bam_split": pc.get("bam_split", 0.0),
+            "eventalign": pc.get("eventalign", 0.0),
+            "dtw": pc.get("dtw", 0.0),
+            "hmm": pc.get("hmm", 0.0),
+            "aggregation": pc.get("aggregation", 0.0),
+        }
+
+        if baseline is None:
+            baseline = vals
+
+        print(f"{commit}{dirty:<2} {label:<18} "
+              f"{vals['wall']:>7.1f}"
+              f"  {vals['indexing']:>6.1f}"
+              f"  {vals['bam_stats']:>5.1f}"
+              f"  {vals['filtering']:>5.1f}"
+              f"  {vals['streaming']:>6.1f}"
+              f"  {vals['bam_split']:>5.1f}"
+              f"  {vals['eventalign']:>5.1f}"
+              f"  {vals['dtw']:>5.1f}"
+              f"  {vals['hmm']:>5.1f}"
+              f"  {vals['aggregation']:>5.1f}")
+
+    # Delta row (latest vs first)
+    if baseline is not None and len(runs) >= 2:
+        latest = runs[-1]["timing"]
+        latest_stages = latest.get("aggregate_stages_s", {})
+        latest_pc = latest.get("aggregate_per_contig_total_s", {})
+        latest_vals = {
+            "wall": latest.get("total_wall_s", 0.0),
+            "indexing": latest_stages.get("indexing", 0.0),
+            "bam_stats": latest_stages.get("bam_stats", 0.0),
+            "filtering": latest_stages.get("filtering", 0.0),
+            "streaming": latest_stages.get("streaming", 0.0),
+            "bam_split": latest_pc.get("bam_split", 0.0),
+            "eventalign": latest_pc.get("eventalign", 0.0),
+            "dtw": latest_pc.get("dtw", 0.0),
+            "hmm": latest_pc.get("hmm", 0.0),
+            "aggregation": latest_pc.get("aggregation", 0.0),
+        }
+
+        def _pct(new: float, old: float) -> str:
+            if old <= 0:
+                return "  n/a"
+            return f"{(new - old) / old * 100:+5.1f}%"
+
+        print("-" * 100)
+        print(f"{'Δ vs 1st':<11} {'':<18} "
+              f"{_pct(latest_vals['wall'], baseline['wall']):>7}"
+              f"  {_pct(latest_vals['indexing'], baseline['indexing']):>6}"
+              f"  {_pct(latest_vals['bam_stats'], baseline['bam_stats']):>5}"
+              f"  {_pct(latest_vals['filtering'], baseline['filtering']):>5}"
+              f"  {_pct(latest_vals['streaming'], baseline['streaming']):>6}"
+              f"  {_pct(latest_vals['bam_split'], baseline['bam_split']):>5}"
+              f"  {_pct(latest_vals['eventalign'], baseline['eventalign']):>5}"
+              f"  {_pct(latest_vals['dtw'], baseline['dtw']):>5}"
+              f"  {_pct(latest_vals['hmm'], baseline['hmm']):>5}"
+              f"  {_pct(latest_vals['aggregation'], baseline['aggregation']):>5}")
+
+
 def _print_detail_table(runs: list[dict]) -> None:
-    """Print per-stoich breakdown for each run."""
+    """Print per-stoich breakdown + step timings + cProfile buckets for each run."""
     for i, run in enumerate(runs):
         env = run["env"]
         commit = env.get("git_commit", "?")[:7]
@@ -406,10 +780,35 @@ def _print_detail_table(runs: list[dict]) -> None:
               f"RSS: {run['resources']['peak_rss_mb']} MB  "
               f"GPU: {run['resources']['peak_gpu_mb']} MB")
 
+        agg_stages = run["timing"].get("aggregate_stages_s", {})
+        if agg_stages:
+            print("  Pipeline stages (summed):")
+            for name in ("indexing", "bam_stats", "filtering", "streaming"):
+                if name in agg_stages:
+                    print(f"    {name:<12} {agg_stages[name]:>8.2f}s")
+
+        agg_pc = run["timing"].get("aggregate_per_contig_total_s", {})
+        if agg_pc:
+            print("  Per-contig stage totals (summed):")
+            for name in ("bam_split", "eventalign", "dtw", "hmm",
+                         "aggregation", "contig_total"):
+                if name in agg_pc:
+                    print(f"    {name:<13} {agg_pc[name]:>8.2f}s")
+
+        profile = run.get("profile", {})
+        if profile:
+            print(f"  cProfile ({profile.get('file', '?')}):")
+            buckets = profile.get("buckets", {})
+            self_times = buckets.get("self_time_s", {})
+            pcts = buckets.get("pct", {})
+            for name, secs in self_times.items():
+                pct = pcts.get(name, 0.0)
+                print(f"    {name:<13} {secs:>8.2f}s  ({pct:>5.1f}%)")
+
         per_stoich = run["timing"].get("per_stoich", {})
         per_acc = run["accuracy"].get("per_stoich", {})
         if per_stoich:
-            print(f"  {'Stoich':<8} {'Wall(s)':>8} {'Sites':>6} "
+            print(f"\n  {'Stoich':<8} {'Wall(s)':>8} {'Sites':>6} "
                   f"{'AUPRC':>7} {'AUROC':>7}")
             for s in sorted(per_stoich.keys(), key=float):
                 t = per_stoich[s]
@@ -423,7 +822,7 @@ def _print_detail_table(runs: list[dict]) -> None:
 
         summary = run["accuracy"].get("summary", {})
         if summary:
-            print(f"  Summary: " + "  ".join(
+            print(f"\n  Summary: " + "  ".join(
                 f"{k}={v}" for k, v in sorted(summary.items())))
 
 
@@ -453,13 +852,20 @@ def main() -> None:
                        help="Path to testdata directory")
     p_run.add_argument("--label", default="",
                        help="Label for this run (e.g. 'before-refactor')")
+    p_run.add_argument("--profile", action="store_true",
+                       help="Enable cProfile (forces --threads 1 for accurate attribution). "
+                            "Saves a .prof file under benchmarks/profiles/.")
+    p_run.add_argument("--profile-top", type=int, default=20,
+                       help="Top-N functions to capture when --profile is on (default: 20)")
 
     # -- compare --
     p_cmp = sub.add_parser("compare", help="Compare recent runs")
     p_cmp.add_argument("--last", type=int, default=10,
                        help="Number of recent runs to show (default: 10)")
     p_cmp.add_argument("--detail", action="store_true",
-                       help="Show per-stoichiometry breakdown")
+                       help="Show per-stoich breakdown + step timings + cProfile buckets")
+    p_cmp.add_argument("--steps", action="store_true",
+                       help="Show per-stage timing breakdown table")
 
     args = parser.parse_args()
     if args.command == "run":

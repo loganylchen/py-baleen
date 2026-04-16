@@ -654,19 +654,28 @@ def _process_contig_streaming(
     )
 
     # Stage 2: HMM smoothing
+    hmm_t0 = time.perf_counter()
     cmr = compute_sequential_modification_probabilities(
         contig_result, run_hmm=run_hmm, hmm_params=hmm_params,
         legacy_scoring=legacy_scoring,
         show_progress=show_progress,
     )
+    hmm_elapsed = time.perf_counter() - hmm_t0
+    logger.info("  [Contig %s] HMM done (%s)", contig_name, _fmt_elapsed(hmm_elapsed))
 
     # Stage 3: Site-level aggregation with per-transcript FDR
+    agg_t0 = time.perf_counter()
     sites = aggregate_contig(cmr, mod_threshold=mod_threshold)
     if sites:
         pvalues = np.array([s.pvalue for s in sites], dtype=np.float64)
         padj = _benjamini_hochberg(pvalues)
         for site, adj in zip(sites, padj):
             site.padj = float(adj)
+    agg_elapsed = time.perf_counter() - agg_t0
+    logger.info(
+        "  [Contig %s] Aggregation done: %d sites (%s)",
+        contig_name, len(sites), _fmt_elapsed(agg_elapsed),
+    )
 
     # Optionally save intermediate ContigResult
     if keep_intermediate and intermediate_dir is not None:
@@ -1090,6 +1099,7 @@ def run_pipeline_streaming(
 
     # ---- Step 4: Contig filtering ----
     logger.info("[Step 4/5] Filtering contigs (min_depth=%d)...", min_depth)
+    step_t0 = time.perf_counter()
     passed_contigs, filter_results = _bam.filter_contigs(
         native_stats, ivt_stats, min_depth=float(min_depth),
     )
@@ -1102,7 +1112,8 @@ def run_pipeline_streaming(
             logger.warning("  Target contigs not passing filters: %s", sorted(skipped_targets))
         passed_contigs = [c for c in passed_contigs if c in target_set]
 
-    logger.info("[Step 4/5] %d contigs to process", len(passed_contigs))
+    logger.info("[Step 4/5] %d contigs to process (%s)",
+                len(passed_contigs), _fmt_elapsed(time.perf_counter() - step_t0))
 
     metadata = PipelineMetadata(
         f5c_version=f5c_version,
@@ -1127,6 +1138,7 @@ def run_pipeline_streaming(
     # ---- Step 5: Per-contig streaming (DTW → HMM → aggregation) ----
     logger.info("[Step 5/5] Processing %d contigs (streaming: DTW → HMM → aggregation)...",
                 len(passed_contigs))
+    step5_t0 = time.perf_counter()
     tmp_root = Path(tempfile.mkdtemp(prefix="baleen-streaming-"))
 
     intermediate_dir = None
@@ -1226,6 +1238,8 @@ def run_pipeline_streaming(
             shutil.rmtree(tmp_root, ignore_errors=True)
 
     total_positions = sum(len(cmr.position_stats) for cmr in hmm_results.values())
+    step5_elapsed = _fmt_elapsed(time.perf_counter() - step5_t0)
+    logger.info("[Step 5/5] Streaming complete (%s)", step5_elapsed)
     pipeline_elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)
     logger.info("=" * 60)
     logger.info("Streaming pipeline complete: %d contigs, %d positions, %d sites, %s",
