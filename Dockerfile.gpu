@@ -24,7 +24,8 @@ RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-
 # Install baleen with CUDA; ensure console_script is at a known path
 WORKDIR /app
 COPY . .
-RUN pip3 install --no-cache-dir . \
+RUN pip3 install pytest \
+    && pip3 install --no-cache-dir . \
     && BALEEN_BIN="$(which baleen 2>/dev/null)" \
     && if [ -z "$BALEEN_BIN" ]; then \
          printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \
