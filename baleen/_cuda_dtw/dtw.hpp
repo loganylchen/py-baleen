@@ -185,10 +185,15 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
             threadIdx.x < i &&                                            // The diff still corresponds to a spot in the cost matrix?
             i - threadIdx.x < first_seq_length)
         {
-            volatile T up_cost = numeric_limits<T>::max();
-            volatile T diag_cost = numeric_limits<T>::max();
-            volatile T right_cost = numeric_limits<T>::max();
-            volatile T diff = first_seq[i - threadIdx.x] - second_seq_thread_val;
+            // NOTE: these were originally `volatile` but there is no cross-thread
+            // access here — up/diag/right_cost and diff are strictly thread-local
+            // scratch values.  Dropping `volatile` lets the compiler keep them in
+            // registers instead of spilling to shared memory on every read/write,
+            // which gives a measurable speedup on Ampere+.
+            T up_cost = numeric_limits<T>::max();
+            T diag_cost = numeric_limits<T>::max();
+            T right_cost = numeric_limits<T>::max();
+            T diff = first_seq[i - threadIdx.x] - second_seq_thread_val;
 
             // The left edge of cost matrix vertical swath is a special case as we need to
             // access previously global mem stored intermediate costs.
