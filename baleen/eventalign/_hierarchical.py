@@ -869,6 +869,114 @@ def _forward_backward(
     return gamma[:, N - 1]  # P(state=Modified) — last column for both 2 and 3 state
 
 
+def _forward_backward_2state(
+    emissions: NDArray[np.float64],
+    positions: list[int],
+    *,
+    init_prob: NDArray[np.float64] | None = None,
+    p_stay_per_base: float = 0.98,
+) -> NDArray[np.float64]:
+    """Scalar-arithmetic forward-backward specialized for the 2-state case.
+
+    Identical semantics to :func:`_forward_backward` for N=2, but avoids the
+    numpy dispatch/shape-check overhead that dominates 2×2 matmul for short
+    trajectories.  Transition matrices are row-stochastic symmetric 2×2
+    matrices of the form ``[[p_stay, p_switch], [p_switch, p_stay]]``.
+    """
+    T = emissions.shape[0]
+    if T == 0:
+        return np.array([], dtype=np.float64)
+
+    if init_prob is None:
+        ip0 = 0.5
+        ip1 = 0.5
+    else:
+        ip0 = float(init_prob[0])
+        ip1 = float(init_prob[1])
+
+    # Pre-compute per-gap (p_stay, p_switch) scalar tuples
+    _trans_cache: dict[int, tuple[float, float]] = {}
+
+    def _cached_trans(gap: int) -> tuple[float, float]:
+        cached = _trans_cache.get(gap)
+        if cached is None:
+            p_stay = p_stay_per_base ** max(gap, 1)
+            p_stay = max(min(p_stay, 1.0 - _EPS), _EPS)
+            cached = (p_stay, 1.0 - p_stay)
+            _trans_cache[gap] = cached
+        return cached
+
+    # Forward pass — carry a0,a1 as scalars, store into pre-allocated arrays
+    alpha0 = np.empty(T, dtype=np.float64)
+    alpha1 = np.empty(T, dtype=np.float64)
+    scale = np.empty(T, dtype=np.float64)
+
+    a0 = ip0 * emissions[0, 0]
+    a1 = ip1 * emissions[0, 1]
+    s = a0 + a1
+    if s > 0:
+        a0 /= s
+        a1 /= s
+    else:
+        a0 = 0.5
+        a1 = 0.5
+        s = _EPS
+    alpha0[0] = a0
+    alpha1[0] = a1
+    scale[0] = s
+
+    for t in range(1, T):
+        gap = positions[t] - positions[t - 1]
+        p_stay, p_switch = _cached_trans(gap)
+        # (alpha[t-1] @ trans) * emissions[t]
+        # trans[0,0]=p_stay, trans[0,1]=p_switch, trans[1,0]=p_switch, trans[1,1]=p_stay
+        raw0 = (a0 * p_stay + a1 * p_switch) * emissions[t, 0]
+        raw1 = (a0 * p_switch + a1 * p_stay) * emissions[t, 1]
+        s = raw0 + raw1
+        if s > 0:
+            a0 = raw0 / s
+            a1 = raw1 / s
+        else:
+            a0 = 0.5
+            a1 = 0.5
+            s = _EPS
+        alpha0[t] = a0
+        alpha1[t] = a1
+        scale[t] = s
+
+    # Backward pass — also scalar, normalized by forward scale factors
+    beta0 = np.empty(T, dtype=np.float64)
+    beta1 = np.empty(T, dtype=np.float64)
+    beta0[T - 1] = 1.0
+    beta1[T - 1] = 1.0
+    b0 = 1.0
+    b1 = 1.0
+
+    for t in range(T - 2, -1, -1):
+        gap = positions[t + 1] - positions[t]
+        p_stay, p_switch = _cached_trans(gap)
+        eb0 = emissions[t + 1, 0] * b0
+        eb1 = emissions[t + 1, 1] * b1
+        # trans @ (emissions[t+1] * beta[t+1])
+        raw0 = p_stay * eb0 + p_switch * eb1
+        raw1 = p_switch * eb0 + p_stay * eb1
+        s_t1 = scale[t + 1]
+        if s_t1 > _EPS:
+            b0 = raw0 / s_t1
+            b1 = raw1 / s_t1
+        else:
+            b0 = 1.0
+            b1 = 1.0
+        beta0[t] = b0
+        beta1[t] = b1
+
+    # Posterior: gamma ∝ alpha * beta; return P(state=Modified)
+    gamma0 = alpha0 * beta0
+    gamma1 = alpha1 * beta1
+    gamma_sum = np.maximum(gamma0 + gamma1, _EPS)
+    return gamma1 / gamma_sum
+
+
 def _run_hmm_on_trajectories(
     trajectories: list[ReadTrajectory],
     position_stats: dict[int, PositionStats],
@@ -909,6 +1017,46 @@ def _run_hmm_on_trajectories(
         grid_flank = _beta_dist.pdf(grid_x, a_f, b_f)
         grid_mod = _beta_dist.pdf(grid_x, a_m, b_m)
         beta_grids = (grid_x, grid_unmod, grid_flank, grid_mod)
+
+    # Fast path: 2-state without emission_transform. Avoids the per-scalar
+    # Python loop that dominates runtime when there is no calibrator/KDE.
+    if n_states == 2 and emission_transform is None:
+        for traj in trajectories:
+            if len(traj.positions) < min_positions:
+                continue
+
+            T = len(traj.positions)
+            # Batch-extract p_mod values in one list comprehension pass,
+            # then build the (T, 2) emissions matrix via vectorized ops.
+            p_mods = np.fromiter(
+                (
+                    getattr(position_stats[pos], emission_source)[idx]
+                    for pos, idx in zip(traj.positions, traj.indices)
+                ),
+                dtype=np.float64,
+                count=T,
+            )
+            np.clip(p_mods, 1e-10, 1.0 - 1e-10, out=p_mods)
+            emissions = np.empty((T, 2), dtype=np.float64)
+            emissions[:, 1] = p_mods
+            emissions[:, 0] = 1.0 - p_mods
+
+            # Emission floor + row re-normalization (matches general path)
+            np.maximum(emissions, 0.01, out=emissions)
+            emissions /= emissions.sum(axis=1, keepdims=True)
+
+            posteriors = _forward_backward_2state(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
+
+            for t_idx, (pos, read_idx) in enumerate(
+                zip(traj.positions, traj.indices)
+            ):
+                position_stats[pos].p_mod_hmm[read_idx] = posteriors[t_idx]
+        return
 
     for traj in trajectories:
         if len(traj.positions) < min_positions:
@@ -996,12 +1144,20 @@ def _run_hmm_on_trajectories(
         row_sums = emissions.sum(axis=1, keepdims=True)
         emissions /= row_sums
 
-        posteriors = _forward_backward(
-            emissions,
-            traj.positions,
-            init_prob=effective_init,
-            p_stay_per_base=effective_p_stay,
-        )
+        if n_states == 2:
+            posteriors = _forward_backward_2state(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
+        else:
+            posteriors = _forward_backward(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
 
         # Write back
         for t_idx, (pos, read_idx) in enumerate(

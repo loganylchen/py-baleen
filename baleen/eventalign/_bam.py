@@ -429,7 +429,6 @@ def split_bam_contig(
         validate_bam(bam_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    unsorted_bam = output_dir / f"{contig}.unsorted.bam"
     out_bam = output_dir / f"{contig}.bam"
 
     n_written = 0
@@ -440,7 +439,10 @@ def split_bam_contig(
 
         header_dict = in_bam.header.to_dict()
 
-        # Collect filtered reads, then optionally subsample
+        # Collect filtered reads, then optionally subsample.
+        # `bam.fetch()` on an indexed BAM returns reads in coordinate order
+        # (validate_bam upstream guarantees the index is present), so the
+        # output is already sorted — no external `pysam.sort` needed.
         reads = [
             r for r in in_bam.fetch(contig=contig)
             if _read_passes_filters(r, primary_only=primary_only, min_mapq=min_mapq)
@@ -456,16 +458,12 @@ def split_bam_contig(
                 n_before, max_reads, contig,
             )
 
-        with pysam.AlignmentFile(str(unsorted_bam), "wb", header=header_dict) as out:
+        with pysam.AlignmentFile(str(out_bam), "wb", header=header_dict) as out:
             for read in reads:
                 out.write(read)
         n_written = len(reads)
 
-    pysam.sort("-o", str(out_bam), str(unsorted_bam))
     pysam.index(str(out_bam))
-
-    if unsorted_bam.exists():
-        unsorted_bam.unlink()
 
     logger.info(
         "Extracted %d reads for contig %s into %s (%.1fs)",
