@@ -40,8 +40,7 @@ __device__ T *shared_memory_proxy()
 template <typename T>
 __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_input_length, const T *second_seq_input, const size_t second_seq_input_length, const size_t first_seq_index,
                             const size_t offset_within_second_seq, const T *gpu_sequences, const size_t maxSeqLength, const size_t num_sequences, const size_t *gpu_sequence_lengths,
-                            T *dtwCostSoFar, T *newDtwCostSoFar, unsigned char *pathMatrix, const size_t pathMemPitch, T *dtwPairwiseDistances, const int use_open_start, const int use_open_end,
-                            const int sakoe_band)
+                            T *dtwCostSoFar, T *newDtwCostSoFar, unsigned char *pathMatrix, const size_t pathMemPitch, T *dtwPairwiseDistances, const int use_open_start, const int use_open_end)
 {
     // We need temporary storage for three diagonals of the wavefront calculation of the cost matrix to calculate the optimal path steps as a diagonal "wavefront" until we iterate
     // through every position of the first sequence.
@@ -164,24 +163,11 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
             }
         }
         costs[0] += use_open_start ? 0 : (first_seq_start_val - second_seq_thread_val) * (first_seq_start_val - second_seq_thread_val);
-        // Sakoe-Chiba band check for (row=0, col=offset_within_second_seq): if out-of-band, mark cell as unreachable.
-        if (sakoe_band > 0 && offset_within_second_seq > (size_t)sakoe_band)
-        {
-            costs[0] = numeric_limits<T>::max();
-        }
         int col;
         for (col = 1; col < blockDim.x && offset_within_second_seq + col < second_seq_length; col++)
         {
-            // Sakoe-Chiba band: cell (row=0, col=offset_within_second_seq + col) is in-band iff col_abs <= sakoe_band.
-            if (sakoe_band > 0 && (offset_within_second_seq + col) > (size_t)sakoe_band)
-            {
-                costs[col + blockDim.x * (col % 3)] = numeric_limits<T>::max();
-            }
-            else
-            {
-                T diff = use_open_start ? 0 : first_seq_start_val - second_seq[offset_within_second_seq + col];
-                costs[col + blockDim.x * (col % 3)] = costs[(col - 1) + blockDim.x * ((col - 1) % 3)] + diff * diff;
-            }
+            T diff = use_open_start ? 0 : first_seq_start_val - second_seq[offset_within_second_seq + col];
+            costs[col + blockDim.x * (col % 3)] = costs[(col - 1) + blockDim.x * ((col - 1) % 3)] + diff * diff;
             if (pathMatrix != 0)
             {
                 pathMatrix[pitchedCoord((newDtwCostSoFar ? offset_within_second_seq : 0) + col, 0, pathMemPitch)] = use_open_start ? OPEN_RIGHT : RIGHT;
@@ -195,31 +181,7 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
     for (i = 1; i < first_seq_length + blockDim.x; i++)
     {
 
-        // Sakoe-Chiba band check (computed outside inner if so it's cheap and consistent across threads).
-        // Cell (row = i - threadIdx.x, col = offset_within_second_seq + threadIdx.x).
-        // If |row - col| > sakoe_band, the cell is out-of-band and gets max cost so no path flows through it.
-        bool _in_band = true;
-        if (sakoe_band > 0)
-        {
-            const int _row = (int)i - (int)threadIdx.x;
-            const int _col = (int)offset_within_second_seq + (int)threadIdx.x;
-            const int _diag_dist = _row > _col ? _row - _col : _col - _row;
-            _in_band = (_diag_dist <= sakoe_band);
-        }
-
         if (offset_within_second_seq + threadIdx.x < second_seq_length && // We're within the sequence bounds?
-            threadIdx.x < i &&                                            // The diff still corresponds to a spot in the cost matrix?
-            i - threadIdx.x < first_seq_length &&
-            !_in_band)
-        {
-            // Out-of-band cell: mark shared-memory cost as max, write max to newDtwCostSoFar if we're on the right edge.
-            costs[threadIdx.x + blockDim.x * (i % 3)] = numeric_limits<T>::max();
-            if (newDtwCostSoFar != 0 && (threadIdx.x == blockDim.x - 1 || offset_within_second_seq + threadIdx.x == second_seq_length - 1))
-            {
-                newDtwCostSoFar[i - threadIdx.x] = numeric_limits<T>::max();
-            }
-        }
-        else if (offset_within_second_seq + threadIdx.x < second_seq_length && // We're within the sequence bounds?
             threadIdx.x < i &&                                            // The diff still corresponds to a spot in the cost matrix?
             i - threadIdx.x < first_seq_length)
         {

@@ -42,8 +42,7 @@ int opendba_dtw_cuda(
     const float *seq2, size_t len2,
     int use_open_start,
     int use_open_end,
-    float *out_distance,
-    int sakoe_band)
+    float *out_distance)
 {
     // 1. 输入校验
     if (!seq1 || !seq2 || !out_distance || len1 == 0 || len2 == 0)
@@ -105,8 +104,7 @@ int opendba_dtw_cuda(
             path_mem_pitch,
             d_pairwise_dist,
             use_open_start,
-            use_open_end,
-            sakoe_band);
+            use_open_end);
         CUDA_CHECK(cudaGetLastError()); // 检查核函数启动错误
 
         // Swap buffers for next iteration
@@ -167,8 +165,7 @@ int opendba_dtw_pairwise_batch(
     size_t seq_length,
     int use_open_start,
     int use_open_end,
-    float *out_distances,
-    int sakoe_band)
+    float *out_distances)
 {
     if (!sequences || !out_distances || num_sequences < 2 || seq_length == 0)
     {
@@ -302,8 +299,7 @@ int opendba_dtw_pairwise_batch(
                 path_mem_pitch,
                 d_distances,
                 use_open_start,
-                use_open_end,
-                sakoe_band);
+                use_open_end);
             CUDA_CHECK(cudaGetLastError());
 
             // Swap buffers
@@ -391,8 +387,7 @@ int opendba_dtw_pairwise_varlen(
     size_t max_length,
     int use_open_start,
     int use_open_end,
-    float *out_distances,
-    int sakoe_band)
+    float *out_distances)
 {
     if (!sequences || !seq_lengths || !out_distances || num_sequences < 2 || max_length == 0)
     {
@@ -459,8 +454,7 @@ int opendba_dtw_pairwise_varlen(
                 path_mem_pitch,
                 d_distances,
                 use_open_start,
-                use_open_end,
-                sakoe_band);
+                use_open_end);
             CUDA_CHECK(cudaGetLastError());
 
             float *temp = d_current_cost;
@@ -510,8 +504,7 @@ int opendba_dtw_multi_position_pairwise(
     int use_open_end,
     float *out_distances,
     int num_cuda_streams,
-    int device_id,
-    int sakoe_band)
+    int device_id)
 {
     if (!all_sequences || !all_seq_lengths || !position_seq_counts ||
         !out_distances || num_positions == 0 || global_max_length == 0)
@@ -650,8 +643,7 @@ int opendba_dtw_multi_position_pairwise(
                     (unsigned char *)nullptr, 0,  // no path matrix
                     &d_distances[dist_offsets[p]],
                     use_open_start,
-                    use_open_end,
-                    sakoe_band);
+                    use_open_end);
                 CUDA_CHECK(cudaGetLastError());
 
                 float *tmp = d_current_cost;
@@ -759,18 +751,15 @@ static PyObject *py_dtw_cuda(PyObject *self, PyObject *args, PyObject *kwargs)
     PyArrayObject *seq1_array = NULL, *seq2_array = NULL;
     int use_open_start = 0;
     int use_open_end = 0;
-    int sakoe_band = 0;
 
     static char *kwlist[] = {(char *)"seq1", (char *)"seq2",
-                             (char *)"use_open_start", (char *)"use_open_end",
-                             (char *)"sakoe_band", NULL};
+                             (char *)"use_open_start", (char *)"use_open_end", NULL};
 
     // Parse arguments
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!|iii", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!|ii", kwlist,
                                      &PyArray_Type, &seq1_array,
                                      &PyArray_Type, &seq2_array,
-                                     &use_open_start, &use_open_end,
-                                     &sakoe_band))
+                                     &use_open_start, &use_open_end))
     {
         return NULL;
     }
@@ -811,8 +800,7 @@ static PyObject *py_dtw_cuda(PyObject *self, PyObject *args, PyObject *kwargs)
         seq2_data, (size_t)len2,
         use_open_start,
         use_open_end,
-        &distance,
-        sakoe_band);
+        &distance);
 
     if (result != 0)
     {
@@ -832,16 +820,12 @@ static PyObject *py_dtw_pairwise(PyObject *self, PyObject *args, PyObject *kwarg
     PyArrayObject *sequences_array;
     int use_open_start = 0;
     int use_open_end = 0;
-    int sakoe_band = 0;
 
-    static char *kwlist[] = {(char *)"sequences",
-                             (char *)"use_open_start", (char *)"use_open_end",
-                             (char *)"sakoe_band", NULL};
+    static char *kwlist[] = {(char *)"sequences", (char *)"use_open_start", (char *)"use_open_end", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!|iii", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!|ii", kwlist,
                                      &PyArray_Type, &sequences_array,
-                                     &use_open_start, &use_open_end,
-                                     &sakoe_band))
+                                     &use_open_start, &use_open_end))
     {
         return NULL;
     }
@@ -885,8 +869,7 @@ static PyObject *py_dtw_pairwise(PyObject *self, PyObject *args, PyObject *kwarg
     int result = opendba_dtw_pairwise_batch(
         sequences_data, num_sequences, seq_length,
         use_open_start, use_open_end,
-        distances_data,
-        sakoe_band);
+        distances_data);
 
     if (result != 0)
     {
@@ -904,17 +887,14 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
     PyArrayObject *lengths_array;
     int use_open_start = 0;
     int use_open_end = 0;
-    int sakoe_band = 0;
 
     static char *kwlist[] = {(char *)"sequences", (char *)"lengths",
-                             (char *)"use_open_start", (char *)"use_open_end",
-                             (char *)"sakoe_band", NULL};
+                             (char *)"use_open_start", (char *)"use_open_end", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!|iii", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!|ii", kwlist,
                                      &PyArray_Type, &sequences_array,
                                      &PyArray_Type, &lengths_array,
-                                     &use_open_start, &use_open_end,
-                                     &sakoe_band))
+                                     &use_open_start, &use_open_end))
     {
         return NULL;
     }
@@ -992,8 +972,7 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
     int result = opendba_dtw_pairwise_varlen(
         sequences_data, h_lengths, num_sequences, max_length,
         use_open_start, use_open_end,
-        distances_data,
-        sakoe_band);
+        distances_data);
 
     delete[] h_lengths;
 
@@ -1016,21 +995,18 @@ static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, 
     int use_open_end = 0;
     int num_cuda_streams = 16;
     int device_id = 0;
-    int sakoe_band = 0;
 
     static char *kwlist[] = {
         (char *)"sequences", (char *)"lengths", (char *)"counts",
         (char *)"use_open_start", (char *)"use_open_end",
-        (char *)"num_cuda_streams", (char *)"device_id",
-        (char *)"sakoe_band", NULL};
+        (char *)"num_cuda_streams", (char *)"device_id", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iiiii", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!O!|iiii", kwlist,
                                      &PyArray_Type, &sequences_array,
                                      &PyArray_Type, &lengths_array,
                                      &PyArray_Type, &counts_array,
                                      &use_open_start, &use_open_end,
-                                     &num_cuda_streams, &device_id,
-                                     &sakoe_band))
+                                     &num_cuda_streams, &device_id))
     {
         return NULL;
     }
@@ -1158,8 +1134,7 @@ static PyObject *py_dtw_multi_position_pairwise(PyObject *self, PyObject *args, 
         sequences_data, h_lengths, h_counts,
         num_positions, global_max_length,
         use_open_start, use_open_end,
-        out_data, num_cuda_streams, device_id,
-        sakoe_band);
+        out_data, num_cuda_streams, device_id);
 
     delete[] h_lengths;
     delete[] h_counts;

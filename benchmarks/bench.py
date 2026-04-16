@@ -405,7 +405,6 @@ def _run_single_stoich(
     mod_threshold: float,
     testdata: Path,
     profile: cProfile.Profile | None,
-    sakoe_band: float = 0.0,
 ) -> tuple[dict, list, float]:
     """Run pipeline for one stoichiometry level. Returns (hmm_results, sites, wall_s)."""
     from baleen.eventalign._pipeline import run_pipeline_streaming
@@ -425,7 +424,6 @@ def _run_single_stoich(
         use_cuda=use_cuda,
         threads=threads,
         mod_threshold=mod_threshold,
-        sakoe_band=sakoe_band,
         output_dir=None,
     )
 
@@ -467,8 +465,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     print(f"Benchmark: {len(stoich_levels)} stoich levels, "
           f"threshold={args.threshold}, threads={threads}, "
-          f"cuda={use_cuda}, profile={args.profile}, "
-          f"sakoe_band={args.sakoe_band}")
+          f"cuda={use_cuda}, profile={args.profile}")
 
     env = _env_snapshot()
     known_mods = _load_known_mods()
@@ -507,7 +504,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                     mod_threshold=args.threshold,
                     testdata=testdata,
                     profile=profiler,
-                    sakoe_band=args.sakoe_band,
                 )
                 wall_s_total += wall_s
                 if sites_first is None:
@@ -571,7 +567,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             "use_cuda": use_cuda,
             "profile": args.profile,
             "repeat": args.repeat,
-            "sakoe_band": args.sakoe_band,
         },
         "timing": {
             "total_wall_s": round(total_wall, 2),
@@ -894,10 +889,6 @@ def main() -> None:
                        help="Repeat each stoich N times back-to-back (multiplies effective "
                             "contig count for scaling tests). Timings are accumulated; accuracy "
                             "is measured once (outputs are deterministic). Default: 1.")
-    p_run.add_argument("--sakoe_band", type=float, default=0.0,
-                       help="Sakoe-Chiba band for CUDA DTW. 0 = disabled (full DTW). "
-                            "Fraction in (0,1] = fraction of max signal length; "
-                            "absolute value >1 = fixed cell count. Default: 0.0.")
 
     # -- compare --
     p_cmp = sub.add_parser("compare", help="Compare recent runs")

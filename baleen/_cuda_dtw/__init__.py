@@ -227,30 +227,12 @@ def _dtw_pairwise_cpu(
 # dtw_distance (public API)
 # ---------------------------------------------------------------------------
 
-def _resolve_sakoe_band(sakoe_band: float, ref_length: int) -> int:
-    """Convert a sakoe_band specification to an absolute cell count.
-
-    Accepts:
-      - 0 or None: disabled (full DTW)
-      - float in (0, 1]: fraction of ref_length (e.g. 0.1 → 10% of ref_length cells)
-      - float/int > 1: absolute cell count (rounded to int)
-
-    CUDA path only; CPU fallback ignores the band (see caller).
-    """
-    if sakoe_band is None or sakoe_band <= 0:
-        return 0
-    if sakoe_band <= 1.0:
-        return max(1, int(round(sakoe_band * ref_length)))
-    return int(round(sakoe_band))
-
-
 def dtw_distance(
     seq1: Union[np.ndarray, list],
     seq2: Union[np.ndarray, list],
     use_open_start: bool = False,
     use_open_end: bool = False,
     use_cuda: Optional[bool] = None,
-    sakoe_band: float = 0.0,
 ) -> float:
     """
     Compute DTW distance between two sequences.
@@ -270,12 +252,6 @@ def dtw_distance(
         - None (default): auto-select (CUDA if available, else CPU)
         - True: force CUDA, raises RuntimeError if unavailable
         - False: force CPU
-    sakoe_band : float, optional
-        Sakoe-Chiba band constraint. 0 disables the band (full DTW).
-        A value in (0, 1] is interpreted as a fraction of max(len1, len2).
-        A value > 1 is interpreted as an absolute cell count.
-        Only the CUDA backend honors this parameter; CPU falls back to
-        full DTW and ignores the band.
 
     Returns
     -------
@@ -315,8 +291,6 @@ def dtw_distance(
     if len(seq1) == 0 or len(seq2) == 0:
         raise ValueError("Sequences cannot be empty")
 
-    band_cells = _resolve_sakoe_band(sakoe_band, max(len(seq1), len(seq2)))
-
     # --- Backend dispatch ---
     if use_cuda is True:
         if not CUDA_AVAILABLE:
@@ -328,7 +302,6 @@ def dtw_distance(
             seq1, seq2,
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
-            sakoe_band=band_cells,
         )
 
     if use_cuda is False:
@@ -341,7 +314,6 @@ def dtw_distance(
             seq1, seq2,
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
-            sakoe_band=band_cells,
         )
 
     return _dtw_distance_cpu(seq1, seq2, use_open_start, use_open_end)
@@ -356,7 +328,6 @@ def dtw_pairwise(
     use_open_start: bool = False,
     use_open_end: bool = False,
     use_cuda: Optional[bool] = None,
-    sakoe_band: float = 0.0,
 ) -> np.ndarray:
     """
     Compute pairwise DTW distances for a batch of sequences.
@@ -421,8 +392,6 @@ def dtw_pairwise(
         # if input is converted differently in the future
         pass  # Already guaranteed by 2D array shape
 
-    band_cells = _resolve_sakoe_band(sakoe_band, sequences.shape[1])
-
     # --- Backend dispatch ---
     if use_cuda is True:
         if not CUDA_AVAILABLE:
@@ -434,7 +403,6 @@ def dtw_pairwise(
             sequences,
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
-            sakoe_band=band_cells,
         )
 
     if use_cuda is False:
@@ -447,7 +415,6 @@ def dtw_pairwise(
             sequences,
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
-            sakoe_band=band_cells,
         )
 
     return _dtw_pairwise_cpu(sequences, use_open_start, use_open_end)
@@ -458,7 +425,6 @@ def dtw_pairwise_varlen(
     use_open_start: bool = False,
     use_open_end: bool = False,
     use_cuda: Optional[bool] = None,
-    sakoe_band: float = 0.0,
 ) -> np.ndarray:
     """
     Compute pairwise DTW distances for variable-length sequences.
@@ -504,12 +470,10 @@ def dtw_pairwise_varlen(
         padded = np.zeros((n, max_len), dtype=np.float32)
         for i, s in enumerate(prepped):
             padded[i, :len(s)] = s
-        band_cells = _resolve_sakoe_band(sakoe_band, max_len)
         result = _dtw_pairwise_varlen_cuda(
             padded, lengths,
             use_open_start=int(use_open_start),
             use_open_end=int(use_open_end),
-            sakoe_band=band_cells,
         )
         return np.asarray(result, dtype=np.float64)
 
@@ -538,7 +502,6 @@ def dtw_multi_position_pairwise(
     use_cuda: Optional[bool] = None,
     num_streams: int = 16,
     device_id: int = 0,
-    sakoe_band: float = 0.0,
 ) -> list[np.ndarray]:
     """
     Batch-compute pairwise DTW distances for multiple positions in one GPU call.
@@ -597,7 +560,6 @@ def dtw_multi_position_pairwise(
                 idx += 1
 
         counts_arr = np.array(counts, dtype=np.int64)
-        band_cells = _resolve_sakoe_band(sakoe_band, global_max_len)
 
         flat_result = _dtw_multi_position_cuda(
             padded, lengths, counts_arr,
@@ -605,7 +567,6 @@ def dtw_multi_position_pairwise(
             use_open_end=int(use_open_end),
             num_cuda_streams=num_streams,
             device_id=device_id,
-            sakoe_band=band_cells,
         )
 
         result_list: list[np.ndarray] = []

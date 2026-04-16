@@ -308,7 +308,6 @@ def _process_contig(
     num_workers: int = 1,
     show_progress: bool = True,
     cuda_device: int = 0,
-    sakoe_band: float = 0.0,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
@@ -499,7 +498,6 @@ def _process_contig(
                 use_cuda=use_cuda,
                 num_streams=num_cuda_streams,
                 device_id=cuda_device,
-                sakoe_band=sakoe_band,
             )
 
             all_matrices.extend(chunk_matrices)
@@ -592,7 +590,6 @@ def _process_contig_streaming(
     mod_threshold: float = 0.9,
     show_progress: bool = True,
     cuda_device: int = 0,
-    sakoe_band: float = 0.0,
 ) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
     """Process a single contig end-to-end: DTW → HMM → site aggregation.
 
@@ -654,7 +651,6 @@ def _process_contig_streaming(
         num_workers=num_workers,
         show_progress=show_progress,
         cuda_device=cuda_device,
-        sakoe_band=sakoe_band,
     )
 
     # Stage 2: HMM smoothing
@@ -1007,7 +1003,6 @@ def run_pipeline_streaming(
     subsample_n: int = 300,
     legacy_scoring: bool = False,
     mod_threshold: float = 0.9,
-    sakoe_band: float = 0.0,
 ) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -1187,7 +1182,6 @@ def run_pipeline_streaming(
             num_workers=gpu_workers,
             mod_threshold=mod_threshold,
             show_progress=(threads <= 1),
-            sakoe_band=sakoe_band,
         )
 
         if threads > 1:
