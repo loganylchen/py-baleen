@@ -28,9 +28,12 @@ WORKDIR /app
 COPY . .
 RUN pip3 install pytest \
     && pip3 install --no-cache-dir -v . 2>&1 | tee /tmp/pip-install.log \
-    && SO_PATH=$(python3 -c "import baleen._cuda_dtw, os; print(os.path.dirname(baleen._cuda_dtw.__file__))") \
+    && SO_PATH=$(cd / && python3 -c "import baleen._cuda_dtw, os; print(os.path.dirname(baleen._cuda_dtw.__file__))") \
     && if ! ls "$SO_PATH"/_cuda_dtw*.so >/dev/null 2>&1; then \
          echo "ERROR: CUDA extension (.so) was not built — image would be CPU-only." >&2; \
+         echo "SO_PATH=$SO_PATH" >&2; \
+         echo "find result:" >&2; \
+         find /usr/local/lib /usr/lib -name '_cuda_dtw*.so' 2>/dev/null >&2 || true; \
          echo "pip install log tail:" >&2; \
          tail -80 /tmp/pip-install.log >&2; \
          exit 1; \
