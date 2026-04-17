@@ -606,9 +606,9 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"\nDone in {total_wall:.1f}s  |  RSS {peak_rss_mb} MB  |  "
           f"GPU {peak_gpu_mb} MB")
     if summary_accuracy:
-        auprc = summary_accuracy.get("auprc_mod_ratio", "n/a")
-        auroc = summary_accuracy.get("auroc_mod_ratio", "n/a")
-        print(f"AUPRC(mod_ratio)={auprc}  AUROC(mod_ratio)={auroc}")
+        auprc = summary_accuracy.get("auprc_nlog10_pvalue", "n/a")
+        auroc = summary_accuracy.get("auroc_nlog10_pvalue", "n/a")
+        print(f"AUPRC(-log10p)={auprc}  AUROC(-log10p)={auroc}")
 
     # Print stage breakdown
     if aggregate_stages:
@@ -674,8 +674,8 @@ def cmd_compare(args: argparse.Namespace) -> None:
 
 def _print_summary_table(runs: list[dict]) -> None:
     header = (f"{'Commit':<9} {'Label':<20} {'Date':<12} {'Wall(s)':>8} "
-              f"{'RSS(MB)':>8} {'GPU(MB)':>8} {'AUPRC':>7} {'AUROC':>7} "
-              f"{'Delta':>7}")
+              f"{'RSS(MB)':>8} {'GPU(MB)':>8} {'AUPRC(-lg10p)':>13} "
+              f"{'AUROC(-lg10p)':>13} {'Delta':>7}")
     print(header)
     print("-" * len(header))
 
@@ -691,8 +691,8 @@ def _print_summary_table(runs: list[dict]) -> None:
         rss = run["resources"]["peak_rss_mb"]
         gpu = run["resources"]["peak_gpu_mb"]
         summary = run["accuracy"].get("summary", {})
-        auprc = summary.get("auprc_mod_ratio")
-        auroc = summary.get("auroc_mod_ratio")
+        auprc = summary.get("auprc_nlog10_pvalue")
+        auroc = summary.get("auroc_nlog10_pvalue")
 
         auprc_s = f"{auprc:.4f}" if auprc is not None else "n/a"
         auroc_s = f"{auroc:.4f}" if auroc is not None else "n/a"
@@ -707,7 +707,7 @@ def _print_summary_table(runs: list[dict]) -> None:
             delta_s = "n/a"
 
         print(f"{commit}{dirty:<2} {label:<20} {ts:<12} {wall:>8.1f} "
-              f"{rss:>8,} {gpu:>8,} {auprc_s:>7} {auroc_s:>7} "
+              f"{rss:>8,} {gpu:>8,} {auprc_s:>13} {auroc_s:>13} "
               f"{delta_s:>7}")
 
 
