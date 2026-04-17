@@ -21,11 +21,21 @@ RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
-# Install baleen with CUDA; ensure console_script is at a known path
+# Install baleen with CUDA; ensure console_script is at a known path.
+# -v surfaces nvcc compile/link output so silent CUDA fallback is visible in CI.
+# After install, verify _cuda_dtw*.so was actually built — fail loud otherwise.
 WORKDIR /app
 COPY . .
 RUN pip3 install pytest \
-    && pip3 install --no-cache-dir . \
+    && pip3 install --no-cache-dir -v . 2>&1 | tee /tmp/pip-install.log \
+    && SO_PATH=$(python3 -c "import baleen._cuda_dtw, os; print(os.path.dirname(baleen._cuda_dtw.__file__))") \
+    && if ! ls "$SO_PATH"/_cuda_dtw*.so >/dev/null 2>&1; then \
+         echo "ERROR: CUDA extension (.so) was not built — image would be CPU-only." >&2; \
+         echo "pip install log tail:" >&2; \
+         tail -80 /tmp/pip-install.log >&2; \
+         exit 1; \
+       fi \
+    && echo "OK: _cuda_dtw $(ls $SO_PATH/_cuda_dtw*.so)" \
     && BALEEN_BIN="$(which baleen 2>/dev/null)" \
     && if [ -z "$BALEEN_BIN" ]; then \
          printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \
