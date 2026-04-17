@@ -85,7 +85,7 @@ def _get_nvcc():
 # Override with BALEEN_CUDA_ARCHS=61,75,86 (comma-separated compute capabilities
 # without the dot: e.g. "61" = sm_61 = compute capability 6.1). The highest arch
 # also gets PTX embedded for forward-compat with future GPUs.
-_DEFAULT_CUDA_ARCHS = ["61", "75", "80", "86", "89", "90"]
+_DEFAULT_CUDA_ARCHS = ["75", "80", "86", "89", "90"]
 
 
 def _get_cuda_archs():
@@ -155,11 +155,13 @@ class CUDABuildExt(build_ext):
                 super().build_extensions()
             return
 
-        # ── Prepare .cpp → .cu copies ──
+        # ── Prepare .cpp → .cu copies (native .cu files kept as-is) ──
         for ext in cuda_exts:
             new_sources = []
             for src in ext.sources:
-                if src.endswith(".cpp") and "_cuda_dtw" in src:
+                if src.endswith(".cu"):
+                    new_sources.append(src)  # already a .cu file
+                elif src.endswith(".cpp") and "_cuda_dtw" in src:
                     os.makedirs(self.build_temp, exist_ok=True)
                     cu_path = os.path.join(self.build_temp, os.path.basename(
                         src.rsplit(".cpp", 1)[0] + ".cu"
@@ -268,14 +270,29 @@ class CUDABuildExt(build_ext):
 # ---------------------------------------------------------------------------
 
 def _make_cuda_extension():
-    """Create the CUDA extension module definition."""
+    """Create the CUDA extension module definition.
+
+    By default uses cuDTW++ warp-shuffle kernels (cudtw_wrapper.cu).
+    Set BALEEN_USE_CUDTW=0 to fall back to the legacy OpenDBA wavefront kernel.
+    """
     cuda_src_dir = os.path.join("baleen", "_cuda_dtw")
-    ext = Extension(
-        name="baleen._cuda_dtw._cuda_dtw",
-        sources=[
+    use_cudtw = os.environ.get("BALEEN_USE_CUDTW", "1").strip()
+
+    if use_cudtw in ("0", "false", "no"):
+        # Legacy kernel
+        sources = [
             os.path.join(cuda_src_dir, "dtw_api.cpp"),
             os.path.join(cuda_src_dir, "multithreading.cpp"),
-        ],
+        ]
+    else:
+        # cuDTW++ warp-shuffle kernel (native .cu — no copy needed)
+        sources = [
+            os.path.join(cuda_src_dir, "cudtw_wrapper.cu"),
+        ]
+
+    ext = Extension(
+        name="baleen._cuda_dtw._cuda_dtw",
+        sources=sources,
         libraries=["cudart"],
         language="c++",
     )

@@ -46,8 +46,20 @@ except ImportError:
 
 _BACKEND = "cuda" if CUDA_AVAILABLE else "cpu"
 
+# Detect cuDTW++ (v0.2+) vs legacy OpenDBA kernel
+_CUDTW_ACTIVE = False
+if CUDA_AVAILABLE:
+    try:
+        from ._cuda_dtw import __version__ as _cuda_ver
+        _CUDTW_ACTIVE = "cudtw" in _cuda_ver
+    except (ImportError, AttributeError):
+        pass
+
 if _BACKEND == "cuda":
-    _log.debug("DTW backend: cuda (GPU acceleration enabled)")
+    if _CUDTW_ACTIVE:
+        _log.debug("DTW backend: cuda (cuDTW++ warp-shuffle)")
+    else:
+        _log.debug("DTW backend: cuda (legacy OpenDBA wavefront)")
 else:
     _log.debug("DTW backend: cpu (tslearn + numpy open-boundary fallback)")
 
@@ -101,6 +113,36 @@ def _dtw_distance_cpu(
 
 
 _open_boundary_warned = False
+_cudtw_open_boundary_warned = False
+
+_MAX_CUDTW_LEN = 2047
+
+
+def _needs_open_boundary_cpu_fallback(use_open_start, use_open_end, use_cuda):
+    """Check if cuDTW++ is active and open boundaries are requested."""
+    if not (use_open_start or use_open_end):
+        return False
+    if use_cuda is False:
+        return False
+    if not _CUDTW_ACTIVE:
+        return False
+    # cuDTW++ doesn't support open boundaries — fall back to CPU
+    global _cudtw_open_boundary_warned
+    if not _cudtw_open_boundary_warned:
+        import warnings
+        warnings.warn(
+            "cuDTW++ does not support open boundary DTW. "
+            "Falling back to CPU for this call.",
+            stacklevel=4,
+        )
+        _cudtw_open_boundary_warned = True
+    return True
+
+
+def _resample_signal(sig, target_len):
+    """Resample a signal to target_len using scipy."""
+    from scipy.signal import resample
+    return resample(sig.astype(np.float64), target_len).astype(np.float32)
 
 
 def _dtw_distance_open_boundary(
@@ -291,6 +333,10 @@ def dtw_distance(
     if len(seq1) == 0 or len(seq2) == 0:
         raise ValueError("Sequences cannot be empty")
 
+    # --- Open boundary fallback for cuDTW++ ---
+    if _needs_open_boundary_cpu_fallback(use_open_start, use_open_end, use_cuda):
+        return _dtw_distance_cpu(seq1, seq2, use_open_start, use_open_end)
+
     # --- Backend dispatch ---
     if use_cuda is True:
         if not CUDA_AVAILABLE:
@@ -392,6 +438,10 @@ def dtw_pairwise(
         # if input is converted differently in the future
         pass  # Already guaranteed by 2D array shape
 
+    # --- Open boundary fallback for cuDTW++ ---
+    if _needs_open_boundary_cpu_fallback(use_open_start, use_open_end, use_cuda):
+        return _dtw_pairwise_cpu(sequences, use_open_start, use_open_end)
+
     # --- Backend dispatch ---
     if use_cuda is True:
         if not CUDA_AVAILABLE:
@@ -457,6 +507,10 @@ def dtw_pairwise_varlen(
     if any(l == 0 for l in lengths):
         raise ValueError("All signals must be non-empty")
 
+    # Open boundary fallback for cuDTW++
+    if _needs_open_boundary_cpu_fallback(use_open_start, use_open_end, use_cuda):
+        use_cuda = False
+
     want_cuda = use_cuda is True or (use_cuda is None and CUDA_AVAILABLE)
 
     if want_cuda:
@@ -465,6 +519,18 @@ def dtw_pairwise_varlen(
                 "CUDA backend requested but not available. "
                 "Install with CUDA support or use use_cuda=False."
             )
+
+        # Resample signals > 2047 when cuDTW++ is active
+        if _CUDTW_ACTIVE:
+            max_raw = int(lengths.max())
+            if max_raw > _MAX_CUDTW_LEN:
+                _log.info("Resampling %d signals from max %d to %d for cuDTW++",
+                          len(prepped), max_raw, _MAX_CUDTW_LEN)
+                prepped = [_resample_signal(s, _MAX_CUDTW_LEN)
+                           if len(s) > _MAX_CUDTW_LEN else s
+                           for s in prepped]
+                lengths = np.array([len(s) for s in prepped], dtype=np.int64)
+
         max_len = int(lengths.max())
         n = len(prepped)
         padded = np.zeros((n, max_len), dtype=np.float32)
@@ -536,6 +602,10 @@ def dtw_multi_position_pairwise(
         prepped.append(ps)
         counts.append(len(ps))
 
+    # Open boundary fallback for cuDTW++
+    if _needs_open_boundary_cpu_fallback(use_open_start, use_open_end, use_cuda):
+        use_cuda = False
+
     want_cuda = use_cuda is True or (use_cuda is None and CUDA_AVAILABLE)
 
     if want_cuda:
@@ -544,6 +614,20 @@ def dtw_multi_position_pairwise(
                 "CUDA backend requested but not available. "
                 "Install with CUDA support or use use_cuda=False."
             )
+
+        # Resample signals > 2047 when cuDTW++ is active
+        if _CUDTW_ACTIVE:
+            any_long = any(
+                len(s) > _MAX_CUDTW_LEN for pos_sigs in prepped for s in pos_sigs
+            )
+            if any_long:
+                _log.info("Resampling signals > %d for cuDTW++", _MAX_CUDTW_LEN)
+                prepped = [
+                    [_resample_signal(s, _MAX_CUDTW_LEN)
+                     if len(s) > _MAX_CUDTW_LEN else s
+                     for s in pos_sigs]
+                    for pos_sigs in prepped
+                ]
 
         global_max_len = max(
             len(s) for pos_sigs in prepped for s in pos_sigs
