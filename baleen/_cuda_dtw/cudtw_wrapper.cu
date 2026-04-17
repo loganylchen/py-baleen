@@ -4,6 +4,7 @@
 // enabling CUDA-stream concurrency across pairwise queries.
 
 #include <cuda_runtime.h>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
