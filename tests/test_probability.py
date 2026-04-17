@@ -476,3 +476,76 @@ class TestModificationProbabilitiesProperties:
         )
         np.testing.assert_array_equal(mp.native_probabilities, [0.9, 0.8])
         np.testing.assert_array_equal(mp.ivt_probabilities, [0.1, 0.05])
+
+
+# ---------------------------------------------------------------------------
+# JIT kernel regression — beta EM scalar loop vs numpy reference
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrateBetaEMKernel:
+    """JIT kernel should match the original numpy EM to high precision.
+
+    Differences beyond ~1e-12 relative would indicate the scalar loop
+    diverged from the numpy implementation (e.g. wrong formula, not just
+    reduction-order drift).  We allow 1e-8 relative headroom to stay
+    robust against platform lgamma/exp differences.
+    """
+
+    @staticmethod
+    def _numpy_reference(
+        native: NDArray[np.float64],
+        a0: float, b0: float,
+        a1: float, b1: float,
+        pi: float,
+        max_iter: int = 100,
+        tol: float = 1e-6,
+    ) -> tuple[float, float, float]:
+        _beta_pdf = prob_mod._beta_pdf
+        _EPS = prob_mod._EPS
+        for _ in range(max_iter):
+            f0 = _beta_pdf(native, a0, b0)
+            f1 = _beta_pdf(native, a1, b1)
+            denom = (1.0 - pi) * f0 + pi * f1 + _EPS
+            r = (pi * f1) / denom
+            pi_new = float(np.mean(r))
+            r_sum = float(np.sum(r)) + _EPS
+            w_mean = float(np.sum(r * native)) / r_sum
+            w_var = float(np.sum(r * (native - w_mean) ** 2)) / r_sum
+            w_var = max(w_var, 1e-10)
+            common = max(min(w_mean * (1 - w_mean) / w_var - 1.0, 1000.0), 2.0)
+            a1_new = max(w_mean * common, 0.1)
+            b1_new = max((1 - w_mean) * common, 0.1)
+            conv = (
+                abs(pi_new - pi) < tol
+                and abs(a1_new - a1) < tol
+                and abs(b1_new - b1) < tol
+            )
+            pi, a1, b1 = pi_new, a1_new, b1_new
+            if conv:
+                break
+        return pi, a1, b1
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 7, 42])
+    def test_kernel_matches_numpy(self, seed: int) -> None:
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(30, 250))
+        native = np.clip(rng.beta(2.0, 4.0, n), 1e-10, 1.0 - 1e-10)
+        a0, b0 = 2.0 + rng.random(), 3.0 + rng.random()
+        a1_init, b1_init = 3.0 + rng.random(), 2.0 + rng.random()
+
+        pi_ref, a1_ref, b1_ref = self._numpy_reference(
+            native, a0, b0, a1_init, b1_init, 0.1,
+        )
+        log_x = np.log(native)
+        log_1mx = np.log1p(-native)
+        pi_jit, a1_jit, b1_jit, n_iters = prob_mod._calibrate_beta_em_kernel(
+            native, log_x, log_1mx,
+            a0, b0, a1_init, b1_init, 0.1,
+            100, 1e-6, prob_mod._EPS,
+        )
+        # Reduction order (pairwise vs sequential) → relative drift < 1e-8.
+        assert n_iters >= 1
+        np.testing.assert_allclose(pi_jit, pi_ref, rtol=1e-8, atol=1e-12)
+        np.testing.assert_allclose(a1_jit, a1_ref, rtol=1e-8, atol=1e-12)
+        np.testing.assert_allclose(b1_jit, b1_ref, rtol=1e-8, atol=1e-12)

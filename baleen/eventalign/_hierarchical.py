@@ -581,44 +581,22 @@ def _anchored_mixture_em(
 
     pi = 0.1
 
-    n_iters = 0
-    for n_iters in range(1, max_iter + 1):  # noqa: B007
-        f0 = _normal_pdf(z_native, mu0, sigma0)
-        f1 = _normal_pdf(z_native, mu1, sigma1)
-        denom = (1.0 - pi) * f0 + pi * f1 + _EPS
-        r = (pi * f1) / denom
-
-        pi_new = float(np.mean(r))
-        r_sum = float(np.sum(r)) + _EPS
-
-        if use_global:
-            # Regularized update: allow mu1/sigma1 to adapt locally
-            # but pull toward global values.  Weight = lam / (lam + n)
-            # so low coverage → near-global, high coverage → near-local MLE.
-            lam = global_regularization
-            n = len(z_native)
-            w = lam / (lam + n)  # regularization weight
-
-            mu1_mle = float(np.sum(r * z_native)) / r_sum
-            mu1 = w * global_mu1 + (1.0 - w) * mu1_mle
-
-            var_mle = float(np.sum(r * (z_native - mu1) ** 2)) / r_sum
-            sigma1 = math.sqrt(
-                max(w * global_sigma1 ** 2 + (1.0 - w) * var_mle,
-                    _MIN_SIGMA ** 2)
-            )
-        else:
-            mu1_new = float(np.sum(r * z_native)) / r_sum
-            sigma1_new = math.sqrt(
-                max(float(np.sum(r * (z_native - mu1_new) ** 2)) / r_sum,
-                    _MIN_SIGMA ** 2)
-            )
-            mu1, sigma1 = mu1_new, sigma1_new
-
-        if abs(pi_new - pi) < tol:
-            pi = pi_new
-            break
-        pi = pi_new
+    # Hand the EM loop to the JIT kernel (bit-equivalent to the Python path,
+    # modulo sequential- vs pairwise-sum reduction order at ~1e-14).
+    gm1 = float(global_mu1) if use_global else 0.0
+    gs1 = float(global_sigma1) if use_global else 1.0
+    z_native_c = np.ascontiguousarray(z_native, dtype=np.float64)
+    pi, mu1, sigma1, n_iters = _anchored_em_kernel(
+        z_native_c,
+        float(mu0), float(sigma0),
+        float(mu1), float(sigma1),
+        float(pi),
+        bool(use_global),
+        gm1, gs1,
+        float(global_regularization),
+        int(max_iter), float(tol), float(_EPS),
+        float(_MIN_SIGMA),
+    )
 
     logger.debug("EM converged in %d/%d iterations (pi=%.4f)", n_iters, max_iter, pi)
 
@@ -884,6 +862,113 @@ def _forward_backward(
     gamma /= gamma_sum
 
     return gamma[:, N - 1]  # P(state=Modified) — last column for both 2 and 3 state
+
+
+@_njit(cache=True)
+def _anchored_em_kernel(
+    z_native: NDArray[np.float64],
+    mu0: float,
+    sigma0: float,
+    mu1_init: float,
+    sigma1_init: float,
+    pi_init: float,
+    use_global: bool,
+    global_mu1: float,
+    global_sigma1: float,
+    lam: float,
+    max_iter: int,
+    tol: float,
+    eps: float,
+    min_sigma: float,
+) -> tuple:
+    """Scalar JIT kernel for anchored Normal/Normal EM.
+
+    Math equivalent of the numpy loop in ``_anchored_mixture_em``.
+    Sequential scalar reduction; no fastmath — plain IEEE-754.
+
+    When ``use_global`` is True, ``mu1`` / ``sigma1`` are shrunk toward
+    ``(global_mu1, global_sigma1)`` with weight ``lam / (lam + n)``;
+    ``lam``, ``global_mu1``, ``global_sigma1`` are ignored otherwise.
+    """
+    n = z_native.shape[0]
+    inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+
+    # Precompute invariant f0 (null params fixed)
+    s0 = sigma0 if sigma0 > min_sigma else min_sigma
+    inv_s0 = 1.0 / s0
+    norm0 = inv_sqrt_2pi * inv_s0
+    f0 = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        z = (z_native[i] - mu0) * inv_s0
+        f0[i] = norm0 * math.exp(-0.5 * z * z)
+
+    r = np.empty(n, dtype=np.float64)
+    pi = pi_init
+    mu1 = mu1_init
+    sigma1 = sigma1_init
+    min_sigma_sq = min_sigma * min_sigma
+
+    n_iters = 0
+    for it in range(1, max_iter + 1):
+        n_iters = it
+        s1 = sigma1 if sigma1 > min_sigma else min_sigma
+        inv_s1 = 1.0 / s1
+        norm1 = inv_sqrt_2pi * inv_s1
+
+        # E-step: responsibilities
+        r_sum_raw = 0.0
+        for i in range(n):
+            z = (z_native[i] - mu1) * inv_s1
+            f1_i = norm1 * math.exp(-0.5 * z * z)
+            denom = (1.0 - pi) * f0[i] + pi * f1_i + eps
+            r_i = (pi * f1_i) / denom
+            r[i] = r_i
+            r_sum_raw += r_i
+
+        pi_new = r_sum_raw / n
+        r_sum = r_sum_raw + eps
+
+        if use_global:
+            # Regularised toward global params
+            w = lam / (lam + n)
+            num_mu = 0.0
+            for i in range(n):
+                num_mu += r[i] * z_native[i]
+            mu1_mle = num_mu / r_sum
+            mu1 = w * global_mu1 + (1.0 - w) * mu1_mle
+
+            num_var = 0.0
+            for i in range(n):
+                d = z_native[i] - mu1
+                num_var += r[i] * d * d
+            var_mle = num_var / r_sum
+            var_reg = w * global_sigma1 * global_sigma1 + (1.0 - w) * var_mle
+            if var_reg < min_sigma_sq:
+                var_reg = min_sigma_sq
+            sigma1 = math.sqrt(var_reg)
+        else:
+            # Local MLE update (variance uses mu1_new)
+            num_mu = 0.0
+            for i in range(n):
+                num_mu += r[i] * z_native[i]
+            mu1_new = num_mu / r_sum
+
+            num_var = 0.0
+            for i in range(n):
+                d = z_native[i] - mu1_new
+                num_var += r[i] * d * d
+            var_new = num_var / r_sum
+            if var_new < min_sigma_sq:
+                var_new = min_sigma_sq
+            mu1 = mu1_new
+            sigma1 = math.sqrt(var_new)
+
+        if abs(pi_new - pi) < tol:
+            pi = pi_new
+            break
+        pi = pi_new
+
+    return pi, mu1, sigma1, n_iters
 
 
 @_njit(cache=True)

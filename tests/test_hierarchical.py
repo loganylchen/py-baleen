@@ -963,3 +963,79 @@ class TestHMMPreservesStrongSignal:
         assert mean_hmm_native < 0.5, (
             f"Unmodified position has too-high HMM: {mean_hmm_native:.3f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# JIT kernel regression — anchored EM scalar loop vs numpy reference
+# ---------------------------------------------------------------------------
+
+
+class TestAnchoredEMKernel:
+    """JIT kernel matches the numpy anchored-EM loop modulo reduction order."""
+
+    @staticmethod
+    def _numpy_reference(
+        z_native: NDArray[np.float64],
+        mu0: float, sigma0: float,
+        mu1: float, sigma1: float,
+        pi: float,
+        use_global: bool = False,
+        gm1: float = 0.0, gs1: float = 1.0, lam: float = 10.0,
+        max_iter: int = 100, tol: float = 1e-6,
+    ) -> tuple[float, float, float]:
+        prob = importlib.import_module("baleen.eventalign._probability")
+        _EPS = hier._EPS
+        _MIN_SIGMA = hier._MIN_SIGMA
+        for _ in range(max_iter):
+            f0 = prob._normal_pdf(z_native, mu0, sigma0)
+            f1 = prob._normal_pdf(z_native, mu1, sigma1)
+            denom = (1.0 - pi) * f0 + pi * f1 + _EPS
+            r = (pi * f1) / denom
+            pi_new = float(np.mean(r))
+            r_sum = float(np.sum(r)) + _EPS
+            if use_global:
+                n = len(z_native)
+                w = lam / (lam + n)
+                mu1_mle = float(np.sum(r * z_native)) / r_sum
+                mu1 = w * gm1 + (1.0 - w) * mu1_mle
+                var_mle = float(np.sum(r * (z_native - mu1) ** 2)) / r_sum
+                sigma1 = math.sqrt(
+                    max(w * gs1 ** 2 + (1.0 - w) * var_mle, _MIN_SIGMA ** 2)
+                )
+            else:
+                mu1_new = float(np.sum(r * z_native)) / r_sum
+                sigma1_new = math.sqrt(max(
+                    float(np.sum(r * (z_native - mu1_new) ** 2)) / r_sum,
+                    _MIN_SIGMA ** 2,
+                ))
+                mu1, sigma1 = mu1_new, sigma1_new
+            if abs(pi_new - pi) < tol:
+                pi = pi_new
+                break
+            pi = pi_new
+        return pi, mu1, sigma1
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 7])
+    @pytest.mark.parametrize("use_global", [False, True])
+    def test_kernel_matches_numpy(self, seed: int, use_global: bool) -> None:
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(30, 250))
+        z_native = rng.standard_normal(n) * (0.5 + rng.random()) + rng.random() * 2
+        mu0 = float(rng.standard_normal() * 0.1)
+        sigma0 = float(0.8 + rng.random() * 0.5)
+        mu1_i = mu0 + 0.5 + float(rng.random())
+        sigma1_i = sigma0
+
+        pr, mr, sr = self._numpy_reference(
+            z_native, mu0, sigma0, mu1_i, sigma1_i, 0.1,
+            use_global=use_global, gm1=2.0, gs1=1.0, lam=10.0,
+        )
+        pj, mj, sj, n_iters = hier._anchored_em_kernel(
+            z_native, mu0, sigma0, mu1_i, sigma1_i, 0.1,
+            use_global, 2.0, 1.0, 10.0,
+            100, 1e-6, hier._EPS, hier._MIN_SIGMA,
+        )
+        assert n_iters >= 1
+        np.testing.assert_allclose(pj, pr, rtol=1e-8, atol=1e-12)
+        np.testing.assert_allclose(mj, mr, rtol=1e-8, atol=1e-12)
+        np.testing.assert_allclose(sj, sr, rtol=1e-8, atol=1e-12)

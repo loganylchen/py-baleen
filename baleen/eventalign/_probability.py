@@ -35,6 +35,22 @@ from scipy.stats import norm as _norm_dist
 
 logger = logging.getLogger(__name__)
 
+# Optional numba JIT for EM hot loops.  Mirrors the shim in _hierarchical.py
+# so _probability stays usable when numba is not installed.
+try:
+    from numba import njit as _njit
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover - exercised only in CPU-only envs
+    _HAS_NUMBA = False
+
+    def _njit(*args, **kwargs):
+        """No-op decorator when numba is unavailable."""
+        def _decorator(fn):
+            return fn
+        if args and callable(args[0]) and not kwargs:
+            return args[0]
+        return _decorator
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -290,6 +306,98 @@ def _calibrate_normal(
     return _CalibrationResult(probabilities=probs, pi=pi, null_gate_active=null_gate)
 
 
+@_njit(cache=True)
+def _calibrate_beta_em_kernel(
+    native_scores: NDArray[np.float64],
+    log_x: NDArray[np.float64],
+    log_1mx: NDArray[np.float64],
+    a0: float,
+    b0: float,
+    a1_init: float,
+    b1_init: float,
+    pi_init: float,
+    max_iter: int,
+    tol: float,
+    eps: float,
+) -> tuple:
+    """Scalar JIT kernel for the Beta/Beta EM loop.
+
+    Math equivalent of the numpy implementation inline in ``_calibrate_beta``.
+    Reduction order uses sequential left-to-right accumulation, which may
+    differ from numpy's pairwise summation by ~1e-14 but converges to the
+    same fixed point.  No fastmath — plain IEEE-754 throughout.
+    """
+    n = native_scores.shape[0]
+
+    # f0 is invariant in the loop (null Beta params fixed)
+    log_norm0 = math.lgamma(a0 + b0) - math.lgamma(a0) - math.lgamma(b0)
+    f0 = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        f0[i] = math.exp(log_norm0 + (a0 - 1.0) * log_x[i] + (b0 - 1.0) * log_1mx[i])
+
+    r = np.empty(n, dtype=np.float64)
+    pi = pi_init
+    a1 = a1_init
+    b1 = b1_init
+
+    n_iters = 0
+    for it in range(1, max_iter + 1):
+        n_iters = it
+        log_norm1 = math.lgamma(a1 + b1) - math.lgamma(a1) - math.lgamma(b1)
+
+        # E-step: responsibilities + first-moment accumulators
+        r_sum_raw = 0.0
+        w_sum_num = 0.0
+        for i in range(n):
+            f1_i = math.exp(
+                log_norm1 + (a1 - 1.0) * log_x[i] + (b1 - 1.0) * log_1mx[i]
+            )
+            denom = (1.0 - pi) * f0[i] + pi * f1_i + eps
+            r_i = (pi * f1_i) / denom
+            r[i] = r_i
+            r_sum_raw += r_i
+            w_sum_num += r_i * native_scores[i]
+
+        pi_new = r_sum_raw / n
+        r_sum = r_sum_raw + eps
+        w_mean = w_sum_num / r_sum
+
+        # Second pass for weighted variance (needs w_mean)
+        w_var_num = 0.0
+        for i in range(n):
+            d = native_scores[i] - w_mean
+            w_var_num += r[i] * d * d
+        w_var = w_var_num / r_sum
+        if w_var < 1e-10:
+            w_var = 1e-10
+
+        common = w_mean * (1.0 - w_mean) / w_var - 1.0
+        if common > 1000.0:
+            common = 1000.0
+        elif common < 2.0:
+            common = 2.0
+
+        a1_new = w_mean * common
+        if a1_new < 0.1:
+            a1_new = 0.1
+        b1_new = (1.0 - w_mean) * common
+        if b1_new < 0.1:
+            b1_new = 0.1
+
+        converged = (
+            abs(pi_new - pi) < tol
+            and abs(a1_new - a1) < tol
+            and abs(b1_new - b1) < tol
+        )
+        pi = pi_new
+        a1 = a1_new
+        b1 = b1_new
+        if converged:
+            break
+
+    return pi, a1, b1, n_iters
+
+
 def _calibrate_beta(
     scores_all: NDArray[np.float64],
     ivt_mask: NDArray[np.bool_],
@@ -328,32 +436,22 @@ def _calibrate_beta(
     if alt_mean <= null_mean + 0.05:
         a1 = max(a1, a0 + 0.5)
 
-    for _ in range(max_iter):
-        f0 = _beta_pdf(native_scores, a0, b0)
-        f1 = _beta_pdf(native_scores, a1, b1)
-        denom = (1.0 - pi) * f0 + pi * f1 + _EPS
-        r = (pi * f1) / denom
+    # Pre-clip + precompute log_x / log_1mx once (invariant across iters).
+    # Use float64 contiguous arrays for numba compatibility.
+    native_clipped = np.clip(
+        np.ascontiguousarray(native_scores, dtype=np.float64),
+        1e-10, 1.0 - 1e-10,
+    )
+    log_x = np.log(native_clipped)
+    log_1mx = np.log1p(-native_clipped)
 
-        pi_new = float(np.mean(r))
-        r_sum = float(np.sum(r)) + _EPS
-
-        # Weighted method-of-moments for Beta alternative
-        w_mean = float(np.sum(r * native_scores)) / r_sum
-        w_var = float(np.sum(r * (native_scores - w_mean) ** 2)) / r_sum
-        w_var = max(w_var, 1e-10)
-        common = w_mean * (1 - w_mean) / w_var - 1.0
-        common = max(min(common, 1000.0), 2.0)
-        a1_new = max(w_mean * common, 0.1)
-        b1_new = max((1 - w_mean) * common, 0.1)
-
-        converged = (
-            abs(pi_new - pi) < tol
-            and abs(a1_new - a1) < tol
-            and abs(b1_new - b1) < tol
-        )
-        pi, a1, b1 = pi_new, a1_new, b1_new
-        if converged:
-            break
+    pi, a1, b1, _n_iters = _calibrate_beta_em_kernel(
+        native_clipped, log_x, log_1mx,
+        float(a0), float(b0),
+        float(a1), float(b1),
+        float(pi),
+        int(max_iter), float(tol), float(_EPS),
+    )
 
     # BIC gate (log-space to avoid underflow)
     n = len(native_scores)
