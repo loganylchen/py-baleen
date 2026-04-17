@@ -307,19 +307,25 @@ int opendba_dtw_multi_position_pairwise(
     CUDA_CHECK(cudaSetDevice(device_id));
 
     // Pre-scan: per-position bucket + sequence offset + output offset.
-    // Total seqs and total out size are needed for single-shot allocations.
+    // Each position packs its sequences into d_subjects with stride =
+    // its own bucket (NOT a global max).  The cuDTW++ kernel uses
+    // num_features as both the subject stride and the walk length, so
+    // buffer stride and kernel num_features MUST match per position —
+    // otherwise every row beyond 0 reads from padding → garbage.
     std::vector<int>    buckets(num_positions, 0);
-    std::vector<size_t> seq_offsets(num_positions, 0);
+    std::vector<size_t> seq_index_offsets(num_positions, 0);  // sequence-count prefix sum
+    std::vector<size_t> pos_float_offsets(num_positions, 0);  // float offset into d_subjects
     std::vector<size_t> out_offsets(num_positions, 0);
 
-    size_t total_seqs = 0;
-    size_t total_out  = 0;
-    int    global_bucket = 0;
+    size_t total_seqs   = 0;
+    size_t total_out    = 0;
+    size_t total_floats = 0;
 
     for (size_t p = 0; p < num_positions; p++) {
         size_t n = position_seq_counts[p];
-        seq_offsets[p] = total_seqs;
-        out_offsets[p] = total_out;
+        seq_index_offsets[p] = total_seqs;
+        pos_float_offsets[p] = total_floats;
+        out_offsets[p]       = total_out;
 
         size_t pos_max = 0;
         for (size_t i = 0; i < n; i++) {
@@ -332,43 +338,40 @@ int opendba_dtw_multi_position_pairwise(
                     p, pos_max);
             return -1;
         }
-        buckets[p] = b;
-        if (b > global_bucket) global_bucket = b;
-
-        total_seqs += n;
-        total_out  += n * n;
+        buckets[p]    = b;
+        total_floats += n * (size_t)b;  // 0 for n<2 positions
+        total_seqs   += n;
+        total_out    += n * n;
     }
 
-    // Degenerate: everything was n<2 — just zero the output and return.
-    if (global_bucket == 0) {
+    // Degenerate: every position had n<2 — just zero the output and return.
+    if (total_floats == 0) {
         memset(out_distances, 0, total_out * sizeof(float));
         return 0;
     }
 
-    // Pack all sequences into [total_seqs * global_bucket] host buffer
-    // (global_bucket keeps indexing uniform; wasted tail is small — worst
-    //  case 2× when a chunk mixes very short and very long positions).
-    float *h_padded = (float *)calloc(total_seqs * (size_t)global_bucket,
-                                      sizeof(float));
+    // Pack sequences per-position with per-position stride.  Skipped entirely
+    // for n<2 positions (they contribute 0 floats).
+    float *h_padded = (float *)calloc(total_floats, sizeof(float));
     if (!h_padded) return -1;
 
     for (size_t p = 0; p < num_positions; p++) {
         size_t n = position_seq_counts[p];
-        size_t off = seq_offsets[p];
+        if (n < 2) continue;
+        size_t b        = (size_t)buckets[p];
+        size_t seq_off  = seq_index_offsets[p];
+        size_t pos_base = pos_float_offsets[p];
         for (size_t i = 0; i < n; i++) {
-            size_t slen = all_seq_lengths[off + i];
-            const float *src = all_sequences + (off + i) * global_max_length;
-            memcpy(h_padded + (off + i) * (size_t)global_bucket,
-                   src, slen * sizeof(float));
+            size_t slen = all_seq_lengths[seq_off + i];
+            const float *src = all_sequences + (seq_off + i) * global_max_length;
+            memcpy(h_padded + pos_base + i * b, src, slen * sizeof(float));
         }
     }
 
     float *d_subjects = nullptr, *d_out = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_subjects,
-                          total_seqs * (size_t)global_bucket * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_out, total_out * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_subjects, h_padded,
-                          total_seqs * (size_t)global_bucket * sizeof(float),
+    CUDA_CHECK(cudaMalloc(&d_subjects, total_floats * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out,      total_out    * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_subjects, h_padded, total_floats * sizeof(float),
                           cudaMemcpyHostToDevice));
     free(h_padded);
 
@@ -381,22 +384,24 @@ int opendba_dtw_multi_position_pairwise(
         CUDA_CHECK(cudaStreamCreate(&streams[s]));
 
     // Dispatch: every (position, row) pair hits a stream round-robin.
+    // Buffer stride for position p is buckets[p] — same as the kernel's
+    // num_features, so Query/Subject indexing is consistent.
     int launch_err = 0;
     size_t launch_counter = 0;
     for (size_t p = 0; p < num_positions && launch_err == 0; p++) {
         size_t n = position_seq_counts[p];
         if (n < 2) continue;
-        int bucket = buckets[p];
-        size_t seq_off = seq_offsets[p];
-        size_t out_off = out_offsets[p];
+        size_t b        = (size_t)buckets[p];
+        size_t pos_base = pos_float_offsets[p];
+        size_t out_off  = out_offsets[p];
         for (size_t i = 0; i < n; i++) {
             cudaStream_t s = streams[launch_counter % (size_t)ns];
             launch_counter++;
             bool ok = FullDTW::dist<value_t, index_t>(
-                d_subjects + (seq_off + i) * (size_t)global_bucket,
-                d_subjects +  seq_off      * (size_t)global_bucket,
-                d_out      +  out_off      +  i * n,
-                (index_t)n, (index_t)bucket, s);
+                d_subjects + pos_base + i * b,   // Query = row i (stride b)
+                d_subjects + pos_base,           // Subject base (stride b)
+                d_out      + out_off + i * n,
+                (index_t)n, (index_t)b, s);
             if (!ok) { launch_err = 1; break; }
         }
     }
@@ -751,7 +756,7 @@ PyMODINIT_FUNC PyInit__cuda_dtw(void) {
 
     PyModule_AddIntConstant(m, "__version_major__", 0);
     PyModule_AddIntConstant(m, "__version_minor__", 3);
-    PyModule_AddStringConstant(m, "__version__", "0.3.0-cudtw");
+    PyModule_AddStringConstant(m, "__version__", "0.3.1-cudtw");
 
     return m;
 }
