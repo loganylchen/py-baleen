@@ -39,8 +39,6 @@ class _DtwDistanceFn(Protocol):
         self,
         seq1: NDArray[np.float32] | list[float],
         seq2: NDArray[np.float32] | list[float],
-        use_open_start: bool = False,
-        use_open_end: bool = False,
         use_cuda: Optional[bool] = None,
     ) -> float: ...
 
@@ -89,8 +87,6 @@ def _compute_pairwise_distances(
     signals: list[NDArray[np.float32]],
     *,
     use_cuda: Optional[bool],
-    use_open_start: bool,
-    use_open_end: bool,
 ) -> NDArray[np.float64]:
     n = len(signals)
     n_pairs = n * (n - 1) // 2
@@ -106,19 +102,10 @@ def _compute_pairwise_distances(
     if want_cuda:
         matrix = _dtw_pairwise_varlen(
             signals,
-            use_open_start=use_open_start,
-            use_open_end=use_open_end,
             use_cuda=True,
         )
-    elif not use_open_start and not use_open_end:
-        matrix = _compute_pairwise_batch(signals)
     else:
-        matrix = _compute_pairwise_loop(
-            signals,
-            use_cuda=False,
-            use_open_start=use_open_start,
-            use_open_end=use_open_end,
-        )
+        matrix = _compute_pairwise_batch(signals)
 
     elapsed = time.perf_counter() - t0
     logger.debug("  DTW computation done: %d pairs in %s", n_pairs, _fmt_elapsed(elapsed))
@@ -145,8 +132,6 @@ def _compute_pairwise_loop(
     signals: list[NDArray[np.float32]],
     *,
     use_cuda: Optional[bool],
-    use_open_start: bool,
-    use_open_end: bool,
 ) -> NDArray[np.float64]:
     n = len(signals)
     prepped = [
@@ -159,8 +144,6 @@ def _compute_pairwise_loop(
             distance = _dtw_distance(
                 prepped[i],
                 prepped[j],
-                use_open_start=use_open_start,
-                use_open_end=use_open_end,
                 use_cuda=use_cuda,
             )
             matrix[i, j] = distance
@@ -292,8 +275,6 @@ def _process_contig(
     ivt_stats: dict[str, _bam.ContigStats],
     tmp_root: Path,
     use_cuda: Optional[bool],
-    use_open_start: bool,
-    use_open_end: bool,
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
@@ -493,8 +474,6 @@ def _process_contig(
 
             chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
                 chunk_signals,
-                use_open_start=use_open_start,
-                use_open_end=use_open_end,
                 use_cuda=use_cuda,
                 num_streams=num_cuda_streams,
                 device_id=cuda_device,
@@ -568,8 +547,6 @@ def _process_contig_streaming(
     ivt_stats: dict[str, _bam.ContigStats],
     tmp_root: Path,
     use_cuda: Optional[bool],
-    use_open_start: bool,
-    use_open_end: bool,
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
@@ -635,8 +612,6 @@ def _process_contig_streaming(
         ivt_stats=ivt_stats,
         tmp_root=tmp_root,
         use_cuda=use_cuda,
-        use_open_start=use_open_start,
-        use_open_end=use_open_end,
         padding=padding,
         rna=rna,
         kmer_model=kmer_model,
@@ -700,8 +675,6 @@ def run_pipeline(
     min_depth: int = 15,
     use_cuda: Optional[bool] = None,
     cuda_devices: Optional[list[int]] = None,
-    use_open_start: bool = False,
-    use_open_end: bool = False,
     padding: int = 1,
     output_dir: Optional[PathLike] = None,
     cleanup_temp: bool = True,
@@ -728,8 +701,8 @@ def run_pipeline(
     logger.info("  ref_fasta:    %s", ref_fasta)
     logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
                 min_depth, use_cuda, rna, padding, threads)
-    logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s  cuda_streams=%d",
-                use_open_start, use_open_end, min_mapq, primary_only, num_cuda_streams)
+    logger.info("  min_mapq=%d  primary_only=%s  cuda_streams=%d",
+                min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
                 subsample, subsample_n, gpu_memory_limit)
     logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
@@ -874,8 +847,6 @@ def run_pipeline(
                         ivt_stats=ivt_stats,
                         tmp_root=tmp_root,
                         use_cuda=use_cuda,
-                        use_open_start=use_open_start,
-                        use_open_end=use_open_end,
                         padding=padding,
                         rna=rna,
                         kmer_model=kmer_model,
@@ -933,8 +904,6 @@ def run_pipeline(
                     ivt_stats=ivt_stats,
                     tmp_root=tmp_root,
                     use_cuda=use_cuda,
-                    use_open_start=use_open_start,
-                    use_open_end=use_open_end,
                     padding=padding,
                     rna=rna,
                     kmer_model=kmer_model,
@@ -982,8 +951,6 @@ def run_pipeline_streaming(
     min_depth: int = 15,
     use_cuda: Optional[bool] = None,
     cuda_devices: Optional[list[int]] = None,
-    use_open_start: bool = False,
-    use_open_end: bool = False,
     padding: int = 1,
     output_dir: Optional[PathLike] = None,
     cleanup_temp: bool = True,
@@ -1042,8 +1009,8 @@ def run_pipeline_streaming(
     logger.info("  ref_fasta:    %s", ref_fasta)
     logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
                 min_depth, use_cuda, rna, padding, threads)
-    logger.info("  open_start=%s  open_end=%s  min_mapq=%d  primary_only=%s  cuda_streams=%d",
-                use_open_start, use_open_end, min_mapq, primary_only, num_cuda_streams)
+    logger.info("  min_mapq=%d  primary_only=%s  cuda_streams=%d",
+                min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
                 subsample, subsample_n, gpu_memory_limit)
     logger.info("  run_hmm=%s  legacy_scoring=%s  mod_threshold=%.2f",
@@ -1161,8 +1128,6 @@ def run_pipeline_streaming(
             ivt_stats=ivt_stats,
             tmp_root=tmp_root,
             use_cuda=use_cuda,
-            use_open_start=use_open_start,
-            use_open_end=use_open_end,
             padding=padding,
             rna=rna,
             kmer_model=kmer_model,

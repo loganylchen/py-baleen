@@ -123,14 +123,6 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Force CPU for DTW computation",
     )
     dtw.add_argument(
-        "--open-start", action="store_true", default=False,
-        help="Allow open-start DTW alignment",
-    )
-    dtw.add_argument(
-        "--open-end", action="store_true", default=False,
-        help="Allow open-end DTW alignment",
-    )
-    dtw.add_argument(
         "--gpu-memory-limit", type=int, default=None, metavar="BYTES",
         help="GPU memory budget in bytes for concurrent DTW workers (default: auto-detect)",
     )
@@ -306,8 +298,6 @@ def _cmd_run(args: argparse.Namespace) -> None:
         ref_fasta=args.ref,
         min_depth=args.min_depth,
         cuda_devices=cuda_devices,
-        use_open_start=args.open_start,
-        use_open_end=args.open_end,
         padding=args.padding,
         output_dir=output_dir,
         cleanup_temp=not args.keep_temp,

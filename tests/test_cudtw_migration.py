@@ -158,15 +158,3 @@ class TestMultiPosition:
         np.testing.assert_allclose(mat, mat.T, atol=1e-5)
 
 
-class TestOpenBoundaryFallback:
-    """cuDTW++ should fall back to CPU for open boundary DTW."""
-
-    @pytest.mark.skipif(not _CUDTW_ACTIVE, reason="cuDTW++ not active")
-    def test_open_end_falls_back(self):
-        """Open-end DTW should work (via CPU fallback) even with cuDTW++."""
-        rng = np.random.RandomState(111)
-        s1 = rng.randn(100).astype(np.float32)
-        s2 = rng.randn(100).astype(np.float32)
-        # Should not raise — falls back to CPU
-        d = dtw_distance(s1, s2, use_open_end=True)
-        assert d >= 0

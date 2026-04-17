@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from numpy.typing import NDArray
 
 pipeline_mod = importlib.import_module("baleen.eventalign._pipeline")
 ContigResult = pipeline_mod.ContigResult
@@ -138,7 +137,7 @@ class TestPipelineMetadata:
 
 class TestComputePairwiseDistances:
     def test_standard_dtw_uses_batch_cdist(self) -> None:
-        """Standard DTW (no open boundaries, CPU) should use batch cdist_dtw, not loop."""
+        """Standard DTW (CPU) should use batch cdist_dtw, not loop."""
         signals = [
             np.array([1.0, 2.0, 3.0], dtype=np.float32),
             np.array([1.5, 2.5, 3.5], dtype=np.float32),
@@ -148,8 +147,6 @@ class TestComputePairwiseDistances:
             matrix = _compute_pairwise_distances(
                 signals,
                 use_cuda=False,
-                use_open_start=False,
-                use_open_end=False,
             )
         assert matrix.shape == (3, 3)
         assert np.allclose(np.diag(matrix), 0.0)
@@ -166,8 +163,6 @@ class TestComputePairwiseDistances:
         matrix = _compute_pairwise_distances(
             signals,
             use_cuda=False,
-            use_open_start=False,
-            use_open_end=False,
         )
         assert matrix.shape == (3, 3)
         assert np.allclose(np.diag(matrix), 0.0)
@@ -184,54 +179,6 @@ class TestComputePairwiseDistances:
                     err_msg=f"Mismatch at ({i},{j})",
                 )
 
-    def test_open_end_uses_loop_path(self) -> None:
-        """Open-boundary DTW must use per-pair loop (no batch shortcut)."""
-        signals = [
-            np.array([1.0, 2.0], dtype=np.float32),
-            np.array([1.0, 2.0, 3.0], dtype=np.float32),
-            np.array([2.0], dtype=np.float32),
-        ]
-
-        def fake_dtw(a: NDArray[np.float32], b: NDArray[np.float32], **_: object) -> float:
-            return float(abs(len(a) - len(b)))
-
-        with patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw) as mock_dtw:
-            matrix = _compute_pairwise_distances(
-                signals,
-                use_cuda=None,
-                use_open_start=False,
-                use_open_end=True,
-            )
-
-        assert matrix.shape == (3, 3)
-        assert np.allclose(np.diag(matrix), 0.0)
-        assert matrix[0, 1] == 1.0
-        assert matrix[1, 2] == 2.0
-        assert np.allclose(matrix, matrix.T)
-        assert mock_dtw.call_count == 3
-
-    def test_open_start_uses_loop_path(self) -> None:
-        """Open-start DTW must use per-pair loop."""
-        signals = [
-            np.array([1.0, 2.0], dtype=np.float32),
-            np.array([3.0, 4.0, 5.0], dtype=np.float32),
-        ]
-
-        def fake_dtw(a: NDArray[np.float32], b: NDArray[np.float32], **_: object) -> float:
-            return 42.0
-
-        with patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw) as mock_dtw:
-            matrix = _compute_pairwise_distances(
-                signals,
-                use_cuda=None,
-                use_open_start=True,
-                use_open_end=False,
-            )
-
-        assert matrix.shape == (2, 2)
-        assert matrix[0, 1] == 42.0
-        assert mock_dtw.call_count == 1
-
     def test_cuda_uses_varlen_batch_path(self) -> None:
         """CUDA backend must use dtw_pairwise_varlen (single batch kernel)."""
         signals = [
@@ -245,8 +192,6 @@ class TestComputePairwiseDistances:
             matrix = _compute_pairwise_distances(
                 signals,
                 use_cuda=True,
-                use_open_start=False,
-                use_open_end=False,
             )
 
         assert matrix.shape == (2, 2)
@@ -262,8 +207,6 @@ class TestComputePairwiseDistances:
         matrix = _compute_pairwise_distances(
             signals,
             use_cuda=False,
-            use_open_start=False,
-            use_open_end=False,
         )
         assert matrix.shape == (2, 2)
         assert matrix[0, 0] == 0.0
@@ -281,8 +224,6 @@ class TestComputePairwiseDistances:
         matrix = _compute_pairwise_distances(
             signals,
             use_cuda=False,
-            use_open_start=False,
-            use_open_end=False,
         )
         assert matrix.shape == (20, 20)
         assert np.allclose(np.diag(matrix), 0.0)
@@ -357,6 +298,7 @@ class TestRunPipeline:
                 ivt_blow5=tmp_path / "ivt.blow5",
                 ref_fasta=tmp_path / "ref.fa",
                 min_depth=1,
+                use_cuda=False,
             )
 
         assert metadata.f5c_version == "1.6"
@@ -481,6 +423,7 @@ class TestRunPipeline:
                 ref_fasta=tmp_path / "ref.fa",
                 min_depth=1,
                 output_dir=out_dir,
+                use_cuda=False,
             )
 
         output_file = out_dir / "pipeline_results.pkl"

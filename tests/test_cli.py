@@ -35,8 +35,6 @@ def sample_args_run():
         min_mapq=0,
         cuda=None,
         no_cuda=False,
-        open_start=False,
-        open_end=False,
         hmm_params=None,
         no_hmm=False,
         no_rna=False,
