@@ -1,24 +1,20 @@
 // cudtw_wrapper.cu — cuDTW++ warp-shuffle kernel wrapper for baleen
 //
-// Replaces dtw_api.cpp when BALEEN_USE_CUDTW != 0 (default).
-// Same Python binding signatures so __init__.py works unchanged.
+// Query is passed through global memory (no __constant__ serialisation),
+// enabling CUDA-stream concurrency across pairwise queries.
 
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#include <chrono>
-#include <iostream>
+#include <vector>
 
 // --------------------------------------------------------------------------
-// cuDTW++ constant-memory query buffer + kernel includes
+// cuDTW++ kernel includes
 // --------------------------------------------------------------------------
 typedef float    value_t;
 typedef uint64_t index_t;
-
-constexpr index_t max_features = (1UL << 16) / sizeof(value_t);  // 16384
-__constant__ value_t cQuery[max_features];
 
 #include "cudtw/include/DTW.hpp"
 
@@ -53,8 +49,6 @@ static int select_bucket(int len) {
 int opendba_dtw_cuda(
     const float *seq1, size_t len1,
     const float *seq2, size_t len2,
-    int /*use_open_start*/,   // ignored — cuDTW++ has no open boundary
-    int /*use_open_end*/,
     float *out_distance)
 {
     if (!seq1 || !seq2 || !out_distance || len1 == 0 || len2 == 0) {
@@ -62,7 +56,6 @@ int opendba_dtw_cuda(
         return -1;
     }
 
-    // Use the longer length to pick bucket (pad both to same bucket)
     size_t max_len = (len1 > len2) ? len1 : len2;
     int bucket = select_bucket((int)max_len);
     if (bucket < 0) {
@@ -70,31 +63,26 @@ int opendba_dtw_cuda(
         return -1;
     }
 
-    // Pad seq2 (subject) on host
+    float *h_query   = (float *)calloc(bucket, sizeof(float));
     float *h_subject = (float *)calloc(bucket, sizeof(float));
-    if (!h_subject) return -1;
+    if (!h_query || !h_subject) { free(h_query); free(h_subject); return -1; }
+    memcpy(h_query,   seq1, len1 * sizeof(float));
     memcpy(h_subject, seq2, len2 * sizeof(float));
 
-    // Upload query (seq1) to constant memory
-    float *h_query = (float *)calloc(bucket, sizeof(float));
-    if (!h_query) { free(h_subject); return -1; }
-    memcpy(h_query, seq1, len1 * sizeof(float));
-    CUDA_CHECK(cudaMemcpyToSymbol(cQuery, h_query, bucket * sizeof(float)));
-    free(h_query);
-
-    // Allocate device memory
-    float *d_subject = nullptr, *d_dist = nullptr;
+    float *d_query = nullptr, *d_subject = nullptr, *d_dist = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_query,   bucket * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_subject, bucket * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_dist, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dist,    sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_query,   h_query,   bucket * sizeof(float),
+                          cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_subject, h_subject, bucket * sizeof(float),
                           cudaMemcpyHostToDevice));
-    free(h_subject);
+    free(h_query); free(h_subject);
 
-    // Launch — 1 entry
     bool ok = FullDTW::dist<value_t, index_t>(
-        d_subject, d_dist, (index_t)1, (index_t)bucket);
+        d_query, d_subject, d_dist, (index_t)1, (index_t)bucket);
     if (!ok) {
-        cudaFree(d_subject); cudaFree(d_dist);
+        cudaFree(d_query); cudaFree(d_subject); cudaFree(d_dist);
         fprintf(stderr, "cudtw_wrapper: unsupported bucket %d\n", bucket);
         return -1;
     }
@@ -105,6 +93,7 @@ int opendba_dtw_cuda(
     CUDA_CHECK(cudaMemcpy(&sq_cost, d_dist, sizeof(float), cudaMemcpyDeviceToHost));
     *out_distance = sqrtf(sq_cost);
 
+    cudaFree(d_query);
     cudaFree(d_subject);
     cudaFree(d_dist);
     return 0;
@@ -124,14 +113,49 @@ void opendba_dtw_cleanup() {
 }
 
 // --------------------------------------------------------------------------
-// Batch pairwise DTW  (equal-length sequences)
+// Internal: stream-concurrent pairwise DTW over one padded subject buffer.
+//
+// d_subjects: [N * bucket] device buffer (padded to bucket width).
+// d_out:      [N * N] device output buffer (float32, squared cost).
+// Each row i is launched on streams[i % num_streams]:
+//   Query = d_subjects + i*bucket, Subject = d_subjects, Dist = d_out + i*N.
+// Caller is responsible for the final cudaDeviceSynchronize + sqrtf.
+// --------------------------------------------------------------------------
+static int launch_pairwise_rows(
+    const float *d_subjects, float *d_out,
+    size_t N, int bucket,
+    cudaStream_t *streams, int num_streams)
+{
+    for (size_t i = 0; i < N; i++) {
+        cudaStream_t s = streams[i % (size_t)num_streams];
+        bool ok = FullDTW::dist<value_t, index_t>(
+            d_subjects + i * (size_t)bucket,
+            const_cast<float *>(d_subjects),
+            d_out + i * N,
+            (index_t)N, (index_t)bucket, s);
+        if (!ok) return -1;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------------------
+// Host helper: take a [N*N] float32 squared-cost matrix → sqrtf + zero diag.
+// --------------------------------------------------------------------------
+static void finalize_matrix(float *m, size_t N) {
+    for (size_t i = 0; i < N; i++) {
+        for (size_t j = 0; j < N; j++) {
+            m[i * N + j] = (i == j) ? 0.0f : sqrtf(m[i * N + j]);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Batch pairwise DTW  (equal-length sequences, single position)
 // --------------------------------------------------------------------------
 int opendba_dtw_pairwise_batch(
     const float *sequences,
     size_t num_sequences,
     size_t seq_length,
-    int /*use_open_start*/,
-    int /*use_open_end*/,
     float *out_distances)
 {
     if (!sequences || !out_distances || num_sequences < 2 || seq_length == 0) {
@@ -145,69 +169,67 @@ int opendba_dtw_pairwise_batch(
         return -1;
     }
 
-    size_t N = num_sequences;
+    const size_t N = num_sequences;
 
-    // Pad all sequences to bucket on host
+    // Pad all sequences to bucket on host (single contiguous buffer)
     float *h_padded = (float *)calloc(N * bucket, sizeof(float));
     if (!h_padded) return -1;
     for (size_t i = 0; i < N; i++)
         memcpy(h_padded + i * bucket, sequences + i * seq_length,
                seq_length * sizeof(float));
 
-    // Upload all subjects to device once
-    float *d_subjects = nullptr, *d_dist = nullptr;
+    // Allocate device memory: subjects (doubles as query source) + output
+    float *d_subjects = nullptr, *d_out = nullptr;
     CUDA_CHECK(cudaMalloc(&d_subjects, N * bucket * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_dist, N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out,      N * N      * sizeof(float)));
     CUDA_CHECK(cudaMemcpy(d_subjects, h_padded, N * bucket * sizeof(float),
                           cudaMemcpyHostToDevice));
+    free(h_padded);
 
-    float *h_row = new float[N];
+    // Stream pool — sized to min(N, 16) for single-position batch
+    int num_streams = (N < 16) ? (int)N : 16;
+    std::vector<cudaStream_t> streams(num_streams);
+    for (int s = 0; s < num_streams; s++)
+        CUDA_CHECK(cudaStreamCreate(&streams[s]));
 
-    // For each query i, upload to cQuery → kernel → read row
-    for (size_t i = 0; i < N; i++) {
-        CUDA_CHECK(cudaMemcpyToSymbol(cQuery, h_padded + i * bucket,
-                                      bucket * sizeof(float)));
+    int rc = launch_pairwise_rows(d_subjects, d_out, N, bucket,
+                                  streams.data(), num_streams);
+    if (rc == 0) rc = (cudaGetLastError() == cudaSuccess) ? 0 : -1;
+    if (rc == 0) rc = (cudaDeviceSynchronize() == cudaSuccess) ? 0 : -1;
 
-        bool ok = FullDTW::dist<value_t, index_t>(
-            d_subjects, d_dist, (index_t)N, (index_t)bucket);
-        if (!ok) {
-            free(h_padded); delete[] h_row;
-            cudaFree(d_subjects); cudaFree(d_dist);
-            return -1;
-        }
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+    for (int s = 0; s < num_streams; s++) cudaStreamDestroy(streams[s]);
 
-        CUDA_CHECK(cudaMemcpy(h_row, d_dist, N * sizeof(float),
-                              cudaMemcpyDeviceToHost));
-
-        // Fill symmetric matrix row — sqrt the squared cost
-        for (size_t j = 0; j < N; j++) {
-            float d = (i == j) ? 0.0f : sqrtf(h_row[j]);
-            out_distances[i * N + j] = d;
-        }
+    if (rc != 0) {
+        cudaFree(d_subjects); cudaFree(d_out);
+        return -1;
     }
 
-    free(h_padded);
-    delete[] h_row;
+    // One D→H copy, then sqrtf + diagonal zeroing on host
+    CUDA_CHECK(cudaMemcpy(out_distances, d_out, N * N * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    finalize_matrix(out_distances, N);
+
     cudaFree(d_subjects);
-    cudaFree(d_dist);
+    cudaFree(d_out);
     return 0;
 }
 
 // --------------------------------------------------------------------------
-// Variable-length pairwise DTW
+// Variable-length pairwise DTW (single position)
 // --------------------------------------------------------------------------
 int opendba_dtw_pairwise_varlen(
     const float *sequences,
     const size_t *seq_lengths,
     size_t num_sequences,
     size_t max_length,
-    int use_open_start,
-    int use_open_end,
     float *out_distances)
 {
-    // Find actual max and bucket
+    if (!sequences || !seq_lengths || !out_distances ||
+        num_sequences < 2 || max_length == 0) {
+        fprintf(stderr, "cudtw_wrapper: invalid varlen input\n");
+        return -1;
+    }
+
     size_t actual_max = 0;
     for (size_t i = 0; i < num_sequences; i++)
         if (seq_lengths[i] > actual_max) actual_max = seq_lengths[i];
@@ -218,56 +240,52 @@ int opendba_dtw_pairwise_varlen(
         return -1;
     }
 
-    size_t N = num_sequences;
+    const size_t N = num_sequences;
 
-    // Re-pad to bucket width
+    // Repack to bucket width
     float *h_padded = (float *)calloc(N * bucket, sizeof(float));
     if (!h_padded) return -1;
     for (size_t i = 0; i < N; i++)
         memcpy(h_padded + i * bucket, sequences + i * max_length,
                seq_lengths[i] * sizeof(float));
 
-    // Upload subjects
-    float *d_subjects = nullptr, *d_dist = nullptr;
+    float *d_subjects = nullptr, *d_out = nullptr;
     CUDA_CHECK(cudaMalloc(&d_subjects, N * bucket * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_dist, N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out,      N * N      * sizeof(float)));
     CUDA_CHECK(cudaMemcpy(d_subjects, h_padded, N * bucket * sizeof(float),
                           cudaMemcpyHostToDevice));
+    free(h_padded);
 
-    float *h_row = new float[N];
+    int num_streams = (N < 16) ? (int)N : 16;
+    std::vector<cudaStream_t> streams(num_streams);
+    for (int s = 0; s < num_streams; s++)
+        CUDA_CHECK(cudaStreamCreate(&streams[s]));
 
-    for (size_t i = 0; i < N; i++) {
-        CUDA_CHECK(cudaMemcpyToSymbol(cQuery, h_padded + i * bucket,
-                                      bucket * sizeof(float)));
+    int rc = launch_pairwise_rows(d_subjects, d_out, N, bucket,
+                                  streams.data(), num_streams);
+    if (rc == 0) rc = (cudaGetLastError() == cudaSuccess) ? 0 : -1;
+    if (rc == 0) rc = (cudaDeviceSynchronize() == cudaSuccess) ? 0 : -1;
 
-        bool ok = FullDTW::dist<value_t, index_t>(
-            d_subjects, d_dist, (index_t)N, (index_t)bucket);
-        if (!ok) {
-            free(h_padded); delete[] h_row;
-            cudaFree(d_subjects); cudaFree(d_dist);
-            return -1;
-        }
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+    for (int s = 0; s < num_streams; s++) cudaStreamDestroy(streams[s]);
 
-        CUDA_CHECK(cudaMemcpy(h_row, d_dist, N * sizeof(float),
-                              cudaMemcpyDeviceToHost));
-
-        for (size_t j = 0; j < N; j++) {
-            float d = (i == j) ? 0.0f : sqrtf(h_row[j]);
-            out_distances[i * N + j] = d;
-        }
+    if (rc != 0) {
+        cudaFree(d_subjects); cudaFree(d_out);
+        return -1;
     }
 
-    free(h_padded);
-    delete[] h_row;
+    CUDA_CHECK(cudaMemcpy(out_distances, d_out, N * N * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    finalize_matrix(out_distances, N);
+
     cudaFree(d_subjects);
-    cudaFree(d_dist);
+    cudaFree(d_out);
     return 0;
 }
 
 // --------------------------------------------------------------------------
-// Multi-position batched pairwise DTW
+// Multi-position batched pairwise DTW — whole chunk shares one d_subjects /
+// one d_out, one H→D, one D→H, one device-sync.  Kernels across positions
+// and within a position fan out over a stream pool for real concurrency.
 // --------------------------------------------------------------------------
 int opendba_dtw_multi_position_pairwise(
     const float *all_sequences,
@@ -275,10 +293,8 @@ int opendba_dtw_multi_position_pairwise(
     const size_t *position_seq_counts,
     size_t num_positions,
     size_t global_max_length,
-    int /*use_open_start*/,
-    int /*use_open_end*/,
     float *out_distances,
-    int /*num_cuda_streams*/,   // ignored — cQuery serialises anyway
+    int num_cuda_streams,
     int device_id)
 {
     if (!all_sequences || !all_seq_lengths || !position_seq_counts ||
@@ -289,92 +305,129 @@ int opendba_dtw_multi_position_pairwise(
 
     CUDA_CHECK(cudaSetDevice(device_id));
 
-    // Find per-position actual max lengths and buckets
-    size_t seq_offset = 0;
-    size_t out_offset = 0;
+    // Pre-scan: per-position bucket + sequence offset + output offset.
+    // Total seqs and total out size are needed for single-shot allocations.
+    std::vector<int>    buckets(num_positions, 0);
+    std::vector<size_t> seq_offsets(num_positions, 0);
+    std::vector<size_t> out_offsets(num_positions, 0);
+
+    size_t total_seqs = 0;
+    size_t total_out  = 0;
+    int    global_bucket = 0;
 
     for (size_t p = 0; p < num_positions; p++) {
         size_t n = position_seq_counts[p];
+        seq_offsets[p] = total_seqs;
+        out_offsets[p] = total_out;
 
-        if (n < 2) {
-            // Fill diagonal zeros
-            for (size_t i = 0; i < n; i++)
-                for (size_t j = 0; j < n; j++)
-                    out_distances[out_offset + i * n + j] = 0.0f;
-            out_offset += n * n;
-            seq_offset += n;
-            continue;
-        }
-
-        // Find max length in this position
         size_t pos_max = 0;
         for (size_t i = 0; i < n; i++) {
-            size_t l = all_seq_lengths[seq_offset + i];
+            size_t l = all_seq_lengths[total_seqs + i];
             if (l > pos_max) pos_max = l;
         }
-
-        int bucket = select_bucket((int)pos_max);
-        if (bucket < 0) {
+        int b = (n < 2) ? 0 : select_bucket((int)pos_max);
+        if (b < 0) {
             fprintf(stderr, "cudtw_wrapper: position %zu max_len %zu > 2047\n",
                     p, pos_max);
             return -1;
         }
+        buckets[p] = b;
+        if (b > global_bucket) global_bucket = b;
 
-        // Pad this position's sequences to bucket
-        float *h_padded = (float *)calloc(n * bucket, sizeof(float));
-        if (!h_padded) return -1;
-        for (size_t i = 0; i < n; i++) {
-            size_t slen = all_seq_lengths[seq_offset + i];
-            const float *src = all_sequences + (seq_offset + i) * global_max_length;
-            memcpy(h_padded + i * bucket, src, slen * sizeof(float));
-        }
-
-        // Upload subjects
-        float *d_subjects = nullptr, *d_dist = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_subjects, n * bucket * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_dist, n * sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_subjects, h_padded, n * bucket * sizeof(float),
-                              cudaMemcpyHostToDevice));
-
-        float *h_row = new float[n];
-
-        for (size_t i = 0; i < n; i++) {
-            CUDA_CHECK(cudaMemcpyToSymbol(cQuery, h_padded + i * bucket,
-                                          bucket * sizeof(float)));
-
-            bool ok = FullDTW::dist<value_t, index_t>(
-                d_subjects, d_dist, (index_t)n, (index_t)bucket);
-            if (!ok) {
-                free(h_padded); delete[] h_row;
-                cudaFree(d_subjects); cudaFree(d_dist);
-                return -1;
-            }
-            CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaDeviceSynchronize());
-
-            CUDA_CHECK(cudaMemcpy(h_row, d_dist, n * sizeof(float),
-                                  cudaMemcpyDeviceToHost));
-
-            for (size_t j = 0; j < n; j++) {
-                float d = (i == j) ? 0.0f : sqrtf(h_row[j]);
-                out_distances[out_offset + i * n + j] = d;
-            }
-        }
-
-        free(h_padded);
-        delete[] h_row;
-        cudaFree(d_subjects);
-        cudaFree(d_dist);
-
-        out_offset += n * n;
-        seq_offset += n;
+        total_seqs += n;
+        total_out  += n * n;
     }
 
+    // Degenerate: everything was n<2 — just zero the output and return.
+    if (global_bucket == 0) {
+        memset(out_distances, 0, total_out * sizeof(float));
+        return 0;
+    }
+
+    // Pack all sequences into [total_seqs * global_bucket] host buffer
+    // (global_bucket keeps indexing uniform; wasted tail is small — worst
+    //  case 2× when a chunk mixes very short and very long positions).
+    float *h_padded = (float *)calloc(total_seqs * (size_t)global_bucket,
+                                      sizeof(float));
+    if (!h_padded) return -1;
+
+    for (size_t p = 0; p < num_positions; p++) {
+        size_t n = position_seq_counts[p];
+        size_t off = seq_offsets[p];
+        for (size_t i = 0; i < n; i++) {
+            size_t slen = all_seq_lengths[off + i];
+            const float *src = all_sequences + (off + i) * global_max_length;
+            memcpy(h_padded + (off + i) * (size_t)global_bucket,
+                   src, slen * sizeof(float));
+        }
+    }
+
+    float *d_subjects = nullptr, *d_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_subjects,
+                          total_seqs * (size_t)global_bucket * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out, total_out * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_subjects, h_padded,
+                          total_seqs * (size_t)global_bucket * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    free(h_padded);
+
+    // Zero the output buffer so positions with n<2 leave a valid zero block.
+    CUDA_CHECK(cudaMemsetAsync(d_out, 0, total_out * sizeof(float), 0));
+
+    int ns = num_cuda_streams > 0 ? num_cuda_streams : 16;
+    std::vector<cudaStream_t> streams(ns);
+    for (int s = 0; s < ns; s++)
+        CUDA_CHECK(cudaStreamCreate(&streams[s]));
+
+    // Dispatch: every (position, row) pair hits a stream round-robin.
+    int launch_err = 0;
+    size_t launch_counter = 0;
+    for (size_t p = 0; p < num_positions && launch_err == 0; p++) {
+        size_t n = position_seq_counts[p];
+        if (n < 2) continue;
+        int bucket = buckets[p];
+        size_t seq_off = seq_offsets[p];
+        size_t out_off = out_offsets[p];
+        for (size_t i = 0; i < n; i++) {
+            cudaStream_t s = streams[launch_counter % (size_t)ns];
+            launch_counter++;
+            bool ok = FullDTW::dist<value_t, index_t>(
+                d_subjects + (seq_off + i) * (size_t)global_bucket,
+                d_subjects +  seq_off      * (size_t)global_bucket,
+                d_out      +  out_off      +  i * n,
+                (index_t)n, (index_t)bucket, s);
+            if (!ok) { launch_err = 1; break; }
+        }
+    }
+
+    int rc = launch_err;
+    if (rc == 0 && cudaGetLastError()      != cudaSuccess) rc = -1;
+    if (rc == 0 && cudaDeviceSynchronize() != cudaSuccess) rc = -1;
+
+    for (int s = 0; s < ns; s++) cudaStreamDestroy(streams[s]);
+
+    if (rc != 0) {
+        cudaFree(d_subjects); cudaFree(d_out);
+        return -1;
+    }
+
+    CUDA_CHECK(cudaMemcpy(out_distances, d_out, total_out * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    // Finalize each position block: sqrtf + diagonal zero
+    for (size_t p = 0; p < num_positions; p++) {
+        size_t n = position_seq_counts[p];
+        if (n < 2) continue;
+        finalize_matrix(out_distances + out_offsets[p], n);
+    }
+
+    cudaFree(d_subjects);
+    cudaFree(d_out);
     return 0;
 }
 
 // ==========================================================================
-// Python C API Bindings  (same signatures as dtw_api.cpp)
+// Python C API Bindings
 // ==========================================================================
 
 #include <Python.h>
@@ -382,6 +435,8 @@ int opendba_dtw_multi_position_pairwise(
 #include <numpy/arrayobject.h>
 
 // --- dtw_distance ---
+// Accepts use_open_start / use_open_end as ignored kwargs for backward
+// compat with older Python callers.  cuDTW++ has no open-boundary mode.
 static PyObject *py_dtw_cuda(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyArrayObject *seq1_array = NULL, *seq2_array = NULL;
     int use_open_start = 0, use_open_end = 0;
@@ -392,6 +447,7 @@ static PyObject *py_dtw_cuda(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &PyArray_Type, &seq2_array,
                                      &use_open_start, &use_open_end))
         return NULL;
+    (void)use_open_start; (void)use_open_end;
 
     if (PyArray_NDIM(seq1_array) != 1 || PyArray_NDIM(seq2_array) != 1) {
         PyErr_SetString(PyExc_ValueError, "Input arrays must be 1-dimensional");
@@ -414,8 +470,7 @@ static PyObject *py_dtw_cuda(PyObject *self, PyObject *args, PyObject *kwargs) {
     float *s2 = (float *)PyArray_DATA(seq2_array);
     float distance = 0.0f;
 
-    int rc = opendba_dtw_cuda(s1, (size_t)len1, s2, (size_t)len2,
-                              use_open_start, use_open_end, &distance);
+    int rc = opendba_dtw_cuda(s1, (size_t)len1, s2, (size_t)len2, &distance);
     if (rc != 0) {
         PyErr_SetString(PyExc_RuntimeError, "CUDA DTW computation failed");
         return NULL;
@@ -433,6 +488,7 @@ static PyObject *py_dtw_pairwise(PyObject *self, PyObject *args, PyObject *kwarg
                                      &PyArray_Type, &seq_array,
                                      &use_open_start, &use_open_end))
         return NULL;
+    (void)use_open_start; (void)use_open_end;
 
     if (PyArray_NDIM(seq_array) != 2) {
         PyErr_SetString(PyExc_ValueError, "sequences must be 2D");
@@ -456,7 +512,6 @@ static PyObject *py_dtw_pairwise(PyObject *self, PyObject *args, PyObject *kwarg
 
     int rc = opendba_dtw_pairwise_batch(
         (float *)PyArray_DATA(seq_array), N, L,
-        use_open_start, use_open_end,
         (float *)PyArray_DATA(out));
     if (rc != 0) {
         Py_DECREF(out);
@@ -477,6 +532,7 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
                                      &PyArray_Type, &len_array,
                                      &use_open_start, &use_open_end))
         return NULL;
+    (void)use_open_start; (void)use_open_end;
 
     if (PyArray_NDIM(seq_array) != 2) {
         PyErr_SetString(PyExc_ValueError, "sequences must be 2D");
@@ -529,7 +585,6 @@ static PyObject *py_dtw_pairwise_varlen(PyObject *self, PyObject *args, PyObject
 
     int rc = opendba_dtw_pairwise_varlen(
         (float *)PyArray_DATA(seq_array), h_lengths, N, max_len,
-        use_open_start, use_open_end,
         (float *)PyArray_DATA(out));
     delete[] h_lengths;
 
@@ -560,6 +615,7 @@ static PyObject *py_dtw_multi_position_pairwise(
                                      &use_open_start, &use_open_end,
                                      &num_cuda_streams, &device_id))
         return NULL;
+    (void)use_open_start; (void)use_open_end;
 
     if (PyArray_NDIM(seq_array) != 2) {
         PyErr_SetString(PyExc_ValueError, "sequences must be 2D"); return NULL;
@@ -584,7 +640,6 @@ static PyObject *py_dtw_multi_position_pairwise(
         return NULL;
     }
 
-    // Convert lengths
     size_t *h_lengths = new size_t[total_seqs];
     for (size_t i = 0; i < total_seqs; i++) {
         long long val;
@@ -605,7 +660,6 @@ static PyObject *py_dtw_multi_position_pairwise(
         h_lengths[i] = (size_t)val;
     }
 
-    // Convert counts
     size_t *h_counts = new size_t[num_pos];
     size_t check_total = 0;
     for (size_t p = 0; p < num_pos; p++) {
@@ -630,7 +684,6 @@ static PyObject *py_dtw_multi_position_pairwise(
         return NULL;
     }
 
-    // Compute output size
     size_t total_out = 0;
     for (size_t p = 0; p < num_pos; p++)
         total_out += h_counts[p] * h_counts[p];
@@ -641,7 +694,7 @@ static PyObject *py_dtw_multi_position_pairwise(
 
     int rc = opendba_dtw_multi_position_pairwise(
         (float *)PyArray_DATA(seq_array), h_lengths, h_counts,
-        num_pos, gml, use_open_start, use_open_end,
+        num_pos, gml,
         (float *)PyArray_DATA(out), num_cuda_streams, device_id);
 
     delete[] h_lengths;
@@ -696,8 +749,8 @@ PyMODINIT_FUNC PyInit__cuda_dtw(void) {
     if (!m) return NULL;
 
     PyModule_AddIntConstant(m, "__version_major__", 0);
-    PyModule_AddIntConstant(m, "__version_minor__", 2);
-    PyModule_AddStringConstant(m, "__version__", "0.2.0-cudtw");
+    PyModule_AddIntConstant(m, "__version_minor__", 3);
+    PyModule_AddStringConstant(m, "__version__", "0.3.0-cudtw");
 
     return m;
 }

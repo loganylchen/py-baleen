@@ -71,6 +71,14 @@ def backend() -> str:
 # ---------------------------------------------------------------------------
 
 _MAX_CUDTW_LEN = 2047
+_BUCKETS = (127, 255, 511, 1023, 2047)
+
+
+def _select_bucket(n: int) -> int:
+    for b in _BUCKETS:
+        if n <= b:
+            return b
+    return _BUCKETS[-1]  # caller is expected to resample before reaching here
 
 
 def _resample_signal(sig, target_len):
@@ -435,18 +443,23 @@ def is_available() -> bool:
 
 
 def estimate_gpu_memory(position_signals: list[list[np.ndarray]]) -> int:
-    """Estimate GPU memory bytes for a multi-position pairwise DTW call."""
+    """Estimate GPU memory bytes for a multi-position pairwise DTW call.
+
+    The cuDTW++ wrapper allocates:
+      - d_subjects: total_seqs * global_bucket * 4 bytes (doubles as query source)
+      - d_out:      sum(n_p^2) * 4 bytes (float32 squared cost)
+    No cost matrix is allocated (cuDTW++ accumulates in registers).
+    """
     total_seqs = sum(len(ps) for ps in position_signals)
     max_len = max(len(s) for ps in position_signals for s in ps)
+    bucket = _select_bucket(max_len)
 
-    input_bytes = total_seqs * max_len * 4
-    lengths_bytes = total_seqs * 8
-    output_bytes = sum(len(ps) ** 2 for ps in position_signals) * 8
-    total_pairs = sum(len(ps) * (len(ps) - 1) // 2 for ps in position_signals)
-    cost_bytes = total_pairs * max_len * 2 * 4
+    input_bytes   = total_seqs * bucket * 4
+    output_bytes  = sum(len(ps) ** 2 for ps in position_signals) * 4
+    lengths_bytes = total_seqs * 8  # host-side h_lengths array
 
-    total = input_bytes + lengths_bytes + output_bytes + cost_bytes
-    return int(total * 1.2)
+    total = input_bytes + output_bytes + lengths_bytes
+    return int(total * 1.2)  # 20% headroom for stream/kernel overhead
 
 
 def get_device_count() -> int:

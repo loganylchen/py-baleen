@@ -3,7 +3,7 @@
 
 // Simplified cuDTW++ dispatcher for baleen.
 // Only database-mode (query_type==0), non-subwarp kernels.
-// cQuery[] must be populated via cudaMemcpyToSymbol before calling dist().
+// Query is passed as a global-memory pointer (no constant memory).
 
 #include "./kernels/SHFL_FULLDTW_127.cuh"
 #include "./kernels/SHFL_FULLDTW_255.cuh"
@@ -16,6 +16,7 @@ namespace FullDTW {
 template <typename value_t, typename index_t>
 __host__
 bool dist(
+    const value_t *Query,
     value_t *Subject,
     value_t *Dist,
     index_t num_entries,
@@ -27,27 +28,27 @@ bool dist(
 
     if (num_features == 127) {
         shfl_FullDTW_127<<<grid, block, 0, stream>>>(
-            Subject, Dist, num_entries, num_features);
+            Query, Subject, Dist, num_entries, num_features);
         return true;
     }
     if (num_features == 255) {
         shfl_FullDTW_255<<<grid, block, 0, stream>>>(
-            Subject, Dist, num_entries, num_features);
+            Query, Subject, Dist, num_entries, num_features);
         return true;
     }
     if (num_features == 511) {
         shfl_FullDTW_511<<<grid, block, 0, stream>>>(
-            Subject, Dist, num_entries, num_features);
+            Query, Subject, Dist, num_entries, num_features);
         return true;
     }
     if (num_features == 1023) {
         shfl_FullDTW_1023<<<grid, block, 0, stream>>>(
-            Subject, Dist, num_entries, num_features);
+            Query, Subject, Dist, num_entries, num_features);
         return true;
     }
     if (num_features == 2047) {
         shfl_FullDTW_2047<<<grid, block, 0, stream>>>(
-            Subject, Dist, num_entries, num_features);
+            Query, Subject, Dist, num_entries, num_features);
         return true;
     }
 

@@ -7,6 +7,7 @@ template <
     typename index_t,
     typename value_t> __global__
 void shfl_FullDTW_2047(
+    const value_t * Query,
     value_t * Subject,
     value_t * Dist,
     index_t num_entries,
@@ -204,7 +205,7 @@ void shfl_FullDTW_2047(
         //if (blid == 0) Dist[2*l+1] = subject_value1;
     index_t counter = 1;
     value_t query_value = INFINITY;
-    value_t new_query_value = cQuery[thid];
+    value_t new_query_value = Query[thid];
     if (thid == 0) query_value = new_query_value;
     if (thid == 0) penalty_here1 = 0; // (query_value - subject_value0)*(query_value - subject_value0);
     new_query_value = __shfl_down_sync(0xFFFFFFFF, new_query_value, 1, 32);
@@ -496,7 +497,7 @@ void shfl_FullDTW_2047(
             //if (blid == 0 && iter == 0) Dist[64*(k-1)+2*thid] = penalty_here0;
             //if (blid == 0 && iter == 0) Dist[64*(k-1)+2*thid+1] = penalty_here1;
 
-        if (counter%32 == 0) new_query_value = cQuery[i+2*thid-1];
+        if (counter%32 == 0) new_query_value = Query[i+2*thid-1];
         query_value = __shfl_up_sync(0xFFFFFFFF, query_value, 1, 32);
         if (thid == 0) query_value = new_query_value;
         new_query_value = __shfl_down_sync(0xFFFFFFFF, new_query_value, 1, 32);
