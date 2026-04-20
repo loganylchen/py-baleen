@@ -113,6 +113,16 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > size.** A thin slate chevron connector (1 pt) sits at mid-height
 > between adjacent panels indicating data flow.
 >
+> **Relative panel sizing (important).** The visual hierarchy of the
+> figure is: **D (largest, algorithmic centrepiece) > E (tall stacked
+> output) > A ≈ C (equal, modest) > F (narrow side column) > B
+> (smallest, quiet preprocessing)**. Panels B and C should together
+> occupy roughly the same horizontal real estate as panel D alone;
+> do not over-render them with dense motifs or accent colour. Panel
+> B should read as a subdued preprocessing step; panel C should carry
+> exactly **one** algorithmic motif (the wavefront band) and nothing
+> more.
+>
 > **Panel A — Single-molecule input.** Bold uppercase "A" label in the
 > top-left corner (18-pt 700-weight, on light-slate rounded square).
 > Two stacked nanopore cross-sections
@@ -126,42 +136,37 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > and a small "ref" label. A tiny 9-pt caption underneath:
 > *"direct-RNA nanopore sequencing — paired native vs IVT control"*.
 >
-> **Panel B — Signal extraction.** Bold uppercase "B" label in the
-> top-left corner (18-pt 700-weight, on light-slate rounded square).
-> A rectangular matrix where each row is a read and each column is a
-> reference k-mer (four-letter cells A / C / G / U labelled at the top).
-> Inside each cell, a miniature waveform glyph representing the
-> ionic-current segment assigned to that k-mer. Two such matrices
-> side-by-side, teal-tinted (native) and coral-tinted (IVT). A tiny
-> 8-pt attribution "via f5c eventalign" sits unobtrusively below the
-> matrices in grey — **this panel is a preprocessing / signal-extraction
-> step, not a core algorithmic contribution, so render it visually
-> subordinate to panels C–F (roughly 70 % of their visual weight, no
-> accent colors beyond the teal/coral tint)**. A 9-pt italic caption
-> underneath: *"per-read ionic-current signals grouped by reference
-> position"*.
+> **Panel B — Signal extraction** *(quiet preprocessing step)*. Bold
+> uppercase "B" label in the top-left corner (18-pt 700-weight, on
+> light-slate rounded square). Render the **narrowest** panel in the
+> figure (~70 % the width and height of its neighbours, no accent
+> colours beyond the teal/coral tint, no thick outlines). A single
+> compact read × k-mer matrix in teal tint with a faint coral copy
+> offset behind it (suggesting "native + IVT" without two full matrices
+> side-by-side); cells filled with a tiny waveform glyph. A 7-pt grey
+> attribution "via f5c eventalign" below; a 9-pt italic caption:
+> *"per-read ionic-current signals grouped by reference position"*.
 >
-> **Panel C — Batched CUDA pairwise DTW.** Bold uppercase "C" label in
-> the top-left corner (18-pt 700-weight, on light-slate rounded square)
-> — this is the first **core algorithmic** panel, so visual weight is
-> higher than panel B. At the top, three overlapping
-> isometric square cost matrices (to imply many positions processed
-> together), each rendered with a **bright diagonal wavefront band**
-> (a teal → white gradient running along the anti-diagonal, signaling
-> the rolling three-diagonal shared-memory sweep). Below the matrices,
-> a compact stack of three symmetric distance matrices in a single-hue
-> blue ramp (#E8F0F4 → #1F4E5F), diagonal zero visible. To the right of
-> the matrices, a small GPU-chip pictogram with **16 horizontal stream
-> lanes** emanating from its right side (each lane a thin coral-to-teal
-> gradient line), denoting concurrent CUDA streams. A tiny italic
-> 9-pt caption below: *"one thread block per read pair, 16 CUDA streams,
-> entire contig in one kernel launch"*.
+> **Panel C — Batched CUDA pairwise DTW** *(compact; one innovation
+> motif)*. Bold uppercase "C" label in the top-left corner (18-pt
+> 700-weight, on light-slate rounded square). Render at the **same
+> visual weight as panel A** (not larger) — smaller than panel D. A
+> single isometric cost matrix with a **bright teal → white diagonal
+> wavefront band** (the rolling three-diagonal shared-memory sweep);
+> a small symmetric distance matrix (single-hue blue ramp, #E8F0F4 →
+> #1F4E5F) tucked below it. To the right, a minimal GPU-chip
+> pictogram with a handful of thin parallel stream lanes (suggesting
+> concurrent CUDA streams without dominating the panel). A 9-pt
+> italic caption underneath: *"wavefront-parallel DTW · entire contig
+> in one kernel launch"*. **Visual priority: the wavefront band is the
+> only star of this panel — keep everything else quiet.**
 >
-> **Panel D — Hierarchical modification calling (V1 · V2 · V3).** Bold
-> uppercase "D" label in the top-left corner (18-pt 700-weight, on
-> light-slate rounded square) — this is the **densest core algorithmic**
-> panel, so it occupies the largest visual area. A
-> rounded cream (#F5F1EA) sub-panel spanning ~30 % of the figure width,
+> **Panel D — Hierarchical modification calling (V1 · V2 · V3)** *(the
+> algorithmic centrepiece — largest panel)*. Bold uppercase "D" label
+> in the top-left corner (18-pt 700-weight, on light-slate rounded
+> square). A rounded cream (#F5F1EA) sub-panel spanning ~32–35 % of
+> the figure width — the **dominant panel of the figure**, clearly
+> wider than panels B and C combined,
 > divided into three horizontally stacked sub-blocks of equal height,
 > each with its own mini-title in 10-pt 600-weight:
 >
@@ -317,18 +322,20 @@ combinatorial analysis lives in a separate figure 2.
 > (upper teal "native", lower coral "IVT"), each with a short noisy
 > ionic-current trace; slate reference bar underneath.
 >
-> **(B) Signal extraction** — two read × k-mer matrices (teal-tinted
-> native, coral-tinted IVT) filled with miniature waveform glyphs, with
-> a small 8-pt grey attribution *"via f5c eventalign"* below. This
-> panel is preprocessing, **rendered visually subordinate to panels
-> C–E** (~70 % of their visual weight, no accent colors beyond the
-> tint).
+> **(B) Signal extraction** *(quiet preprocessing, smallest panel)* —
+> a single compact teal-tinted read × k-mer matrix with a faint coral
+> ghost copy offset behind it and a 7-pt grey *"via f5c eventalign"*
+> attribution. No accent colours beyond the tint, no thick outlines.
 >
-> **(C) Batched CUDA pairwise DTW** — three overlapping isometric cost
-> matrices with a bright teal diagonal wavefront band, below them a
-> stack of blue-ramp symmetric distance matrices; to the right a GPU
-> chip pictogram with 16 stream lanes; 9-pt italic caption
-> *"one block per read pair · 16 CUDA streams · single-launch"*.
+> **(C) Batched CUDA pairwise DTW** *(compact; one motif)* — a single
+> isometric cost matrix with a bright teal diagonal wavefront band,
+> a small blue-ramp symmetric distance matrix tucked below, and a
+> minimal GPU-chip pictogram with a few thin parallel stream lanes
+> to the right. Same visual weight as panel A, smaller than panel D.
+> 9-pt italic caption *"wavefront-parallel DTW · single kernel launch"*.
+>
+> **Sizing:** D > E > A ≈ C > B. Panels B and C together occupy
+> roughly the same width as D alone.
 >
 > **(D) Hierarchical calling — V1 · V2 · V3** (bold uppercase "D" label
 > in the top-left corner, 18-pt 700-weight on light-slate rounded
@@ -383,12 +390,13 @@ combinatorial analysis lives in a separate figure 2.
 > letter labels A–E (18-pt 700-weight) in each top-left corner,
 > separated by thin 0.5-pt slate vertical rules**.
 > **(A)** Native + IVT nanopores threading RNA with ionic-current
-> traces (teal / coral). **(B)** Signal extraction — two read × k-mer
-> waveform matrices (teal / coral tint), tiny grey 8-pt attribution
-> *"via f5c eventalign"*; rendered subordinate to panels C–E (~70 %
-> visual weight). **(C)** Three overlapping cost matrices with a teal
-> diagonal wavefront band + blue-ramp symmetric distance heatmaps +
-> GPU chip with 16 stream lanes, "batched CUDA DTW".
+> traces (teal / coral). **(B, smallest panel)** Signal extraction —
+> one compact read × k-mer waveform matrix (teal tint, faint coral
+> ghost), tiny grey 7-pt *"via f5c eventalign"* attribution, quiet
+> preprocessing step. **(C, compact)** Single isometric cost matrix
+> with a bright teal diagonal wavefront band + a small blue-ramp
+> distance matrix + a minimal GPU chip with a few stream lanes; one
+> motif (the wavefront) carries the panel.
 > **(D)** Cream panel with three sub-blocks: V1 coverage-controlled
 > shrinkage funnel (position→local→global) ending in a teal
 > `Beta(α₀,β₀)`; V2 pinned-coral null + learnable-teal alternative
@@ -404,7 +412,8 @@ combinatorial analysis lives in a separate figure 2.
 > teal #2F8F9D / coral #E7734A / warm red #B33A3A / slate / cream /
 > white. Helvetica / Inter, 1 pt lines, no shadows, publication-ready,
 > algorithmic motifs (wavefront, funnel, anchor, gap-aware chain,
-> F/B arcs, reference-anchored posterior stack) preserved.
+> F/B arcs, reference-anchored posterior stack) preserved. Panel
+> sizing D > E > A ≈ C > B; D is the algorithmic centrepiece.
 
 ---
 
@@ -418,13 +427,13 @@ combinatorial analysis lives in a separate figure 2.
 > thin 0.5-pt slate horizontal rules**.
 > **(A) Input** — paired teal-native / coral-IVT pores with
 > ionic-current traces and a reference bar.
-> **(B) Signal extraction** — two read × k-mer waveform matrices
-> (teal / coral tint) with a small 8-pt grey attribution *"via f5c
-> eventalign"*; rendered visually subordinate to panels C–E (~70 %
-> their visual weight).
-> **(C) Batched CUDA DTW** — overlapping cost matrices with diagonal
-> wavefront band, blue-ramp distance matrices, GPU chip with 16
-> stream lanes; caption *"entire contig in one kernel launch"*.
+> **(B, smallest) Signal extraction** — one compact teal read × k-mer
+> waveform matrix with a faint coral ghost copy, 7-pt grey *"via f5c
+> eventalign"* attribution; quiet preprocessing step.
+> **(C, compact) Batched CUDA DTW** — one isometric cost matrix with
+> a bright diagonal wavefront band, a small blue-ramp distance matrix
+> tucked below, a minimal GPU chip with a few stream lanes; caption
+> *"wavefront-parallel · single kernel launch"*.
 > **(D) V1 · V2 · V3 in a cream panel** — V1 coverage-adaptive
 > three-level shrinkage funnel (position → local → global) with a
 > coverage dial; V2 pinned-coral null + learnable-teal alternative
@@ -450,12 +459,14 @@ combinatorial analysis lives in a separate figure 2.
 > Clean *Nature Methods*-style flat-vector workflow, 2.5:1 on white,
 > teal/coral/slate palette, **five panels each marked by a bold
 > uppercase letter A–E (18-pt 700-weight) in the top-left corner,
-> separated by thin slate vertical rules**: (A) native+IVT nanopores
-> with ionic-current traces; (B) signal-extraction read × k-mer
-> waveform matrices (tiny grey "via f5c eventalign" attribution,
-> rendered ~70 % weight as a preprocessing step); (C) batched
-> CUDA DTW with wavefront-diagonal cost matrices, blue-ramp distance
-> heatmaps, and a GPU chip with 16 stream lanes; (D) cream panel with
+> separated by thin slate vertical rules** (sizing D > E > A ≈ C > B;
+> D dominates, B is smallest): (A) native+IVT nanopores
+> with ionic-current traces; (B, smallest, quiet) one compact
+> read × k-mer waveform matrix with a faint coral ghost and a tiny
+> grey "via f5c eventalign" attribution; (C, compact, one motif)
+> a single isometric cost matrix with a diagonal wavefront band,
+> a small blue-ramp distance matrix, and a minimal GPU chip with
+> a few stream lanes; (D) cream panel with
 > V1 coverage-adaptive three-level shrinkage funnel, V2 pinned-null
 > + learnable-alt densities with a smooth sigmoid soft-gate and EM
 > convergence inset, V3 five-node 2-state HMM chain with gap-labelled
