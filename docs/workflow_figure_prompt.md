@@ -199,8 +199,126 @@ hand-drawn sketch, watermark, JPEG artifacts, cluttered composition
 
 ---
 
+## Single-read combinatorial analysis (downstream)
+
+Because Baleen emits per-read modification calls in standard mod-BAM
+(`MM:Z` / `ML:B:C` tags), two or more modifications can be **phased on the
+same molecule**. This unlocks analyses that bulk / ensemble methods cannot
+resolve:
+
+| Observation | Interpretation |
+|-------------|----------------|
+| Mod at *i* and mod at *j* co-occur on the same read more often than expected under independence | **Co-deposition** — the two sites are modified together (shared writer, structural co-dependency, or co-regulation) |
+| Mod at *i* and mod at *j* co-occur less often than expected | **Mutual exclusion** — the sites compete (writer / eraser trade-off, or allele/isoform-specific modification) |
+| Independence (log-odds ≈ 0) | Sites are modified independently — bulk stoichiometry is sufficient |
+
+Baleen's per-read output supports these readouts directly (e.g. via
+`modkit extract`, or by loading the BAM with `load_read_results()` and
+computing Fisher / log-odds / phi-coefficient contingency statistics
+over any pair or set of sites).
+
+### Prompt E — Downstream combinatorial figure (standalone)
+
+Use this for a dedicated figure that showcases the single-molecule
+advantage of the Baleen output. Pair it with **Prompt A** as a
+two-figure manuscript story (pipeline → biology).
+
+> **Prompt:**
+> A publication-quality scientific figure titled "Single-molecule
+> combinatorial modification analysis", single horizontal panel at
+> 2.5:1, pure white background, flat vector illustration in
+> *Nature Methods* style. Four sub-panels labelled a, b, c, d
+> (lowercase, 600-weight, bottom-left), connected only by visual flow
+> (no arrows). Palette: teal #2F8F9D for modified, light slate #C6CCD1
+> for unmodified, coral #E7734A for "co-occurring" accent, warm red
+> #B33A3A for "mutually exclusive" accent, neutral slate #2F3E46 for
+> skeletons, white background.
+>
+> **Sub-panel a — Per-read evidence.** A stack of ~12 horizontal read
+> tracks, each a thin gray line representing one read, with three
+> candidate modification sites at columns i, j, k (vertical dashed
+> guides). At each site, a filled circle: teal if modified, light
+> slate if unmodified. Some reads carry both i and j (teal at both),
+> some carry only i, some only j, some neither. Tiny axis tick marks
+> and "read 1 … read 12" labels in 8-pt gray. Title "per-read
+> modification calls (mod-BAM)" in 10-pt 600-weight.
+>
+> **Sub-panel b — 2 × 2 contingency.** A compact 2 × 2 grid showing
+> joint counts for sites i and j: rows "i mod / i unmod", columns
+> "j mod / j unmod". Cell shading uses a single-hue teal ramp
+> (#E8F0F4 → #2F8F9D), darker = higher count. A small Fisher
+> p-value / log-odds value annotated below the grid in 9-pt italic.
+>
+> **Sub-panel c — Co-occurrence vs mutual exclusion heatmap.** A
+> square symmetric heatmap over ~10 candidate sites (rows and columns
+> labelled by position), with a diverging palette: warm red
+> (#B33A3A) for negative log-odds (mutual exclusion), white at zero,
+> coral (#E7734A) for positive log-odds (co-occurrence). Diagonal
+> masked in light gray. A thin colorbar on the right labelled
+> "log-odds ratio (reads)". Title "pairwise co-deposition map".
+>
+> **Sub-panel d — Stoichiometric breakdown.** Four vertical bars
+> giving the fraction of reads in each joint class: "both modified"
+> (teal), "only i" (teal-tinted 60 %), "only j" (teal-tinted 30 %),
+> "neither" (light slate). Above the bars, a small schematic of
+> three molecule cartoons labelled "co-deposited", "exclusive",
+> "independent", each with contrasting dot patterns. A tiny caption
+> "bulk-averaged stoichiometry cannot distinguish these cases" in
+> 9-pt italic, slate.
+>
+> Typography throughout: Helvetica Neue or Inter, black #111,
+> lowercase axis labels, title case for sub-panel titles.
+> Line weight 1 pt. No drop shadows, no gradients outside the two
+> named heatmap ramps. Generous 15 % gutters between sub-panels.
+> Overall aesthetic: editorial, precise, minimal, publication-ready.
+
+### Prompt E-short — compact one-paragraph version
+
+> Flat vector *Nature Methods*-style figure, 2.5:1 landscape, white
+> background, four sub-panels a–d illustrating single-molecule
+> combinatorial modification analysis from per-read mod-BAM output.
+> (a) Stack of ~12 horizontal read tracks with teal-filled circles
+> at modified sites, light-slate at unmodified sites, across three
+> candidate positions i, j, k (vertical dashed guides), titled
+> "per-read modification calls (mod-BAM)". (b) Compact 2×2
+> contingency grid for sites i and j with teal-ramp shading and a
+> Fisher p-value / log-odds annotation. (c) Square symmetric
+> pairwise heatmap over ~10 sites, diverging palette (warm red
+> #B33A3A for mutual exclusion, white at zero, coral #E7734A for
+> co-occurrence), colorbar labelled "log-odds ratio", title
+> "pairwise co-deposition map". (d) Four stacked/vertical bars
+> showing fractions of reads in "both", "only i", "only j",
+> "neither" classes, with three tiny molecule schematics labelled
+> "co-deposited / exclusive / independent" above, and a small
+> italic note "bulk-averaged stoichiometry cannot distinguish
+> these cases". Palette: teal #2F8F9D, warm red #B33A3A, coral
+> #E7734A, slate #2F3E46, light slate #C6CCD1, white. Helvetica /
+> Inter, 1 pt lines, no drop shadows, no gradients except the named
+> heatmap ramps. Publication-ready, minimal, editorial.
+
+### Optional extension to Prompt A
+
+If you want a **six-panel combined figure** (pipeline + biology in
+one image), append the following block to the end of Prompt A to add
+a panel `f` on the far right:
+
+> **Stage f — Single-molecule combinatorial readout.** A vertical
+> narrow sub-panel on the far right: above, a mini stack of five
+> horizontal read tracks with teal/slate modification circles at two
+> candidate sites; below, a compact 2×2 co-occurrence grid with a
+> single log-odds annotation. Labelled "combinatorial analysis
+> (per-read)" in 10-pt 600-weight, with a small italic caption
+> "co-deposition vs mutual exclusion" in 9-pt slate.
+
+Widen the overall aspect ratio from 2.5:1 to **3:1** when using the
+six-panel variant.
+
+---
+
 ## Reuse
 
 Copy any block above verbatim. Treat **Prompt A** as canonical for the
 manuscript figure 1; **Prompt B** for rapid iteration; **Prompt C** for
-poster/supplementary; **Prompt D** for prompt-budget-constrained tools.
+poster/supplementary; **Prompt D** for prompt-budget-constrained tools;
+**Prompt E** for a dedicated "biology" companion figure showcasing the
+single-molecule combinatorial advantage.
