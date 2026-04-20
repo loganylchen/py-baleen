@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 import tempfile
 import time
-from typing import Optional, Protocol, Union, cast
+from typing import Literal, Optional, Protocol, Union, cast
 
 import numpy as np
 
@@ -285,6 +285,7 @@ def filter_contigs(
     ivt_stats: dict[str, ContigStats],
     *,
     min_depth: float = 15.0,
+    depth_mode: Literal["mean_coverage", "read_count"] = "mean_coverage",
 ) -> tuple[list[str], list[ContigFilterResult]]:
     """Filter contigs using presence, mapped-read, and depth constraints.
 
@@ -295,13 +296,27 @@ def filter_contigs(
     ivt_stats : dict of str to ContigStats
         Per-contig stats computed from IVT BAM.
     min_depth : float, optional
-        Minimum mean depth required in each dataset.
+        Minimum depth metric required in each dataset. Interpretation depends
+        on ``depth_mode``.
+    depth_mode : {"mean_coverage", "read_count"}, optional
+        How ``min_depth`` is interpreted.
+        ``"mean_coverage"`` (default) requires ``ContigStats.mean_depth`` —
+        the per-base coverage averaged over every position of the contig
+        (including zero-coverage positions) — to be at least ``min_depth``.
+        ``"read_count"`` requires ``ContigStats.mapped_reads`` to be at least
+        ``min_depth`` instead; useful when a contig has localised high
+        coverage but long zero-coverage stretches that would otherwise
+        disqualify it under the mean-coverage criterion.
 
     Returns
     -------
     tuple[list[str], list[ContigFilterResult]]
         Passed contig names (sorted) and filter results for all contigs.
     """
+    if depth_mode not in ("mean_coverage", "read_count"):
+        raise ValueError(
+            f"depth_mode must be 'mean_coverage' or 'read_count', got {depth_mode!r}"
+        )
     all_contigs = sorted(set(native_stats) | set(ivt_stats))
     results: list[ContigFilterResult] = []
     passed: list[str] = []
@@ -358,8 +373,15 @@ def filter_contigs(
             )
             continue
 
-        native_low = native.mean_depth < min_depth
-        ivt_low = ivt.mean_depth < min_depth
+        if depth_mode == "read_count":
+            native_metric: float = float(native.mapped_reads)
+            ivt_metric: float = float(ivt.mapped_reads)
+        else:  # "mean_coverage"
+            native_metric = native.mean_depth
+            ivt_metric = ivt.mean_depth
+
+        native_low = native_metric < min_depth
+        ivt_low = ivt_metric < min_depth
         if native_low and ivt_low:
             reason = FilterReason.LOW_DEPTH_BOTH
         elif native_low:
@@ -385,10 +407,11 @@ def filter_contigs(
 
     passed.sort()
     logger.info(
-        "%d/%d contigs passed filtering (min_depth=%s)",
+        "%d/%d contigs passed filtering (min_depth=%s, depth_mode=%s)",
         len(passed),
         len(all_contigs),
         min_depth,
+        depth_mode,
     )
     return passed, results
 

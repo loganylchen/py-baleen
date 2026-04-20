@@ -279,6 +279,52 @@ class TestFilterContigs:
         passed, _ = filter_contigs(native, ivt, min_depth=5.0)
         assert passed == ["ctg1"]
 
+    def test_depth_mode_read_count_passes_hotspot_contig(self):
+        # Contig with many reads but low mean coverage (hotspot-like).
+        native = {"ctg1": ContigStats("ctg1", 100, 2.0)}
+        ivt = {"ctg1": ContigStats("ctg1", 120, 2.5)}
+
+        # Default mean_coverage mode: rejected by low mean depth.
+        _, results_default = filter_contigs(native, ivt, min_depth=15.0)
+        assert results_default[0].reason == FilterReason.LOW_DEPTH_BOTH
+
+        # read_count mode with threshold 50: passes on total read count.
+        passed, results = filter_contigs(
+            native, ivt, min_depth=50.0, depth_mode="read_count",
+        )
+        assert passed == ["ctg1"]
+        assert results[0].reason == FilterReason.PASSED
+
+    def test_depth_mode_read_count_rejects_low_read_contig(self):
+        # High mean coverage but few reads.
+        native = {"ctg1": ContigStats("ctg1", 3, 30.0)}
+        ivt = {"ctg1": ContigStats("ctg1", 4, 30.0)}
+
+        # Default mean_coverage mode: passes on high mean depth.
+        passed_default, _ = filter_contigs(native, ivt, min_depth=15.0)
+        assert passed_default == ["ctg1"]
+
+        # read_count mode with threshold 10: rejected for low read count.
+        _, results = filter_contigs(
+            native, ivt, min_depth=10.0, depth_mode="read_count",
+        )
+        assert results[0].reason == FilterReason.LOW_DEPTH_BOTH
+
+    def test_depth_mode_read_count_asymmetric(self):
+        # Only IVT falls below read-count threshold.
+        native = {"ctg1": ContigStats("ctg1", 100, 2.0)}
+        ivt = {"ctg1": ContigStats("ctg1", 5, 2.5)}
+        _, results = filter_contigs(
+            native, ivt, min_depth=50.0, depth_mode="read_count",
+        )
+        assert results[0].reason == FilterReason.LOW_DEPTH_IVT
+
+    def test_depth_mode_invalid_raises(self):
+        native = {"ctg1": ContigStats("ctg1", 5, 20.0)}
+        ivt = {"ctg1": ContigStats("ctg1", 6, 20.0)}
+        with pytest.raises(ValueError, match="depth_mode"):
+            filter_contigs(native, ivt, depth_mode="bogus")  # type: ignore[arg-type]
+
 
 class TestSplitBamContig:
     def test_split_creates_bam(self, tmp_path: Path):

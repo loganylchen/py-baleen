@@ -83,7 +83,19 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     )
     pipe.add_argument(
         "--min-depth", type=int, default=15,
-        help="Minimum read depth per contig (default: 15)",
+        help="Minimum read depth per contig (default: 15). Interpretation "
+             "depends on --depth-mode.",
+    )
+    pipe.add_argument(
+        "--depth-mode",
+        choices=["mean_coverage", "read_count"],
+        default="mean_coverage",
+        help="How --min-depth is interpreted. 'mean_coverage' (default) "
+             "requires the per-base coverage averaged over every position "
+             "of the contig (including zero-coverage positions) to be at "
+             "least --min-depth. 'read_count' requires the total number "
+             "of mapped reads on the contig to be at least --min-depth; "
+             "useful when coverage is concentrated in a localised hotspot.",
     )
     pipe.add_argument(
         "--min-mapq", type=int, default=0,
@@ -297,6 +309,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         ivt_blow5=args.ivt_blow5,
         ref_fasta=args.ref,
         min_depth=args.min_depth,
+        depth_mode=args.depth_mode,
         cuda_devices=cuda_devices,
         padding=args.padding,
         output_dir=output_dir,

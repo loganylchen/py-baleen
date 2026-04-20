@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Optional, Protocol, TypedDict, Union, cast
+from typing import Literal, Optional, Protocol, TypedDict, Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -673,6 +673,7 @@ def run_pipeline(
     ref_fasta: PathLike,
     *,
     min_depth: int = 15,
+    depth_mode: Literal["mean_coverage", "read_count"] = "mean_coverage",
     use_cuda: Optional[bool] = None,
     cuda_devices: Optional[list[int]] = None,
     padding: int = 1,
@@ -699,8 +700,8 @@ def run_pipeline(
     logger.info("  ivt_fastq:    %s", ivt_fastq)
     logger.info("  ivt_blow5:    %s", ivt_blow5)
     logger.info("  ref_fasta:    %s", ref_fasta)
-    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
-                min_depth, use_cuda, rna, padding, threads)
+    logger.info("  min_depth=%d  depth_mode=%s  use_cuda=%s  rna=%s  padding=%d  threads=%d",
+                min_depth, depth_mode, use_cuda, rna, padding, threads)
     logger.info("  min_mapq=%d  primary_only=%s  cuda_streams=%d",
                 min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
@@ -777,11 +778,13 @@ def run_pipeline(
                 len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 4: Contig filtering ----
-    logger.info("[Step 4/6] Filtering contigs (min_depth=%d)...", min_depth)
+    logger.info("[Step 4/6] Filtering contigs (min_depth=%d, depth_mode=%s)...",
+                min_depth, depth_mode)
     passed_contigs, filter_results = _bam.filter_contigs(
         native_stats,
         ivt_stats,
         min_depth=float(min_depth),
+        depth_mode=depth_mode,
     )
     logger.info("[Step 4/6] %d/%d contigs passed filtering",
                 len(passed_contigs), len(filter_results))
@@ -949,6 +952,7 @@ def run_pipeline_streaming(
     ref_fasta: PathLike,
     *,
     min_depth: int = 15,
+    depth_mode: Literal["mean_coverage", "read_count"] = "mean_coverage",
     use_cuda: Optional[bool] = None,
     cuda_devices: Optional[list[int]] = None,
     padding: int = 1,
@@ -1007,8 +1011,8 @@ def run_pipeline_streaming(
     logger.info("  ivt_fastq:    %s", ivt_fastq)
     logger.info("  ivt_blow5:    %s", ivt_blow5)
     logger.info("  ref_fasta:    %s", ref_fasta)
-    logger.info("  min_depth=%d  use_cuda=%s  rna=%s  padding=%d  threads=%d",
-                min_depth, use_cuda, rna, padding, threads)
+    logger.info("  min_depth=%d  depth_mode=%s  use_cuda=%s  rna=%s  padding=%d  threads=%d",
+                min_depth, depth_mode, use_cuda, rna, padding, threads)
     logger.info("  min_mapq=%d  primary_only=%s  cuda_streams=%d",
                 min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
@@ -1065,10 +1069,11 @@ def run_pipeline_streaming(
                 len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 4: Contig filtering ----
-    logger.info("[Step 4/5] Filtering contigs (min_depth=%d)...", min_depth)
+    logger.info("[Step 4/5] Filtering contigs (min_depth=%d, depth_mode=%s)...",
+                min_depth, depth_mode)
     step_t0 = time.perf_counter()
     passed_contigs, filter_results = _bam.filter_contigs(
-        native_stats, ivt_stats, min_depth=float(min_depth),
+        native_stats, ivt_stats, min_depth=float(min_depth), depth_mode=depth_mode,
     )
 
     # Apply target contig filter

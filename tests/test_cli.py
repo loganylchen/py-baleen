@@ -32,6 +32,7 @@ def sample_args_run():
         output_dir="test_output",
         padding=0,
         min_depth=15,
+        depth_mode="mean_coverage",
         min_mapq=0,
         cuda=None,
         no_cuda=False,
@@ -127,6 +128,7 @@ class TestAddRunArgs:
         assert args.native_bam == "n.bam"
         assert args.ref == "r.fa"
         assert args.min_depth == 15  # default
+        assert args.depth_mode == "mean_coverage"  # default
         assert args.cuda is None
         assert args.no_cuda is False
 
@@ -217,6 +219,7 @@ class TestCmdRun:
         assert call_kwargs["native_bam"] == sample_args_run.native_bam
         assert call_kwargs["ref_fasta"] == sample_args_run.ref
         assert call_kwargs["min_depth"] == sample_args_run.min_depth
+        assert call_kwargs["depth_mode"] == sample_args_run.depth_mode
         assert call_kwargs["padding"] == sample_args_run.padding
         assert call_kwargs["min_mapq"] == sample_args_run.min_mapq
 
