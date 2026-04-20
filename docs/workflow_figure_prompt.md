@@ -78,8 +78,15 @@ loses the sophistication, re-inject these hooks one at a time.
   V2 panel) — use them sparingly, one per sub-panel at most.
 - **Iconography**: flat vector, thin stroke, 2-color fills, geometric.
   Pictograms over photoreal.
-- **Composition**: panel letters (a, b, c, …) bottom-left in 600-weight;
-  ~15 % gutters; minimal chevron connectors.
+- **Composition**: every panel is visually demarcated two ways at once —
+  (i) thin slate vertical rules (0.5 pt, `#2F3E46`) separate adjacent
+  panels, and (ii) a **prominent bold uppercase letter label**
+  (A, B, C, …) sits in the **top-left corner** of each panel, rendered
+  in 18-pt **700-weight** Helvetica black on an optional light-slate
+  (`#E4E7EA`) 24 × 24 px rounded square. The letter must be large
+  enough to read at thumbnail size (~ 1/20 of figure height). Minimal
+  thin slate chevron connectors (1 pt) bridge adjacent panels at mid-height.
+  ~15 % gutters between panels.
 - **Resolution targets**: `3000 × 1200 px` (2.5 : 1) landscape five-panel,
   `3600 × 1200 px` (3 : 1) landscape six-panel, `1400 × 2000 px` (7 : 10)
   portrait.
@@ -96,12 +103,19 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > biology pipeline called Baleen, rendered as a single horizontal panel
 > at a 3 : 1 aspect ratio, in a flat vector illustration style
 > reminiscent of *Nature Methods* figure 1. Pure white background, no
-> drop shadows, no skeuomorphic textures. Six stages arranged
-> left-to-right, each separated by a thin slate-gray chevron arrow
-> (1 pt), each stage labelled with a lowercase panel letter
-> (a, b, c, d, e, f) in 600-weight sans-serif bottom-left.
+> drop shadows, no skeuomorphic textures. **Six panels arranged
+> left-to-right, each panel visually demarcated by a thin 0.5-pt slate
+> (#2F3E46) vertical rule separating it from its neighbour, plus a
+> prominent bold uppercase letter label — A, B, C, D, E, F — in the
+> top-left corner of each panel rendered at 18-pt 700-weight black
+> Helvetica, seated inside an optional light-slate (#E4E7EA) 24 × 24 px
+> rounded square so the panel identity is unambiguous even at thumbnail
+> size.** A thin slate chevron connector (1 pt) sits at mid-height
+> between adjacent panels indicating data flow.
 >
-> **Stage a — Single-molecule input.** Two stacked nanopore cross-sections
+> **Panel A — Single-molecule input.** Bold uppercase "A" label in the
+> top-left corner (18-pt 700-weight, on light-slate rounded square).
+> Two stacked nanopore cross-sections
 > (simplified cylindrical pore with protein glyph), a single-stranded
 > RNA molecule threading through each. Upper pore labelled "native RNA"
 > in teal (#2F8F9D); lower pore labelled "IVT control" in coral
@@ -112,16 +126,25 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > and a small "ref" label. A tiny 9-pt caption underneath:
 > *"direct-RNA nanopore sequencing — paired native vs IVT control"*.
 >
-> **Stage b — Event alignment (f5c).** A rectangular matrix where each
-> row is a read and each column is a reference k-mer (four-letter cells
-> A / C / G / U labelled at the top). Inside each cell, a miniature
-> waveform glyph representing the ionic-current segment aligned to that
-> k-mer. Two such matrices side-by-side, teal-tinted (native) and
-> coral-tinted (IVT). A small uppercase label "f5c eventalign" sits
-> above. A 9-pt italic caption underneath:
-> *"per-read signal segmented and aligned to reference k-mers"*.
+> **Panel B — Signal extraction.** Bold uppercase "B" label in the
+> top-left corner (18-pt 700-weight, on light-slate rounded square).
+> A rectangular matrix where each row is a read and each column is a
+> reference k-mer (four-letter cells A / C / G / U labelled at the top).
+> Inside each cell, a miniature waveform glyph representing the
+> ionic-current segment assigned to that k-mer. Two such matrices
+> side-by-side, teal-tinted (native) and coral-tinted (IVT). A tiny
+> 8-pt attribution "via f5c eventalign" sits unobtrusively below the
+> matrices in grey — **this panel is a preprocessing / signal-extraction
+> step, not a core algorithmic contribution, so render it visually
+> subordinate to panels C–F (roughly 70 % of their visual weight, no
+> accent colors beyond the teal/coral tint)**. A 9-pt italic caption
+> underneath: *"per-read ionic-current signals grouped by reference
+> position"*.
 >
-> **Stage c — Batched CUDA pairwise DTW.** At the top, three overlapping
+> **Panel C — Batched CUDA pairwise DTW.** Bold uppercase "C" label in
+> the top-left corner (18-pt 700-weight, on light-slate rounded square)
+> — this is the first **core algorithmic** panel, so visual weight is
+> higher than panel B. At the top, three overlapping
 > isometric square cost matrices (to imply many positions processed
 > together), each rendered with a **bright diagonal wavefront band**
 > (a teal → white gradient running along the anti-diagonal, signaling
@@ -134,8 +157,11 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > 9-pt caption below: *"one thread block per read pair, 16 CUDA streams,
 > entire contig in one kernel launch"*.
 >
-> **Stage d — Hierarchical modification calling (V1 · V2 · V3).** A
-> rounded cream (#F5F1EA) panel spanning ~30 % of the figure width,
+> **Panel D — Hierarchical modification calling (V1 · V2 · V3).** Bold
+> uppercase "D" label in the top-left corner (18-pt 700-weight, on
+> light-slate rounded square) — this is the **densest core algorithmic**
+> panel, so it occupies the largest visual area. A
+> rounded cream (#F5F1EA) sub-panel spanning ~30 % of the figure width,
 > divided into three horizontally stacked sub-blocks of equal height,
 > each with its own mini-title in 10-pt 600-weight:
 >
@@ -184,20 +210,66 @@ combinatorial readout as panel *f*, widening the aspect ratio to 3 : 1.
 > *"per-read trajectory · bit-exact numba JIT · transitions depend on
 > genomic gap"*.
 >
-> **Stage e — Per-site statistical readout.** Top half: a miniature TSV
-> table with columns `contig | pos | mod_ratio | ci_low | ci_high |
-> padj`, three body rows with realistic-looking values (e.g.
-> `ENST…1234 | 742 | 0.68 | 0.61 | 0.74 | 3.2e-08`). Bottom half: a
-> small volcano plot inset, `-log₁₀(padj)` on y-axis vs `mod_ratio
-> difference` on x-axis, with scattered dots, a dashed significance
-> threshold (horizontal, labelled "BH FDR 0.05"), and a handful of
-> teal highlighted points above the threshold. Title in 10-pt 600-weight
-> "site_results.tsv — Beta-Binomial posterior + BH FDR". A 9-pt italic
-> caption: *"Mann-Whitney U native vs IVT, HMM-posterior-weighted
-> counts, 95 % credible intervals"*.
+> **Panel E — Per-site statistical readout (reference-anchored stack).**
+> Bold uppercase "E" label in the top-left corner (18-pt 700-weight, on
+> light-slate rounded square). Render as a **vertically stacked
+> five-layer "genome-browser" track** — all layers share a common
+> horizontal reference axis (a thin slate bar at the bottom with a
+> `5' → 3'` arrowhead, tick marks, and three highlighted candidate
+> positions marked by faint vertical guide lines spanning all layers).
+> Layers from top to bottom:
 >
-> **Stage f — Single-molecule combinatorial readout.** A narrow
-> vertical stack on the far right, three stacked elements:
+>  *(i) posterior-density ridgeline.* For each of ~12 reference
+>  positions along the axis, a tiny **teal violin / ridge** encoding
+>  the full Beta-Binomial posterior over the per-site modification
+>  rate. Shape width scales with posterior concentration (narrow =
+>  high coverage, wide = low coverage). The three candidate positions
+>  are filled solid teal; the others are outlined only. This is
+>  **distinct from a bar chart** — the violins convey posterior
+>  uncertainty, not a point estimate.
+>
+>  *(ii) 95 % credible-interval forest.* Directly below each violin,
+>  a horizontal whisker (IQR bar + 95 % CI ticks) centred on the
+>  posterior MAP estimate, rendered in slate, with a short vertical
+>  tick at the MAP. Colour of the MAP tick matches significance:
+>  teal if the site passes BH-FDR, light slate otherwise.
+>
+>  *(iii) Manhattan-style significance lollipops.* `-log₁₀(p_adj)`
+>  plotted as thin vertical stems rising from the reference axis
+>  (stem height = evidence); stems capped with a small filled
+>  circle. A dashed horizontal line at `-log₁₀(0.05)` with a 9-pt
+>  italic "BH FDR 0.05" label. Stems above the threshold are teal,
+>  below are light slate. Three stems correspond to the candidate
+>  positions, visibly taller.
+>
+>  *(iv) Mann-Whitney native-vs-IVT mini-inset.* One callout balloon
+>  anchored to the tallest lollipop, containing two overlaid density
+>  curves — a teal "native" and a coral "IVT" distribution of per-read
+>  `p(mod)` — with the area of non-overlap lightly hatched and a
+>  tiny 9-pt monospace callout inside: `U = 1.8e4, p = 4.8e−09`.
+>  This encodes the Mann-Whitney U test that feeds each lollipop.
+>
+>  *(v) per-read mod-BAM strip.* A compact stack of ~8 horizontal
+>  read tracks underneath the reference axis, each a thin slate line
+>  with teal dots at called modified positions and faint light-slate
+>  dots at unmodified positions. A small tag annotation on the right:
+>  `MM:Z / ML:B:C` in 9-pt monospace. Caption in 9-pt italic:
+>  *"per-read calls retained — bulk-invisible information preserved
+>  for downstream phasing (Panel F)"*.
+>
+> Panel title in 10-pt 600-weight: *"per-site readout · Beta-Binomial
+> posterior · BH-FDR-adjusted"*. Top-right corner carries a tiny
+> 9-pt monospace glyph `site_results.tsv` to anchor the output
+> filename without dominating the panel. The whole panel reads as a
+> **reference-coordinate-aligned stack** rather than a generic
+> table + volcano — every row is pinned to the same genomic axis,
+> emphasising that the output is spatially resolved along the
+> transcript.
+>
+> **Panel F — Single-molecule combinatorial readout.** Bold uppercase
+> "F" label in the top-left corner (18-pt 700-weight, on light-slate
+> rounded square). A narrow vertical stack on the far right, three
+> stacked elements:
 > (top) a compact stack of six horizontal per-read tracks (each a thin
 > slate line) across three candidate sites i / j / k marked by vertical
 > dashed guides; at each site a filled circle — teal for modified,
@@ -236,24 +308,31 @@ combinatorial analysis lives in a separate figure 2.
 
 > **Prompt:**
 > A *Nature Methods*-style scientific workflow figure, 2.5 : 1
-> landscape, pure white background, flat vector style, five stages
-> labelled a–e in 600-weight lowercase sans-serif.
+> landscape, pure white background, flat vector style, **five panels
+> each marked by a bold uppercase letter A–E in the top-left corner
+> (18-pt 700-weight black, inside an optional 24 × 24 px light-slate
+> rounded square), separated by thin 0.5-pt slate vertical rules**.
 >
-> (a) **Input** — two stacked nanopore cross-sections threading RNA
+> **(A) Input** — two stacked nanopore cross-sections threading RNA
 > (upper teal "native", lower coral "IVT"), each with a short noisy
 > ionic-current trace; slate reference bar underneath.
 >
-> (b) **Event alignment (f5c)** — two read × k-mer matrices
-> (teal-tinted native, coral-tinted IVT) filled with miniature waveform
-> glyphs, labelled "f5c eventalign".
+> **(B) Signal extraction** — two read × k-mer matrices (teal-tinted
+> native, coral-tinted IVT) filled with miniature waveform glyphs, with
+> a small 8-pt grey attribution *"via f5c eventalign"* below. This
+> panel is preprocessing, **rendered visually subordinate to panels
+> C–E** (~70 % of their visual weight, no accent colors beyond the
+> tint).
 >
-> (c) **Batched CUDA pairwise DTW** — three overlapping isometric cost
+> **(C) Batched CUDA pairwise DTW** — three overlapping isometric cost
 > matrices with a bright teal diagonal wavefront band, below them a
 > stack of blue-ramp symmetric distance matrices; to the right a GPU
 > chip pictogram with 16 stream lanes; 9-pt italic caption
 > *"one block per read pair · 16 CUDA streams · single-launch"*.
 >
-> (d) **Hierarchical calling — V1 · V2 · V3** in a rounded cream panel:
+> **(D) Hierarchical calling — V1 · V2 · V3** (bold uppercase "D" label
+> in the top-left corner, 18-pt 700-weight on light-slate rounded
+> square) in a rounded cream panel:
 >  **V1** shrinkage funnel from IVT reads through three levels
 >  (position → local k-mer window → global) with a small coverage dial
 >  controlling the funnel width, terminating in a teal `Beta(α₀, β₀)`
@@ -268,10 +347,24 @@ combinatorial analysis lives in a separate figure 2.
 >  transitions), and two arcing arrows above the chain — coral
 >  "α forward" and teal "β backward" — for forward–backward.
 >
-> (e) **Output** — miniature TSV (`contig | pos | mod_ratio | ci_low |
-> ci_high | padj`) with a volcano-plot inset (dashed BH-FDR threshold,
-> teal significant points), and a colored per-base mod-BAM read strip
-> (teal = modified, light slate = unmodified) labelled "MM / ML tags".
+> **(E) Output — reference-anchored stack** (bold uppercase "E" label
+> in the top-left corner, 18-pt 700-weight on light-slate rounded
+> square). A vertically stacked multi-layer genome-browser track
+> pinned to a shared horizontal reference axis (`5' → 3'` arrow,
+> tick marks, three candidate positions highlighted by faint vertical
+> guides spanning all layers): (i) a **teal Beta-Binomial posterior
+> ridgeline** — one tiny violin per reference position encoding the
+> full per-site modification-rate posterior (width = uncertainty, not
+> a bar chart); (ii) a **95 % credible-interval forest** of horizontal
+> whiskers centred at each MAP, tick coloured teal if BH-FDR
+> significant else light slate; (iii) **Manhattan-style
+> `-log₁₀(p_adj)` lollipops** with a dashed "BH FDR 0.05" threshold,
+> teal above / slate below; (iv) a **Mann-Whitney mini-inset** balloon
+> anchored to the tallest lollipop with overlaid teal-native / coral-IVT
+> per-read `p(mod)` densities and a `U, p` monospace callout; (v) a
+> **per-read mod-BAM strip** of ~8 read tracks with teal "modified"
+> dots and an `MM:Z / ML:B:C` tag annotation. A tiny `site_results.tsv`
+> glyph in the top-right anchors the output filename.
 >
 > Palette: teal #2F8F9D, coral #E7734A, slate #2F3E46, light slate
 > #C6CCD1, cream #F5F1EA, white. Helvetica / Inter 9–12 pt, 1 pt
@@ -286,46 +379,66 @@ combinatorial analysis lives in a separate figure 2.
 ## Prompt B — Short version (rapid iteration, Flux-schnell scale)
 
 > Flat vector *Nature Methods*-style scientific workflow, 2.5 : 1
-> landscape, white background, five stages labelled a–e.
-> (a) Native + IVT nanopores threading RNA with ionic-current traces
-> (teal / coral). (b) Two read × k-mer waveform matrices,
-> "f5c eventalign". (c) Three overlapping cost matrices with a teal
+> landscape, white background, **five panels marked by bold uppercase
+> letter labels A–E (18-pt 700-weight) in each top-left corner,
+> separated by thin 0.5-pt slate vertical rules**.
+> **(A)** Native + IVT nanopores threading RNA with ionic-current
+> traces (teal / coral). **(B)** Signal extraction — two read × k-mer
+> waveform matrices (teal / coral tint), tiny grey 8-pt attribution
+> *"via f5c eventalign"*; rendered subordinate to panels C–E (~70 %
+> visual weight). **(C)** Three overlapping cost matrices with a teal
 > diagonal wavefront band + blue-ramp symmetric distance heatmaps +
 > GPU chip with 16 stream lanes, "batched CUDA DTW".
-> (d) Cream panel with three sub-blocks: V1 coverage-controlled
+> **(D)** Cream panel with three sub-blocks: V1 coverage-controlled
 > shrinkage funnel (position→local→global) ending in a teal
 > `Beta(α₀,β₀)`; V2 pinned-coral null + learnable-teal alternative
 > with a smooth sigmoid soft-gate + EM convergence inset +
 > λ-shrinkage tether; V3 five-node 2-state HMM chain with
 > genomic-gap-labelled variable arrows (Δ=1,3,7,2,12) and two arcing
-> forward/backward passes. (e) Miniature TSV with volcano-plot inset
-> + mod-BAM per-base strip. Palette teal #2F8F9D / coral #E7734A /
-> warm red #B33A3A / slate / cream / white. Helvetica / Inter, 1 pt
-> lines, no shadows, publication-ready, algorithmic motifs
-> (wavefront, funnel, anchor, gap-aware chain, F/B arcs) preserved.
+> forward/backward passes. **(E)** Reference-anchored stack on one
+> shared 5′→3′ axis — teal Beta-Binomial posterior ridgeline of
+> per-position violins, 95 %-CI forest whiskers, Manhattan-style
+> `-log₁₀(p_adj)` lollipops with dashed BH-FDR line, a Mann-Whitney
+> balloon inset (teal-native / coral-IVT overlaid densities, `U, p`
+> callout), and a per-read mod-BAM strip (`MM:Z / ML:B:C`). Palette
+> teal #2F8F9D / coral #E7734A / warm red #B33A3A / slate / cream /
+> white. Helvetica / Inter, 1 pt lines, no shadows, publication-ready,
+> algorithmic motifs (wavefront, funnel, anchor, gap-aware chain,
+> F/B arcs, reference-anchored posterior stack) preserved.
 
 ---
 
 ## Prompt C — Vertical layout (portrait, supplementary / slide)
 
 > *Nature Methods*-style flat-vector workflow, 7 : 10 portrait, white
-> background, five stages stacked top-to-bottom in horizontal bands
-> connected by downward chevrons, labels a–e.
-> **(a) Input** — paired teal-native / coral-IVT pores with
+> background, **five panels stacked top-to-bottom in horizontal bands
+> connected by downward chevrons, each panel bearing a bold uppercase
+> letter label A–E in its top-left corner (18-pt 700-weight) inside
+> an optional 24 × 24 px light-slate rounded square, separated by
+> thin 0.5-pt slate horizontal rules**.
+> **(A) Input** — paired teal-native / coral-IVT pores with
 > ionic-current traces and a reference bar.
-> **(b) f5c eventalign** — two read × k-mer waveform matrices.
-> **(c) Batched CUDA DTW** — overlapping cost matrices with diagonal
+> **(B) Signal extraction** — two read × k-mer waveform matrices
+> (teal / coral tint) with a small 8-pt grey attribution *"via f5c
+> eventalign"*; rendered visually subordinate to panels C–E (~70 %
+> their visual weight).
+> **(C) Batched CUDA DTW** — overlapping cost matrices with diagonal
 > wavefront band, blue-ramp distance matrices, GPU chip with 16
 > stream lanes; caption *"entire contig in one kernel launch"*.
-> **(d) V1 · V2 · V3 in a cream panel** — V1 coverage-adaptive
+> **(D) V1 · V2 · V3 in a cream panel** — V1 coverage-adaptive
 > three-level shrinkage funnel (position → local → global) with a
 > coverage dial; V2 pinned-coral null + learnable-teal alternative
 > with a continuous sigmoid soft-gate, EM convergence inset, and a
 > λ-shrinkage tether; V3 five-node 2-state HMM chain with
 > genomic-gap-labelled variable-width transitions and arcing
 > forward/backward passes.
-> **(e) Output** — miniature TSV with volcano-plot inset plus a
-> colored mod-BAM read strip (MM / ML tags).
+> **(E) Reference-anchored output stack** — layers pinned to one
+> shared horizontal `5′→3′` reference axis: teal Beta-Binomial
+> posterior ridgeline (per-position violins), 95 %-CI forest
+> whiskers, Manhattan `-log₁₀(p_adj)` lollipops with dashed BH-FDR
+> line, a Mann-Whitney balloon (overlaid teal-native / coral-IVT
+> `p(mod)` densities, `U, p` callout), and a per-read mod-BAM
+> strip (MM:Z / ML:B:C tags).
 > Palette teal / coral / warm red / slate / cream / white.
 > Helvetica / Inter, 1 pt lines, no shadows, no gradients except the
 > named single-hue ramps. Publication-ready.
@@ -335,17 +448,24 @@ combinatorial analysis lives in a separate figure 2.
 ## Prompt D — Ultra-compact one-sentence (prompt-budget-constrained)
 
 > Clean *Nature Methods*-style flat-vector workflow, 2.5:1 on white,
-> teal/coral/slate palette, five panels a–e: (a) native+IVT nanopores
-> with ionic-current traces; (b) f5c eventalign matrices; (c) batched
+> teal/coral/slate palette, **five panels each marked by a bold
+> uppercase letter A–E (18-pt 700-weight) in the top-left corner,
+> separated by thin slate vertical rules**: (A) native+IVT nanopores
+> with ionic-current traces; (B) signal-extraction read × k-mer
+> waveform matrices (tiny grey "via f5c eventalign" attribution,
+> rendered ~70 % weight as a preprocessing step); (C) batched
 > CUDA DTW with wavefront-diagonal cost matrices, blue-ramp distance
-> heatmaps, and a GPU chip with 16 stream lanes; (d) cream panel with
+> heatmaps, and a GPU chip with 16 stream lanes; (D) cream panel with
 > V1 coverage-adaptive three-level shrinkage funnel, V2 pinned-null
 > + learnable-alt densities with a smooth sigmoid soft-gate and EM
 > convergence inset, V3 five-node 2-state HMM chain with gap-labelled
-> variable transitions and forward/backward arcs; (e) site TSV with
-> volcano-plot inset plus a per-base mod-BAM strip. Helvetica, 1 pt
-> lines, no shadows, no gradients except named ramps, algorithmic
-> motifs preserved, publication-ready.
+> variable transitions and forward/backward arcs; (E) reference-anchored
+> output stack on a shared 5′→3′ axis — teal Beta-Binomial posterior
+> violins, 95 %-CI forest whiskers, Manhattan `-log₁₀(p_adj)`
+> lollipops with dashed BH-FDR line, Mann-Whitney balloon
+> (native/IVT `p(mod)` densities, `U,p` callout), and per-read mod-BAM
+> strip. Helvetica, 1 pt lines, no shadows, no gradients except
+> named ramps, algorithmic motifs preserved, publication-ready.
 
 ---
 
@@ -356,14 +476,14 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 
 | Panel | Title | Algorithmic subtitle |
 |-------|-------|----------------------|
-| **a** | Input | Paired native direct-RNA reads + in-vitro-transcribed control + reference transcriptome |
-| **b** | Event alignment | Per-read ionic-current signals segmented and aligned to reference k-mers (`f5c eventalign`) |
-| **c** | Batched CUDA pairwise DTW | Wavefront parallelism, one thread block per read pair, 16 concurrent CUDA streams, entire contig in one kernel launch |
-| **d(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global) |
-| **d(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior |
-| **d(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites |
-| **e** | Per-site statistical readout | Beta-Binomial MAP + 95 % credible intervals · Mann-Whitney U (native vs IVT) · BH-adjusted FDR |
-| **f** | Combinatorial phasing | Single-molecule mod-BAM output (`MM:Z` / `ML:B:C`) enables co-deposition / mutual-exclusion contrasts over arbitrary site sets |
+| **A** | Input | Paired native direct-RNA reads + in-vitro-transcribed control + reference transcriptome |
+| **B** | Signal extraction | Per-read ionic-current signals grouped by reference k-mer (preprocessing via `f5c eventalign`; visually subordinate, not a core algorithmic claim) |
+| **C** | Batched CUDA pairwise DTW | Wavefront parallelism, one thread block per read pair, 16 concurrent CUDA streams, entire contig in one kernel launch |
+| **D(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global) |
+| **D(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior |
+| **D(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites |
+| **E** | Per-site reference-anchored stack | Beta-Binomial posterior ridgeline + 95 % CI forest + Manhattan `-log₁₀(p_adj)` lollipops (BH-FDR) + Mann-Whitney native-vs-IVT inset + per-read mod-BAM strip, all pinned to one `5' → 3'` reference axis |
+| **F** | Combinatorial phasing | Single-molecule mod-BAM output (`MM:Z` / `ML:B:C`) enables co-deposition / mutual-exclusion contrasts over arbitrary site sets |
 
 ---
 
@@ -376,6 +496,8 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 | V1 looks like a single arrow | *"replace with a three-level funnel narrowing through 'position → local k-mer window → global', with a circular coverage dial whose needle controls funnel width"* |
 | V2 looks like just two Gaussians | *"add a padlock or pin glyph above the null curve labelled 'anchored', a curved parameter-motion arrow on the alternative, a smooth S-shaped sigmoid gate along the baseline (NOT a step), a 9-pt monospace formula callout `γ = σ(ΔBIC)·π·f₁/[(1−π)f₀+π·f₁]`, an EM convergence inset (log-likelihood vs iteration plateauing), and a λ-shrinkage tether to a ghost global-prior curve"* |
 | V3 looks like a vanilla HMM chain | *"vary the arrow lengths and stroke weights between adjacent nodes according to printed genomic-gap labels (Δ=1, 3, 7, 2, 12), split each node diagonally into teal 'mod' and light-slate 'unmod' halves, and add two arcing passes above the chain — coral 'α forward' left-to-right and teal 'β backward' right-to-left"* |
+| Panel E reads as a generic table + volcano | *"replace with a reference-anchored vertically stacked genome-browser track on a shared 5'→3' axis: a Beta-Binomial posterior ridgeline (per-position teal violins, width = uncertainty), a 95 %-CI forest of horizontal whiskers, Manhattan-style -log₁₀(p_adj) lollipops with a dashed BH-FDR line, a Mann-Whitney inset balloon with overlaid teal-native / coral-IVT p(mod) densities, and a per-read mod-BAM strip underneath — every layer pinned to the same reference coordinates"* |
+| Panel B (f5c eventalign) dominates visually | *"demote Panel B to preprocessing: rename title 'Signal extraction', move 'via f5c eventalign' to an 8-pt grey attribution line, reduce visual weight to ~70 % of panels C–E, no accent colours beyond the teal/coral tint"* |
 | Too slick / marketing-y | *"remove decorative flourish, desaturate palette, restrict to the named single-hue / diverging ramps, re-emphasise specific mathematical motifs"* |
 | Too busy | *"drop the formula callouts, keep only the visual motifs; widen gutters to 18 %"* |
 | Wrong typography | *"all type in Helvetica Neue 400/600, black #111, lowercase axis labels, title-case sub-panel titles, 9-pt italic for technical captions, 9-pt monospace for formula callouts only"* |
