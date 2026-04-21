@@ -521,7 +521,10 @@ class TestFullPipeline:
             modified_positions={3, 7},
             seed=42,
         )
-        result = compute_sequential_modification_probabilities(cr)
+        # V1/V2 fields asserted below — opt in explicitly.
+        result = compute_sequential_modification_probabilities(
+            cr, emission_source="p_mod_raw",
+        )
 
         assert result.contig == "chr1"
         assert len(result.position_stats) == 10
@@ -566,7 +569,9 @@ class TestFullPipeline:
             n_positions=8, n_native=20, n_ivt=15,
             modified_positions={2, 5}, seed=77,
         )
-        result = compute_sequential_modification_probabilities(cr)
+        result = compute_sequential_modification_probabilities(
+            cr, emission_source="p_mod_raw",
+        )
         sorted_pos = sorted(cr.positions.keys())
 
         for mod_idx in [2, 5]:
@@ -626,7 +631,9 @@ class TestFullPipeline:
 
     def test_global_prior_computed(self):
         cr = _make_contig_result(n_positions=5, n_native=10, n_ivt=10, seed=42)
-        result = compute_sequential_modification_probabilities(cr)
+        result = compute_sequential_modification_probabilities(
+            cr, emission_source="p_mod_raw",
+        )
         assert result.global_mu != 0.0 or result.global_sigma != 1.0
 
     def test_position_stats_properties(self):
@@ -671,8 +678,12 @@ class TestFullPipeline:
 
     def test_shrinkage_window_param(self):
         cr = _make_contig_result(n_positions=20, n_native=10, n_ivt=10, seed=42)
-        r1 = compute_sequential_modification_probabilities(cr, shrinkage_window=2)
-        r2 = compute_sequential_modification_probabilities(cr, shrinkage_window=50)
+        r1 = compute_sequential_modification_probabilities(
+            cr, shrinkage_window=2, emission_source="p_mod_raw",
+        )
+        r2 = compute_sequential_modification_probabilities(
+            cr, shrinkage_window=50, emission_source="p_mod_raw",
+        )
         pos = sorted(cr.positions.keys())[0]
         assert r1.position_stats[pos].mu_shrunk != r2.position_stats[pos].mu_shrunk or True
 
@@ -692,7 +703,9 @@ class TestFullPipeline:
             n_positions=10, n_native=15, n_ivt=10,
             modified_positions={3, 7}, seed=42,
         )
-        result = compute_sequential_modification_probabilities(cr)
+        result = compute_sequential_modification_probabilities(
+            cr, emission_source="p_mod_raw",
+        )
         sorted_pos = sorted(cr.positions.keys())
         for mod_idx in [3, 7]:
             ps = result.position_stats[sorted_pos[mod_idx]]
@@ -705,7 +718,9 @@ class TestFullPipeline:
             n_positions=10, n_native=15, n_ivt=10,
             modified_positions={3}, seed=42,
         )
-        result = compute_sequential_modification_probabilities(cr)
+        result = compute_sequential_modification_probabilities(
+            cr, emission_source="p_mod_raw",
+        )
         sorted_pos = sorted(cr.positions.keys())
         ps_mod = result.position_stats[sorted_pos[3]]
         ps_unmod = result.position_stats[sorted_pos[0]]

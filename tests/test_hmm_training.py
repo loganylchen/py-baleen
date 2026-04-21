@@ -128,6 +128,8 @@ def _make_contig_result(
 
 def _run_v1v2(contig_result, **kwargs):
     compute = hier.compute_sequential_modification_probabilities
+    # HMM training uses V2 p_mod_raw, so opt into V1/V2 explicitly.
+    kwargs.setdefault("emission_source", "p_mod_raw")
     return compute(contig_result, run_hmm=False, **kwargs)
 
 

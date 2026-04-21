@@ -1353,9 +1353,15 @@ def compute_sequential_modification_probabilities(
         ``hmm_p_stay_per_base`` and uses learned emission transforms
         and initial state probabilities.
     emission_source : str
-        Which per-read score field to use as HMM emissions.
-        ``"p_mod_knn"`` (default) uses kNN IVT-purity scores;
-        ``"p_mod_raw"`` uses V2 mixture posteriors.
+        Which per-read score field to use as HMM emissions. Also gates
+        whether V1 (empirical-Bayes null + shrinkage) and V2 (anchored
+        mixture EM) actually run:
+
+        - ``"p_mod_knn"`` (default): run only kNN + Beta-EM → HMM.
+          V1/V2 are skipped entirely; their fields on ``PositionStats``
+          are populated with zero/default placeholders.
+        - ``"p_mod_raw"``: run V1 → V2 → HMM (V2 posteriors are the
+          HMM emissions; kNN is still computed and stored).
     consistent_fallback : bool
         If True (default, Fix A), set the short-trajectory fallback to
         *emission_source* instead of V2 ``p_mod_raw``.  Set to False
@@ -1380,131 +1386,162 @@ def compute_sequential_modification_probabilities(
             global_sigma=1.0,
         )
 
-    # ── V1a: Extract scores and fit robust IVT null per position ──────────
-
-    raw_params: dict[int, tuple[float, float]] = {}
-    coverages: dict[int, int] = {}
-    all_scores: dict[int, NDArray[np.float64]] = {}
+    # V1/V2 only run when explicitly needed (p_mod_raw emission source).
+    # Default pipeline uses p_mod_knn and skips V1/V2 entirely.
+    needs_v1_v2 = (emission_source == "p_mod_raw")
 
     contig_short = contig_result.contig
     if len(contig_short) > 20:
         contig_short = contig_short[:17] + "..."
     n_pos = len(sorted_positions)
 
-    # Single progress bar spanning V1 → V2 → kNN stages
-    # Total steps = 3 passes over positions (V1a + V2b + kNN)
+    # Progress bar: 3 passes (V1a + V2b + kNN) when V1/V2 active, else
+    # kNN only.
+    _n_stages = 3 if needs_v1_v2 else 1
     _mod_pbar = tqdm(
-        total=n_pos * 3,
+        total=n_pos * _n_stages,
         desc=f"  {contig_short} mod-calling",
         unit="step",
         leave=False,
         disable=not show_progress,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
     )
-    _mod_pbar.set_postfix_str("V1: null fitting")
-
-    for pos in sorted_positions:
-        pr = contig_result.positions[pos]
-        scores = _extract_ivt_distances(
-            pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads
-        )
-        all_scores[pos] = scores
-
-        ivt_scores = scores[pr.n_native_reads:]
-        mu_raw, sigma_raw = _fit_robust_ivt_null(ivt_scores)
-        raw_params[pos] = (mu_raw, sigma_raw)
-        coverages[pos] = pr.n_ivt_reads
-        _mod_pbar.update(1)
-
-    # ── V1b: Hierarchical shrinkage ──────────────────────────────────────
-
-    shrunk_params = _shrink_parameters(
-        sorted_positions,
-        raw_params,
-        coverages,
-        window=shrinkage_window,
-        kappa_high=kappa_high,
-        kappa_medium=kappa_medium,
-        kappa_low=kappa_low,
-    )
-
-    # Global IVT prior (for reporting)
-    all_mus = [raw_params[p][0] for p in sorted_positions if coverages[p] >= 1]
-    global_mu = float(np.median(all_mus)) if all_mus else 0.0
-    all_sigmas = [raw_params[p][1] for p in sorted_positions if coverages[p] >= 1]
-    global_sigma = float(np.median(all_sigmas)) if all_sigmas else 1.0
-
-    # ── V1c: Z-scores and p-values ───────────────────────────────────────
 
     position_stats: dict[int, PositionStats] = {}
 
-    for pos in sorted_positions:
-        pr = contig_result.positions[pos]
-        scores = all_scores[pos]
-        mu_s, sigma_s = shrunk_params[pos]
-        mu_r, sigma_r = raw_params[pos]
+    if needs_v1_v2:
+        # ── V1a: Extract scores and fit robust IVT null per position ──
+        raw_params: dict[int, tuple[float, float]] = {}
+        coverages: dict[int, int] = {}
+        all_scores: dict[int, NDArray[np.float64]] = {}
 
-        z = (scores - mu_s) / max(sigma_s, _MIN_SIGMA)
-        # One-sided: P(Z ≥ z) — high z means far from IVT null
-        p_null_vals = 1.0 - _norm_dist.cdf(z)
+        _mod_pbar.set_postfix_str("V1: null fitting")
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            scores = _extract_ivt_distances(
+                pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads
+            )
+            all_scores[pos] = scores
 
-        n_total = pr.n_native_reads + pr.n_ivt_reads
-        position_stats[pos] = PositionStats(
-            position=pos,
-            reference_kmer=pr.reference_kmer,
-            coverage_class=_classify_coverage(pr.n_ivt_reads),
-            n_ivt=pr.n_ivt_reads,
-            n_native=pr.n_native_reads,
-            native_read_names=pr.native_read_names,
-            ivt_read_names=pr.ivt_read_names,
-            mu_raw=mu_r,
-            sigma_raw=sigma_r,
-            mu_shrunk=mu_s,
-            sigma_shrunk=sigma_s,
-            scores=scores,
-            z_scores=z,
-            p_null=np.asarray(p_null_vals, dtype=np.float64),
-            p_mod_raw=np.zeros(n_total, dtype=np.float64),
-            mixture_pi=0.0,
-            mixture_null_gate=True,
-            gate_weight=0.0,
-            p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
-            p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
+            ivt_scores = scores[pr.n_native_reads:]
+            mu_raw, sigma_raw = _fit_robust_ivt_null(ivt_scores)
+            raw_params[pos] = (mu_raw, sigma_raw)
+            coverages[pos] = pr.n_ivt_reads
+            _mod_pbar.update(1)
+
+        # ── V1b: Hierarchical shrinkage ───────────────────────────────
+        shrunk_params = _shrink_parameters(
+            sorted_positions,
+            raw_params,
+            coverages,
+            window=shrinkage_window,
+            kappa_high=kappa_high,
+            kappa_medium=kappa_medium,
+            kappa_low=kappa_low,
         )
 
-    # ── V2a: Contig-pooled EM for global alternative parameters ────────
+        # Global IVT prior (for reporting)
+        all_mus = [raw_params[p][0] for p in sorted_positions if coverages[p] >= 1]
+        global_mu = float(np.median(all_mus)) if all_mus else 0.0
+        all_sigmas = [raw_params[p][1] for p in sorted_positions if coverages[p] >= 1]
+        global_sigma = float(np.median(all_sigmas)) if all_sigmas else 1.0
 
-    global_mu1, global_sigma1 = _contig_pooled_mixture_em(
-        position_stats, sorted_positions,
-    )
+        # ── V1c: Z-scores and p-values ────────────────────────────────
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            scores = all_scores[pos]
+            mu_s, sigma_s = shrunk_params[pos]
+            mu_r, sigma_r = raw_params[pos]
 
-    # ── V2b: Per-position anchored mixture with soft gating ────────────
+            z = (scores - mu_s) / max(sigma_s, _MIN_SIGMA)
+            # One-sided: P(Z ≥ z) — high z means far from IVT null
+            p_null_vals = 1.0 - _norm_dist.cdf(z)
 
-    _mod_pbar.set_postfix_str("V2: mixture EM")
-    for pos in sorted_positions:
-        ps = position_stats[pos]
-        z_native = ps.z_scores[: ps.n_native]
-        z_ivt = ps.z_scores[ps.n_native :]
+            n_total = pr.n_native_reads + pr.n_ivt_reads
+            position_stats[pos] = PositionStats(
+                position=pos,
+                reference_kmer=pr.reference_kmer,
+                coverage_class=_classify_coverage(pr.n_ivt_reads),
+                n_ivt=pr.n_ivt_reads,
+                n_native=pr.n_native_reads,
+                native_read_names=pr.native_read_names,
+                ivt_read_names=pr.ivt_read_names,
+                mu_raw=mu_r,
+                sigma_raw=sigma_r,
+                mu_shrunk=mu_s,
+                sigma_shrunk=sigma_s,
+                scores=scores,
+                z_scores=z,
+                p_null=np.asarray(p_null_vals, dtype=np.float64),
+                p_mod_raw=np.zeros(n_total, dtype=np.float64),
+                mixture_pi=0.0,
+                mixture_null_gate=True,
+                gate_weight=0.0,
+                p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
+                p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
+            )
 
-        p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
-            z_native,
-            z_ivt,
-            ps.z_scores,
-            max_iter=mixture_max_iter,
-            pi_threshold=mixture_pi_threshold,
-            separation_threshold=mixture_separation,
-            global_mu1=global_mu1,
-            global_sigma1=global_sigma1,
-            legacy_scoring=legacy_scoring,
+        # ── V2a: Contig-pooled EM for global alternative parameters ──
+        global_mu1, global_sigma1 = _contig_pooled_mixture_em(
+            position_stats, sorted_positions,
         )
-        ps.p_mod_raw[:] = p_mod_all
-        ps.mixture_pi = pi
-        ps.mixture_null_gate = null_gate
-        ps.gate_weight = gw
 
-        # Default HMM to V2 result (will be overwritten if HMM runs)
-        ps.p_mod_hmm[:] = p_mod_all
-        _mod_pbar.update(1)
+        # ── V2b: Per-position anchored mixture with soft gating ──────
+        _mod_pbar.set_postfix_str("V2: mixture EM")
+        for pos in sorted_positions:
+            ps = position_stats[pos]
+            z_native = ps.z_scores[: ps.n_native]
+            z_ivt = ps.z_scores[ps.n_native :]
+
+            p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
+                z_native,
+                z_ivt,
+                ps.z_scores,
+                max_iter=mixture_max_iter,
+                pi_threshold=mixture_pi_threshold,
+                separation_threshold=mixture_separation,
+                global_mu1=global_mu1,
+                global_sigma1=global_sigma1,
+                legacy_scoring=legacy_scoring,
+            )
+            ps.p_mod_raw[:] = p_mod_all
+            ps.mixture_pi = pi
+            ps.mixture_null_gate = null_gate
+            ps.gate_weight = gw
+
+            # Default HMM to V2 result (will be overwritten if HMM runs)
+            ps.p_mod_hmm[:] = p_mod_all
+            _mod_pbar.update(1)
+    else:
+        # V1/V2 skipped — construct PositionStats with zero/default
+        # fields so downstream code and consumers that still touch them
+        # (e.g. legacy ablation tooling) see a well-formed object.
+        global_mu, global_sigma = 0.0, 1.0
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            n_total = pr.n_native_reads + pr.n_ivt_reads
+            position_stats[pos] = PositionStats(
+                position=pos,
+                reference_kmer=pr.reference_kmer,
+                coverage_class=_classify_coverage(pr.n_ivt_reads),
+                n_ivt=pr.n_ivt_reads,
+                n_native=pr.n_native_reads,
+                native_read_names=pr.native_read_names,
+                ivt_read_names=pr.ivt_read_names,
+                mu_raw=0.0,
+                sigma_raw=1.0,
+                mu_shrunk=0.0,
+                sigma_shrunk=1.0,
+                scores=np.zeros(n_total, dtype=np.float64),
+                z_scores=np.zeros(n_total, dtype=np.float64),
+                p_null=np.ones(n_total, dtype=np.float64),
+                p_mod_raw=np.zeros(n_total, dtype=np.float64),
+                mixture_pi=0.0,
+                mixture_null_gate=True,
+                gate_weight=0.0,
+                p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
+                p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
+            )
 
     # ── kNN IVT-purity scores ─────────────────────────────────────────────
 
