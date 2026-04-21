@@ -141,11 +141,11 @@ that minimizes cumulative distance.
 ### C1. V1: Empirical-Bayes Null Scoring
 
 > **Runs every call, but `z_scores` is NOT on the default critical
-> path.** In default unsupervised mode the HMM emission source is
-> `p_mod_knn` (see C2a / C3), so the `shrinkage` ablation axis produces
-> metrics identical to baseline. The shrunk `(μ̂, σ̂)` and `z_scores`
-> become observable only when the HMM is trained in semi-supervised
-> mode (which Platt-calibrates on these scores, see `_hmm_training.py`).
+> path.** The default HMM emission source is `p_mod_knn` (see C2a / C3),
+> so the `shrinkage` ablation axis produces metrics identical to
+> baseline. The shrunk `(μ̂, σ̂)` and `z_scores` are kept on
+> `PositionStats` for ablation studies and debugging only; no default
+> downstream stage reads them.
 **Visual:** Three-step process
 
 ```
@@ -229,13 +229,12 @@ P(mod | score) = f_alt(score) / [f_null(score) + f_alt(score)]
 ### C2b. V2b: Anchored Two-Component Mixture EM (Alternative Scoring)
 
 > **Runs every call, but `p_mod_raw` is NOT on the default critical
-> path.** In default unsupervised mode the HMM reads `p_mod_knn` as
-> emissions (see C3), so the `anchor_null` / `gate_mode` / `lambda_reg`
-> ablation axes produce metrics identical to baseline. `p_mod_raw` is
-> consumed only when either (a) the caller switches the HMM
-> `emission_source` to `"p_mod_raw"`, or (b) the HMM is trained in
-> semi-supervised / supervised mode (see `_hmm_training.py`), both of
-> which read `p_mod_raw` as the calibration signal.
+> path.** The HMM reads `p_mod_knn` as emissions (see C3), so the
+> `anchor_null` / `gate_mode` / `lambda_reg` ablation axes produce
+> metrics identical to baseline. `p_mod_raw` is consumed only when the
+> caller explicitly switches the HMM `emission_source` to
+> `"p_mod_raw"` (e.g. via `aggregate --score-field p_mod_raw`);
+> otherwise it is kept on `PositionStats` for ablation and debugging.
 **Visual:** Mixture model fitting on z-scores
 
 ```
@@ -468,4 +467,4 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 
 **(C)** Hierarchical statistical inference. V1 (Empirical-Bayes): Robust null distribution from IVT controls with hierarchical shrinkage. V2a (kNN IVT-purity, default): Quantifies neighborhood composition in DTW space, calibrated via Beta EM. V2b (Mixture EM, alternative): Two-component mixture with soft gating produces raw P(mod). V3 (HMM): 3-state forward-backward smoothing along read trajectories, using kNN scores as default emission source, yields final modification probabilities.
 
-**(D)** Output. Site-level modification probabilities are aggregated across reads, with optional semi-supervised or supervised HMM training using labeled modification sites.
+**(D)** Output. Site-level modification probabilities are aggregated across reads via per-site thresholding and Fisher combination into `mod_ratio` and `pvalue`.

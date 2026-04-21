@@ -43,9 +43,9 @@ HMM emission source):
    computed every call but are **not** the HMM emission source in the
    default unsupervised pipeline. The default emission source is the
    kNN IVT-purity score (see bullet 3b). `p_mod_raw` is consumed only
-   when `emission_source` is switched to `"p_mod_raw"` or when the HMM
-   is trained in semi-supervised / supervised mode (`_hmm_training.py`
-   reads it as the calibration signal).
+   when the caller explicitly switches `emission_source` to
+   `"p_mod_raw"` (e.g. via `aggregate --score-field p_mod_raw`);
+   otherwise it is kept on `PositionStats` for ablation and debugging.
 3b. **kNN IVT-purity + Beta-EM calibration (default HMM emission
    source).** For each read, a k-weighted IVT-purity score is computed
    from its position in DTW space (fraction of k nearest neighbours
@@ -60,8 +60,9 @@ HMM emission source):
    transitions whose probabilities depend on the **genomic distance
    between the read's consecutive called sites**. Emissions are
    `p_mod_knn` by default (V2 mixture posteriors `p_mod_raw` are an
-   alternative emission source selected by training mode or by an
-   explicit `--emission-source` override). Forward–backward yields
+   alternative emission source, selected only via an explicit
+   `--score-field p_mod_raw` override on the `aggregate` path).
+   Forward–backward yields
    per-read marginal posteriors at every called site — bit-exact,
    `numba`-JIT, no `fastmath`.
 5. **Per-read output → single-molecule combinatorics.** The pipeline
@@ -536,10 +537,10 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 |-------|-------|----------------------|
 | **A** | Input | Paired native direct-RNA reads + in-vitro-transcribed control + reference transcriptome |
 | **B** | Signal comparison via batched CUDA DTW | Per-position paired ionic-current traces (extracted via `f5c eventalign`) → DTW warping correspondence → blue-ramp symmetric distance matrix; entire contig in one kernel launch, 16 concurrent CUDA streams |
-| **C(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global); outputs `z_scores` used by semi-supervised training |
-| **C(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior; outputs `p_mod_raw` — alternative HMM emission source, also the training signal for semi-/supervised HMM |
+| **C(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global); outputs `z_scores` (computed but not consumed on the default path; kept for ablation / debugging) |
+| **C(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior; outputs `p_mod_raw` — alternative HMM emission source, selected only via `aggregate --score-field p_mod_raw` |
 | **C(ii-default)** | kNN IVT-purity + Beta EM | k-weighted IVT-purity score in DTW space, Beta-EM calibrated; outputs `p_mod_knn` — **the default HMM emission source** |
-| **C(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites; emissions = `p_mod_knn` (default) or `p_mod_raw` (training / override) |
+| **C(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites; emissions = `p_mod_knn` (default) or `p_mod_raw` (explicit override) |
 | **D** | Per-site reference-anchored stack | Beta-Binomial posterior ridgeline + 95 % CI forest + Manhattan `-log₁₀(p_adj)` lollipops (BH-FDR) + Mann-Whitney native-vs-IVT inset + per-read mod-BAM strip, all pinned to one `5' → 3'` reference axis |
 | **E** | Combinatorial phasing | Single-molecule mod-BAM output (`MM:Z` / `ML:B:C`) enables co-deposition / mutual-exclusion contrasts over arbitrary site sets |
 

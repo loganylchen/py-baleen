@@ -53,10 +53,9 @@ actually on the critical path?" note below.
 >                                                              │          │
 >                                                              │          ▼
 >                                                              │    mod_ratio, pvalue
->                                                              └── (training signal for
->                                                                   semi-/supervised HMM,
->                                                                   or if emission_source
->                                                                   is switched to
+>                                                              └── (only consumed if
+>                                                                   emission_source is
+>                                                                   switched to
 >                                                                   p_mod_raw)
 > ```
 >
@@ -64,9 +63,10 @@ actually on the critical path?" note below.
 > shrinkage axis and the V2 `anchor_null` / `gate_mode` / `lambda_reg`
 > axes in `AblationConfig` produce metrics identical to baseline: those
 > paths write to `z_scores` and `p_mod_raw`, which site aggregation
-> never reads. They re-enter the output only in semi-supervised or
-> supervised HMM training (see `_hmm_training.py`), or when the caller
-> explicitly switches `emission_source` to `p_mod_raw`.
+> never reads. They re-enter the output only when the caller explicitly
+> switches `emission_source` to `p_mod_raw` (e.g. via
+> `aggregate --score-field p_mod_raw`); otherwise they are kept purely
+> for ablation studies and debugging.
 
 ---
 
@@ -137,10 +137,9 @@ For each genomic position, compute DTW distances between ALL read pairs:
 ## Stage 2 (V1): Empirical-Bayes Null Scoring  *(computed but not consumed by default)*
 
 > V1 runs on every read at every position, producing `z_scores` on
-> `PositionStats`. In the default unsupervised pipeline nothing
-> downstream reads `z_scores` or the shrunk `(μ̂, σ̂)` parameters — they
-> are stored for inspection / debugging and become the input to
-> semi-supervised HMM calibration when that training mode is selected.
+> `PositionStats`. In the default pipeline nothing downstream reads
+> `z_scores` or the shrunk `(μ̂, σ̂)` parameters — they are stored on
+> `PositionStats` for ablation studies and debugging only.
 
 ### 2.1 Extract Per-Read Scores
 ```
@@ -333,12 +332,12 @@ Output: Smoothed p_mod_hmm
 │   • score = log(median DTW to IVT)                                     │
 │   • Fit null from IVT: μ, σ via median + MAD                           │
 │   • Hierarchical shrinkage: borrow from neighbors if low coverage      │
-│   • Output: z-scores (consumed only by semi-supervised training)       │
+│   • Output: z-scores (not consumed by default; kept for ablation)      │
 │                                                                         │
 │   V2 mixture: anchored two-component EM + soft gate                    │
 │   • Output: p_mod_raw  (computed, not on default critical path;        │
-│     consumed if emission_source is switched, or by semi/supervised     │
-│     HMM training)                                                      │
+│     consumed only if emission_source is explicitly switched, e.g. via  │
+│     `aggregate --score-field p_mod_raw`)                               │
 │                                                                         │
 │                         │                                               │
 │                         ▼                                               │
