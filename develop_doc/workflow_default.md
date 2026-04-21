@@ -14,7 +14,11 @@ baleen run \
   --output-dir results/
 ```
 
-This runs the entire V1 → V2 → V3 pipeline with all defaults.
+This runs the full default pipeline: DTW → kNN + Beta → HMM → site-level
+aggregation. V1 (empirical-Bayes null) and the V2 mixture EM are also
+computed and stored on `PositionStats`, but **their outputs are not
+consumed downstream** in default unsupervised mode — see the "What is
+actually on the critical path?" note below.
 
 ---
 
@@ -27,12 +31,42 @@ This runs the entire V1 → V2 → V3 pipeline with all defaults.
 │   ─────                    ──────────              ──────               │
 │                                                                         │
 │   Native BAM/FASTQ/BLOW5 ─┐                                          │
-│                           ├─► f5c eventalign ─► DTW matrix ─► V1 ─► V2 ─► V3 ─► p_mod
+│                           ├─► f5c eventalign ─► DTW matrix ─► kNN+Beta ─► HMM ─► p_mod
 │   IVT BAM/FASTQ/BLOW5 ────┘                                          │
 │   Reference FASTA                                                      │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **What is actually on the critical path (default / unsupervised mode)?**
+>
+> ```
+> DTW distances
+>    │
+>    ├─► V1 (EB null + shrinkage)          ─► z-scores        ┐  computed,
+>    ├─► V2 (anchored mixture EM + gate)   ─► p_mod_raw       ┤  NOT consumed
+>    │                                                         │  downstream
+>    └─► kNN IVT-purity + Beta EM          ─► p_mod_knn  ─────┼──► HMM ─► p_mod_hmm
+>                                                              │          │
+>                                                              │          ▼
+>                                                              │   threshold + Fisher
+>                                                              │          │
+>                                                              │          ▼
+>                                                              │    mod_ratio, pvalue
+>                                                              └── (training signal for
+>                                                                   semi-/supervised HMM,
+>                                                                   or if emission_source
+>                                                                   is switched to
+>                                                                   p_mod_raw)
+> ```
+>
+> The HMM's default `emission_source = "p_mod_knn"` is the reason the V1
+> shrinkage axis and the V2 `anchor_null` / `gate_mode` / `lambda_reg`
+> axes in `AblationConfig` produce metrics identical to baseline: those
+> paths write to `z_scores` and `p_mod_raw`, which site aggregation
+> never reads. They re-enter the output only in semi-supervised or
+> supervised HMM training (see `_hmm_training.py`), or when the caller
+> explicitly switches `emission_source` to `p_mod_raw`.
 
 ---
 
@@ -100,7 +134,13 @@ For each genomic position, compute DTW distances between ALL read pairs:
 
 ---
 
-## Stage 2 (V1): Empirical-Bayes Null Scoring
+## Stage 2 (V1): Empirical-Bayes Null Scoring  *(computed but not consumed by default)*
+
+> V1 runs on every read at every position, producing `z_scores` on
+> `PositionStats`. In the default unsupervised pipeline nothing
+> downstream reads `z_scores` or the shrunk `(μ̂, σ̂)` parameters — they
+> are stored for inspection / debugging and become the input to
+> semi-supervised HMM calibration when that training mode is selected.
 
 ### 2.1 Extract Per-Read Scores
 ```
@@ -144,7 +184,14 @@ Output: z-score = (score - μ̂) / σ̂
 
 ---
 
-## Stage 2 (V2): kNN IVT-Purity Scoring
+## Stage 2 (default emission path): kNN IVT-Purity Scoring
+
+> Note on V2 naming: `AblationConfig` labels the **anchored two-component
+> mixture EM** as "V2" (axes `anchor_null`, `gate_mode`, `lambda_reg`).
+> The mixture runs on every default call and writes `p_mod_raw`, but
+> that output is not on the default critical path (see overview above).
+> The kNN branch described in this section is what actually reaches the
+> HMM as emissions in default mode.
 
 ### 2.4 k-Nearest Neighbor Classification
 ```
@@ -282,16 +329,21 @@ Output: Smoothed p_mod_hmm
 │                         │                                               │
 │                         ▼                                               │
 │                                                                         │
-│   V1: EMPIRICAL-BAYES NULL                                              │
+│   V1: EMPIRICAL-BAYES NULL    (computed, not on default critical path) │
 │   • score = log(median DTW to IVT)                                     │
 │   • Fit null from IVT: μ, σ via median + MAD                           │
 │   • Hierarchical shrinkage: borrow from neighbors if low coverage      │
-│   • Output: z-scores                                                   │
+│   • Output: z-scores (consumed only by semi-supervised training)       │
+│                                                                         │
+│   V2 mixture: anchored two-component EM + soft gate                    │
+│   • Output: p_mod_raw  (computed, not on default critical path;        │
+│     consumed if emission_source is switched, or by semi/supervised     │
+│     HMM training)                                                      │
 │                                                                         │
 │                         │                                               │
 │                         ▼                                               │
 │                                                                         │
-│   V2: kNN IVT-PURITY (DEFAULT)                                         │
+│   kNN IVT-PURITY + BETA EM  (DEFAULT HMM emission source)              │
 │   • kNN_score = 1 - (IVT fraction among k nearest neighbors)          │
 │   • Calibrate via Beta EM: P(mod | kNN_score)                          │
 │   • Output: p_mod_knn                                                  │

@@ -139,6 +139,13 @@ that minimizes cumulative distance.
 ## Panel C: Hierarchical Statistical Inference (V1 → V2 → V3)
 
 ### C1. V1: Empirical-Bayes Null Scoring
+
+> **Runs every call, but `z_scores` is NOT on the default critical
+> path.** In default unsupervised mode the HMM emission source is
+> `p_mod_knn` (see C2a / C3), so the `shrinkage` ablation axis produces
+> metrics identical to baseline. The shrunk `(μ̂, σ̂)` and `z_scores`
+> become observable only when the HMM is trained in semi-supervised
+> mode (which Platt-calibrates on these scores, see `_hmm_training.py`).
 **Visual:** Three-step process
 
 ```
@@ -220,6 +227,15 @@ P(mod | score) = f_alt(score) / [f_null(score) + f_alt(score)]
 **Caption:** kNN IVT-purity scoring quantifies how isolated a read is from IVT controls in DTW distance space. Modified reads cluster together, away from IVT neighbors.
 
 ### C2b. V2b: Anchored Two-Component Mixture EM (Alternative Scoring)
+
+> **Runs every call, but `p_mod_raw` is NOT on the default critical
+> path.** In default unsupervised mode the HMM reads `p_mod_knn` as
+> emissions (see C3), so the `anchor_null` / `gate_mode` / `lambda_reg`
+> ablation axes produce metrics identical to baseline. `p_mod_raw` is
+> consumed only when either (a) the caller switches the HMM
+> `emission_source` to `"p_mod_raw"`, or (b) the HMM is trained in
+> semi-supervised / supervised mode (see `_hmm_training.py`), both of
+> which read `p_mod_raw` as the calibration signal.
 **Visual:** Mixture model fitting on z-scores
 
 ```
