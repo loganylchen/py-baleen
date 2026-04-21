@@ -14,7 +14,9 @@ chosen to encode a specific methodological claim of the paper.
 
 Before writing a prompt, understand what distinguishes Baleen from a
 "plain" score-and-threshold modification caller. The visuals must signal
-these six innovations:
+these seven innovations (items 3 and 3b are both shown in panel C as
+adjacent sub-blocks; default runtime uses the 3b / kNN branch as the
+HMM emission source):
 
 1. **Batched multi-position CUDA DTW.** All genomic positions of a contig
    are processed in **one kernel launch** — wavefront parallelism, one
@@ -36,14 +38,32 @@ these six innovations:
    sigmoid on the BIC gap**, not a binary reject/accept, gates the final
    posterior — removing the brittle threshold behaviour of classical
    mixture callers. A λ-regularised shrinkage pulls alternative
-   parameters toward the transcriptome-wide alternative prior.
+   parameters toward the transcriptome-wide alternative prior. **Note on
+   the default runtime path:** V2 mixture posteriors (`p_mod_raw`) are
+   computed every call but are **not** the HMM emission source in the
+   default unsupervised pipeline. The default emission source is the
+   kNN IVT-purity score (see bullet 3b). `p_mod_raw` is consumed only
+   when `emission_source` is switched to `"p_mod_raw"` or when the HMM
+   is trained in semi-supervised / supervised mode (`_hmm_training.py`
+   reads it as the calibration signal).
+3b. **kNN IVT-purity + Beta-EM calibration (default HMM emission
+   source).** For each read, a k-weighted IVT-purity score is computed
+   from its position in DTW space (fraction of k nearest neighbours
+   that are IVT controls, distance-weighted). The raw score is
+   calibrated by a Beta(a₀, b₀) / Beta(a₁, b₁) two-component EM whose
+   null is anchored on the IVT subset. This produces `p_mod_knn`, which
+   is what the V3 HMM actually reads as emissions in the default
+   pipeline.
 4. **Gap-aware per-read forward–backward HMM (V3).** Unlike site-level
    HMMs that smooth across sites in an abstract graph, V3 runs a
    **2-state HMM along each individual read's trajectory**, with
    transitions whose probabilities depend on the **genomic distance
-   between the read's consecutive called sites**. Emissions are V2
-   posteriors. Forward–backward yields per-read marginal posteriors
-   at every called site — bit-exact, `numba`-JIT, no `fastmath`.
+   between the read's consecutive called sites**. Emissions are
+   `p_mod_knn` by default (V2 mixture posteriors `p_mod_raw` are an
+   alternative emission source selected by training mode or by an
+   explicit `--emission-source` override). Forward–backward yields
+   per-read marginal posteriors at every called site — bit-exact,
+   `numba`-JIT, no `fastmath`.
 5. **Per-read output → single-molecule combinatorics.** The pipeline
    does not collapse to per-site stoichiometry; it emits
    `p(mod | read, position)` as standard mod-BAM (`MM:Z` / `ML:B:C`).
@@ -516,9 +536,10 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 |-------|-------|----------------------|
 | **A** | Input | Paired native direct-RNA reads + in-vitro-transcribed control + reference transcriptome |
 | **B** | Signal comparison via batched CUDA DTW | Per-position paired ionic-current traces (extracted via `f5c eventalign`) → DTW warping correspondence → blue-ramp symmetric distance matrix; entire contig in one kernel launch, 16 concurrent CUDA streams |
-| **C(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global) |
-| **C(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior |
-| **C(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites |
+| **C(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global); outputs `z_scores` used by semi-supervised training |
+| **C(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior; outputs `p_mod_raw` — alternative HMM emission source, also the training signal for semi-/supervised HMM |
+| **C(ii-default)** | kNN IVT-purity + Beta EM | k-weighted IVT-purity score in DTW space, Beta-EM calibrated; outputs `p_mod_knn` — **the default HMM emission source** |
+| **C(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites; emissions = `p_mod_knn` (default) or `p_mod_raw` (training / override) |
 | **D** | Per-site reference-anchored stack | Beta-Binomial posterior ridgeline + 95 % CI forest + Manhattan `-log₁₀(p_adj)` lollipops (BH-FDR) + Mann-Whitney native-vs-IVT inset + per-read mod-BAM strip, all pinned to one `5' → 3'` reference axis |
 | **E** | Combinatorial phasing | Single-molecule mod-BAM output (`MM:Z` / `ML:B:C`) enables co-deposition / mutual-exclusion contrasts over arbitrary site sets |
 
@@ -674,10 +695,11 @@ phi-coefficient statistics over any pair or set of sites).
 - **Prompt E / E-short** — standalone combinatorial figure showcasing
   the single-molecule advantage.
 
-All prompts are engineered to expose Baleen's six algorithmic signatures
-(**DTW warping correspondence + wavefront-accent CUDA DTW**, three-level
-coverage-adaptive shrinkage, null-anchored mixture EM with soft gating,
-gap-aware per-read HMM, single-molecule combinatorics, streaming
-architecture). If a draft loses any of these signals, consult the
-**Editing tips** table to re-inject the missing motif with a single
-targeted sentence.
+All prompts are engineered to expose Baleen's seven algorithmic
+signatures (**DTW warping correspondence + wavefront-accent CUDA DTW**,
+three-level coverage-adaptive shrinkage, null-anchored mixture EM with
+soft gating, kNN IVT-purity + Beta-EM calibration as the default
+emission source, gap-aware per-read HMM, single-molecule
+combinatorics, streaming architecture). If a draft loses any of these
+signals, consult the **Editing tips** table to re-inject the missing
+motif with a single targeted sentence.
