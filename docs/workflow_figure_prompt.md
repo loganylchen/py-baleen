@@ -14,9 +14,7 @@ chosen to encode a specific methodological claim of the paper.
 
 Before writing a prompt, understand what distinguishes Baleen from a
 "plain" score-and-threshold modification caller. The visuals must signal
-these seven innovations (items 3 and 3b are both shown in panel C as
-adjacent sub-blocks; default runtime uses the 3b / kNN branch as the
-HMM emission source):
+these five innovations:
 
 1. **Batched multi-position CUDA DTW.** All genomic positions of a contig
    are processed in **one kernel launch** — wavefront parallelism, one
@@ -24,62 +22,34 @@ HMM emission source):
    ~12 KB of shared memory, one thread block per read pair, 16 concurrent
    CUDA streams, FP32 squared-Euclidean cost, single `sqrt` at the end.
    Scale: `O(10⁴)` pairwise alignments concurrently on a single GPU.
-2. **Coverage-adaptive three-level James-Stein shrinkage (V1).** The
-   per-position IVT null distribution is a *weighted composition* of
-   (i) the position-specific MLE, (ii) a local k-mer-context window
-   prior, and (iii) the transcriptome-wide global prior. Mixing weights
-   are **functions of the position's coverage** — high coverage trusts
-   the position; low coverage falls back to context / global.
-3. **Null-anchored two-component mixture EM with continuous soft gating
-   (V2).** The null component is **frozen** at the V1-calibrated Beta
-   (or Normal) parameters; only the alternative component and the
-   mixture weight `π` are updated by EM. This resolves the label-switching
-   / identifiability problem of free 2-component mixtures. A **continuous
-   sigmoid on the BIC gap**, not a binary reject/accept, gates the final
-   posterior — removing the brittle threshold behaviour of classical
-   mixture callers. A λ-regularised shrinkage pulls alternative
-   parameters toward the transcriptome-wide alternative prior. **Note on
-   the default runtime path:** V2 mixture posteriors (`p_mod_raw`) are
-   computed every call but are **not** the HMM emission source in the
-   default unsupervised pipeline. The default emission source is the
-   kNN IVT-purity score (see bullet 3b). `p_mod_raw` is consumed only
-   when the caller explicitly switches `emission_source` to
-   `"p_mod_raw"` (e.g. via `aggregate --score-field p_mod_raw`);
-   otherwise it is kept on `PositionStats` for ablation and debugging.
-3b. **kNN IVT-purity + Beta-EM calibration (default HMM emission
-   source).** For each read, a k-weighted IVT-purity score is computed
-   from its position in DTW space (fraction of k nearest neighbours
-   that are IVT controls, distance-weighted). The raw score is
-   calibrated by a Beta(a₀, b₀) / Beta(a₁, b₁) two-component EM whose
-   null is anchored on the IVT subset. This produces `p_mod_knn`, which
-   is what the V3 HMM actually reads as emissions in the default
-   pipeline.
-4. **Gap-aware per-read forward–backward HMM (V3).** Unlike site-level
-   HMMs that smooth across sites in an abstract graph, V3 runs a
+2. **kNN IVT-purity + Beta-EM calibration (HMM emission source).**
+   For each read, a k-weighted IVT-purity score is computed from its
+   position in DTW space (fraction of k nearest neighbours that are IVT
+   controls, distance-weighted). The raw score is calibrated by a
+   Beta(a₀, b₀) / Beta(a₁, b₁) two-component EM whose null is anchored
+   on the IVT subset. This produces `p_mod_knn`, the HMM emission.
+3. **Gap-aware per-read forward–backward HMM.** Unlike site-level
+   HMMs that smooth across sites in an abstract graph, this HMM runs a
    **2-state HMM along each individual read's trajectory**, with
    transitions whose probabilities depend on the **genomic distance
    between the read's consecutive called sites**. Emissions are
-   `p_mod_knn` by default (V2 mixture posteriors `p_mod_raw` are an
-   alternative emission source, selected only via an explicit
-   `--score-field p_mod_raw` override on the `aggregate` path).
-   Forward–backward yields
-   per-read marginal posteriors at every called site — bit-exact,
-   `numba`-JIT, no `fastmath`.
-5. **Per-read output → single-molecule combinatorics.** The pipeline
+   `p_mod_knn`. Forward–backward yields per-read marginal posteriors
+   at every called site — bit-exact, `numba`-JIT, no `fastmath`.
+4. **Per-read output → single-molecule combinatorics.** The pipeline
    does not collapse to per-site stoichiometry; it emits
    `p(mod | read, position)` as standard mod-BAM (`MM:Z` / `ML:B:C`).
    Two or more sites on the **same molecule** can be phased, yielding
    co-deposition / mutual-exclusion / independence contrasts that bulk
    methods cannot observe.
-6. **Streaming architecture.** DTW → HMM → Beta-Binomial aggregation is
+5. **Streaming architecture.** DTW → HMM → Beta-Binomial aggregation is
    **fused per contig**; distance matrices are discarded after inference.
    Memory footprint is independent of transcriptome size.
 
-Every prompt that follows exposes these six themes through one specific
+Every prompt that follows exposes these five themes through one specific
 visual hook (**DTW warping correspondence + wavefront accent** for the
-merged signal/DTW panel, shrinkage funnel, anchored pin, gap-aware
-chain, per-read phasing grid, streaming conveyor). When a first draft
-loses the sophistication, re-inject these hooks one at a time.
+merged signal/DTW panel, kNN + Beta-EM calibration, gap-aware HMM chain,
+per-read phasing grid, streaming conveyor). When a first draft loses the
+sophistication, re-inject these hooks one at a time.
 
 ---
 
@@ -96,8 +66,7 @@ loses the sophistication, re-inject these hooks one at a time.
   title-case sub-panel titles, italic for technical sub-captions.
 - **Line weight**: 1.0–1.5 pt skeletons, 0.75 pt axis ticks.
 - **Math callouts**: small monospace formulas (9-pt) are welcome where
-  they encode a claim (e.g. `π·f₁(x) / [(1−π)·f₀(x) + π·f₁(x)]` in the
-  V2 panel) — use them sparingly, one per sub-panel at most.
+  they encode a claim — use them sparingly, one per sub-panel at most.
 - **Iconography**: flat vector, thin stroke, 2-color fills, geometric.
   Pictograms over photoreal.
 - **Composition**: every panel is visually demarcated two ways at once —
@@ -199,45 +168,31 @@ distance out**. The combinatorial readout remains as panel *E*, at a
 > comparison → batched distance matrix*. One coherent algorithmic
 > statement, one panel.
 >
-> **Panel C — Hierarchical modification calling (V1 · V2 · V3)** *(the
+> **Panel C — Modification calling (kNN + Beta EM → HMM)** *(the
 > algorithmic centrepiece — largest panel)*. Bold uppercase "C" label
 > in the top-left corner (18-pt 700-weight, on light-slate rounded
 > square). A rounded cream (#F5F1EA) sub-panel spanning ~32–35 % of
 > the figure width — the **dominant panel of the figure**, clearly
 > wider than panel B,
-> divided into three horizontally stacked sub-blocks of equal height,
+> divided into two horizontally stacked sub-blocks of equal height,
 > each with its own mini-title in 10-pt 600-weight:
 >
-> (i) **V1 · empirical-Bayes null (three-level shrinkage).** A
-> funnel-shaped diagram: at the top, a wide band of light coral small
-> dots representing many IVT reads at one position; the band narrows
-> downward through three shrinkage stages labelled in 8-pt slate,
-> left-to-right or top-to-bottom: *"position"* → *"local k-mer window"*
-> → *"global transcriptome"*, with **a small coverage gauge** (circular
-> dial, 0 %–100 %) sitting beside the funnel whose needle position
-> determines how wide each stage is — high coverage narrows to the
-> position estimate quickly, low coverage remains wide until global.
-> Output: a single teal Beta density curve at the bottom of the funnel,
-> labelled *"Beta(α₀, β₀)"* in 9-pt italic.
->
-> (ii) **V2 · null-anchored mixture EM.** Two overlaid probability
-> density curves: a **pinned coral null** (Beta(α₀, β₀) from V1, with a
-> small pin / padlock glyph above it denoting the *"anchored, fixed"*
-> status) and a **teal alternative** (Beta(α₁, β₁), being learned, with
-> a small curved arrow showing parameter motion). A thin continuous
-> sigmoid gate curve runs horizontally along the baseline between the
-> two densities, with its inflection marked by a small vertical tick
-> (NOT a step function — a smooth S-curve). A miniature
-> 9-pt monospace formula callout floats to the right of the densities:
-> `γ = σ(ΔBIC) · π · f₁ / [(1−π) f₀ + π f₁]`. Beneath: an inset EM
+> (i) **kNN IVT-purity + Beta-EM calibration.** A small scatter glyph
+> showing a focal read surrounded by its k nearest neighbours in DTW
+> space (teal "native" dots, coral "IVT" dots), with a dashed k-radius
+> circle. A short arrow flows to the right into two overlaid Beta
+> density curves: a **pinned coral null** (Beta(α₀, β₀) fit on the IVT
+> subset, with a small pin / padlock glyph denoting *"anchored, fixed"*)
+> and a **teal alternative** (Beta(α₁, β₁), learned by EM, with a small
+> curved arrow showing parameter motion). A miniature 9-pt monospace
+> formula callout floats to the right of the densities:
+> `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]`. Beneath: an inset EM
 > convergence trajectory — a tiny line plot of `log-likelihood vs
 > iteration` going up and plateauing at ~10–30 iterations, labelled in
-> 8-pt slate. A small λ-shrinkage glyph (a tiny tether arrow from
-> Beta(α₁, β₁) pointing toward a faint "global prior" ghost curve)
-> signals the regularisation toward transcriptome-wide alternative
-> parameters.
+> 8-pt slate. Output of the sub-block: a single teal `p_mod_knn` value
+> glyph feeding the HMM.
 >
-> (iii) **V3 · gap-aware per-read forward–backward HMM.** A horizontal
+> (ii) **Gap-aware per-read forward–backward HMM.** A horizontal
 > graphical-model strip: five circular hidden-state nodes in a row,
 > each split diagonally into a teal "mod" half and a light-slate
 > "unmod" half (signalling a 2-state HMM). Adjacent nodes connected by
@@ -339,7 +294,7 @@ distance out**. The combinatorial readout remains as panel *E*, at a
 > between stages. Overall aesthetic: clean, dense but uncluttered,
 > editorial, publication-ready — signalling algorithmic sophistication
 > through specific mathematical motifs (DTW warping correspondence +
-> wavefront accent, shrinkage funnel, anchored pin, gap-aware chain,
+> wavefront accent, kNN + Beta-EM pin, gap-aware HMM chain,
 > forward/backward arcs, phasing grid) rather than decorative flourish.
 
 ---
@@ -356,7 +311,7 @@ combinatorial analysis lives in a separate figure 2.
 > (18-pt 700-weight black, inside an optional 24 × 24 px light-slate
 > rounded square), separated by thin 0.5-pt slate vertical rules**.
 >
-> **Relative sizing:** C (V1·V2·V3, centrepiece) > D (output stack) >
+> **Relative sizing:** C (kNN + Beta EM + HMM, centrepiece) > D (output stack) >
 > B (merged signals+DTW) > A (input). Panel C dominates.
 >
 > **(A) Input** — two stacked nanopore cross-sections threading RNA
@@ -379,19 +334,16 @@ combinatorial analysis lives in a separate figure 2.
 > CUDA streams"*. The warping correspondence is the visual centre of
 > mass; cost matrices and GPU chip are accents.
 >
-> **(C) Hierarchical calling — V1 · V2 · V3** (bold uppercase "C" label
-> in the top-left corner, 18-pt 700-weight on light-slate rounded
+> **(C) Modification calling — kNN + Beta EM → HMM** (bold uppercase "C"
+> label in the top-left corner, 18-pt 700-weight on light-slate rounded
 > square) in a rounded cream panel:
->  **V1** shrinkage funnel from IVT reads through three levels
->  (position → local k-mer window → global) with a small coverage dial
->  controlling the funnel width, terminating in a teal `Beta(α₀, β₀)`
->  density;
->  **V2** overlaid coral-pinned (padlock glyph) null density plus a
->  teal learnable alternative density, a smooth horizontal sigmoid
->  gate along the baseline, a small EM-convergence inset, a λ-shrinkage
->  tether arrow toward a ghost global-prior curve, monospace callout
->  `γ = σ(ΔBIC) · π·f₁ / [(1−π)f₀ + π·f₁]`;
->  **V3** five-node two-state HMM chain with emission arrows, variable
+>  **kNN + Beta EM** a small DTW-space scatter glyph of a focal read
+>  with k nearest neighbours inside a dashed k-radius circle (teal
+>  "native" / coral "IVT" dots) flowing into a coral-pinned (padlock
+>  glyph) null Beta density plus a teal learnable alternative Beta
+>  density, a small EM-convergence inset, monospace callout
+>  `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]` → outputs `p_mod_knn`;
+>  **HMM** five-node two-state HMM chain with emission arrows, variable
 >  arrow lengths/widths labelled "Δ = 1, 3, 7, 2, 12" (gap-aware
 >  transitions), and two arcing arrows above the chain — coral
 >  "α forward" and teal "β backward" — for forward–backward.
@@ -420,8 +372,8 @@ combinatorial analysis lives in a separate figure 2.
 > lines, no drop shadows, no rainbow gradients. Publication-ready,
 > editorial, dense but uncluttered — algorithmic sophistication
 > encoded through specific visual motifs (wavefront diagonal,
-> shrinkage funnel, anchored pin, gap-aware chain, forward/backward
-> arcs), not decorative flourish.
+> kNN + Beta-EM pin, gap-aware chain, forward/backward arcs),
+> not decorative flourish.
 
 ---
 
@@ -439,14 +391,16 @@ combinatorial analysis lives in a separate figure 2.
 > connected by ~10 thin slate correspondence curves — the hero motif) →
 > one blue-ramp symmetric distance matrix labelled "reads × reads"
 > with a small diagonal wavefront accent and a minimal GPU chip with
-> a few stream lanes. **(C, centrepiece)** Cream panel with three
-> sub-blocks: V1 coverage-controlled
-> shrinkage funnel (position→local→global) ending in a teal
-> `Beta(α₀,β₀)`; V2 pinned-coral null + learnable-teal alternative
-> with a smooth sigmoid soft-gate + EM convergence inset +
-> λ-shrinkage tether; V3 five-node 2-state HMM chain with
-> genomic-gap-labelled variable arrows (Δ=1,3,7,2,12) and two arcing
-> forward/backward passes. **(D)** Reference-anchored stack on one
+> a few stream lanes. **(C, centrepiece)** Cream panel with two
+> sub-blocks: (i) a kNN IVT-purity glyph — focal read + k nearest
+> neighbours in DTW space (teal native / coral IVT dots, dashed
+> k-radius circle) flowing into pinned-coral null `Beta(a₀,b₀)` +
+> learnable-teal alternative `Beta(a₁,b₁)` with an EM convergence
+> inset and 9-pt monospace callout
+> `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]` → `p_mod_knn`;
+> (ii) a five-node 2-state HMM chain with genomic-gap-labelled
+> variable arrows (Δ=1,3,7,2,12) and two arcing forward/backward
+> passes. **(D)** Reference-anchored stack on one
 > shared 5′→3′ axis — teal Beta-Binomial posterior ridgeline of
 > per-position violins, 95 %-CI forest whiskers, Manhattan-style
 > `-log₁₀(p_adj)` lollipops with dashed BH-FDR line, a Mann-Whitney
@@ -454,9 +408,9 @@ combinatorial analysis lives in a separate figure 2.
 > callout), and a per-read mod-BAM strip (`MM:Z / ML:B:C`). Palette
 > teal #2F8F9D / coral #E7734A / warm red #B33A3A / slate / cream /
 > white. Helvetica / Inter, 1 pt lines, no shadows, publication-ready,
-> algorithmic motifs (DTW warping correspondence, shrinkage funnel,
-> anchor pin, gap-aware chain, F/B arcs, reference-anchored posterior
-> stack) preserved. Panel sizing C > D > B > A; C is the algorithmic
+> algorithmic motifs (DTW warping correspondence, kNN + Beta-EM pin,
+> gap-aware chain, F/B arcs, reference-anchored posterior stack)
+> preserved. Panel sizing C > D > B > A; C is the algorithmic
 > centrepiece.
 
 ---
@@ -480,13 +434,15 @@ combinatorial analysis lives in a separate figure 2.
 > diagonal wavefront accent and a minimal GPU chip with a few stream
 > lanes; caption *"dynamic time warping · single kernel launch · 16
 > CUDA streams"*.
-> **(C) V1 · V2 · V3 in a cream panel (centrepiece)** — V1
-> coverage-adaptive three-level shrinkage funnel (position → local →
-> global) with a coverage dial; V2 pinned-coral null + learnable-teal
-> alternative with a continuous sigmoid soft-gate, EM convergence
-> inset, and a λ-shrinkage tether; V3 five-node 2-state HMM chain
-> with genomic-gap-labelled variable-width transitions and arcing
-> forward/backward passes.
+> **(C) kNN + Beta EM → HMM in a cream panel (centrepiece)** — a
+> kNN IVT-purity glyph (focal read + k nearest neighbours in DTW
+> space, teal native / coral IVT dots, dashed k-radius circle)
+> flowing into pinned-coral null `Beta(a₀,b₀)` + learnable-teal
+> alternative `Beta(a₁,b₁)` with an EM convergence inset and 9-pt
+> monospace callout `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]` →
+> `p_mod_knn`; then a five-node 2-state HMM chain with
+> genomic-gap-labelled variable-width transitions (Δ=1,3,7,2,12)
+> and arcing forward/backward passes.
 > **(D) Reference-anchored output stack** — layers pinned to one
 > shared horizontal `5′→3′` reference axis: teal Beta-Binomial
 > posterior ridgeline (per-position violins), 95 %-CI forest
@@ -514,11 +470,13 @@ combinatorial analysis lives in a separate figure 2.
 > connected by ~10 thin slate correspondence curves — hero motif),
 > and one compact blue-ramp symmetric distance matrix with a diagonal
 > wavefront accent plus a minimal GPU chip with a few stream lanes;
-> (C, centrepiece) cream panel with V1 coverage-adaptive three-level
-> shrinkage funnel, V2 pinned-null + learnable-alt densities with a
-> smooth sigmoid soft-gate and EM convergence inset, V3 five-node
-> 2-state HMM chain with gap-labelled variable transitions and
-> forward/backward arcs; (D) reference-anchored output stack on a
+> (C, centrepiece) cream panel with a kNN IVT-purity glyph (focal
+> read + k nearest neighbours, teal native / coral IVT dots, dashed
+> k-radius circle) flowing into pinned-null + learnable-alt Beta
+> densities with an EM convergence inset and callout
+> `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]` → `p_mod_knn`, then a
+> five-node 2-state HMM chain with gap-labelled variable transitions
+> and forward/backward arcs; (D) reference-anchored output stack on a
 > shared 5′→3′ axis — teal Beta-Binomial posterior violins, 95 %-CI
 > forest whiskers, Manhattan `-log₁₀(p_adj)` lollipops with dashed
 > BH-FDR line, Mann-Whitney balloon (native/IVT `p(mod)` densities,
@@ -537,10 +495,8 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 |-------|-------|----------------------|
 | **A** | Input | Paired native direct-RNA reads + in-vitro-transcribed control + reference transcriptome |
 | **B** | Signal comparison via batched CUDA DTW | Per-position paired ionic-current traces (extracted via `f5c eventalign`) → DTW warping correspondence → blue-ramp symmetric distance matrix; entire contig in one kernel launch, 16 concurrent CUDA streams |
-| **C(i)** | V1 · empirical-Bayes null | Coverage-adaptive three-level James-Stein shrinkage (position → local k-mer window → global); outputs `z_scores` (computed but not consumed on the default path; kept for ablation / debugging) |
-| **C(ii)** | V2 · anchored mixture EM | Null-frozen two-component mixture with continuous soft-gating (`σ(ΔBIC)`) and λ-regularised alternative prior; outputs `p_mod_raw` — alternative HMM emission source, selected only via `aggregate --score-field p_mod_raw` |
-| **C(ii-default)** | kNN IVT-purity + Beta EM | k-weighted IVT-purity score in DTW space, Beta-EM calibrated; outputs `p_mod_knn` — **the default HMM emission source** |
-| **C(iii)** | V3 · gap-aware forward–backward | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites; emissions = `p_mod_knn` (default) or `p_mod_raw` (explicit override) |
+| **C(i)** | kNN IVT-purity + Beta EM | k-weighted IVT-purity score in DTW space, Beta-EM calibrated; outputs `p_mod_knn` — the HMM emission source |
+| **C(ii)** | Gap-aware forward–backward HMM | Per-read 2-state HMM whose transition probabilities depend on genomic gap between consecutive called sites; emissions = `p_mod_knn`; outputs `p_mod_hmm` |
 | **D** | Per-site reference-anchored stack | Beta-Binomial posterior ridgeline + 95 % CI forest + Manhattan `-log₁₀(p_adj)` lollipops (BH-FDR) + Mann-Whitney native-vs-IVT inset + per-read mod-BAM strip, all pinned to one `5' → 3'` reference axis |
 | **E** | Combinatorial phasing | Single-molecule mod-BAM output (`MM:Z` / `ML:B:C`) enables co-deposition / mutual-exclusion contrasts over arbitrary site sets |
 
@@ -553,9 +509,8 @@ wordings — they match the paper in preparation and the CLI vocabulary.
 | Panel B reads as "just another heatmap" | *"reorganise Panel B into three flowing sub-regions: (i) per-position paired teal-native / coral-IVT ionic-current traces with a 7-pt grey 'via f5c eventalign' attribution, (ii) a zoomed-in DTW warping callout — two mirrored traces connected by ~10 thin slate correspondence curves (the hero motif), (iii) one compact blue-ramp reads × reads distance matrix with a diagonal wavefront accent and a minimal GPU chip with a few stream lanes"* |
 | DTW correspondence motif is missing | *"add two mirrored ionic-current traces (teal native above, coral IVT below) connected by ~10 thin slate curved lines showing sample-to-sample correspondence — this is the literal visual of dynamic time warping and should be the centre of mass of Panel B"* |
 | DTW stage doesn't read as batched / parallel | *"add a small diagonal teal → white wavefront accent on one corner of the distance matrix and a minimal GPU-chip pictogram with four thin parallel stream lanes — accents only, not the focus"* |
-| V1 looks like a single arrow | *"replace with a three-level funnel narrowing through 'position → local k-mer window → global', with a circular coverage dial whose needle controls funnel width"* |
-| V2 looks like just two Gaussians | *"add a padlock or pin glyph above the null curve labelled 'anchored', a curved parameter-motion arrow on the alternative, a smooth S-shaped sigmoid gate along the baseline (NOT a step), a 9-pt monospace formula callout `γ = σ(ΔBIC)·π·f₁/[(1−π)f₀+π·f₁]`, an EM convergence inset (log-likelihood vs iteration plateauing), and a λ-shrinkage tether to a ghost global-prior curve"* |
-| V3 looks like a vanilla HMM chain | *"vary the arrow lengths and stroke weights between adjacent nodes according to printed genomic-gap labels (Δ=1, 3, 7, 2, 12), split each node diagonally into teal 'mod' and light-slate 'unmod' halves, and add two arcing passes above the chain — coral 'α forward' left-to-right and teal 'β backward' right-to-left"* |
+| kNN + Beta-EM block looks like just two Gaussians | *"add a compact kNN glyph — focal read at centre, k nearest neighbours around it in DTW space (teal native / coral IVT dots), a dashed k-radius circle — flowing into pinned-coral null Beta + learnable-teal alternative Beta, a 9-pt monospace callout `P(mod | kNN) = π·f₁ / [(1−π)·f₀ + π·f₁]`, and an EM convergence inset (log-likelihood vs iteration plateauing)"* |
+| HMM looks like a vanilla chain | *"vary the arrow lengths and stroke weights between adjacent nodes according to printed genomic-gap labels (Δ=1, 3, 7, 2, 12), split each node diagonally into teal 'mod' and light-slate 'unmod' halves, and add two arcing passes above the chain — coral 'α forward' left-to-right and teal 'β backward' right-to-left"* |
 | Panel D reads as a generic table + volcano | *"replace with a reference-anchored vertically stacked genome-browser track on a shared 5'→3' axis: a Beta-Binomial posterior ridgeline (per-position teal violins, width = uncertainty), a 95 %-CI forest of horizontal whiskers, Manhattan-style -log₁₀(p_adj) lollipops with a dashed BH-FDR line, a Mann-Whitney inset balloon with overlaid teal-native / coral-IVT p(mod) densities, and a per-read mod-BAM strip underneath — every layer pinned to the same reference coordinates"* |
 | Too slick / marketing-y | *"remove decorative flourish, desaturate palette, restrict to the named single-hue / diverging ramps, re-emphasise specific mathematical motifs"* |
 | Too busy | *"drop the formula callouts, keep only the visual motifs; widen gutters to 18 %"* |
@@ -696,11 +651,10 @@ phi-coefficient statistics over any pair or set of sites).
 - **Prompt E / E-short** — standalone combinatorial figure showcasing
   the single-molecule advantage.
 
-All prompts are engineered to expose Baleen's seven algorithmic
+All prompts are engineered to expose Baleen's five algorithmic
 signatures (**DTW warping correspondence + wavefront-accent CUDA DTW**,
-three-level coverage-adaptive shrinkage, null-anchored mixture EM with
-soft gating, kNN IVT-purity + Beta-EM calibration as the default
-emission source, gap-aware per-read HMM, single-molecule
-combinatorics, streaming architecture). If a draft loses any of these
+kNN IVT-purity + Beta-EM calibration as the HMM emission source,
+gap-aware per-read HMM, single-molecule combinatorics, streaming
+architecture). If a draft loses any of these
 signals, consult the **Editing tips** table to re-inject the missing
 motif with a single targeted sentence.

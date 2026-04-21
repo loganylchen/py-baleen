@@ -15,10 +15,7 @@ baleen run \
 ```
 
 This runs the full default pipeline: DTW → kNN + Beta → HMM → site-level
-aggregation. V1 (empirical-Bayes null) and the V2 mixture EM are also
-computed and stored on `PositionStats`, but **their outputs are not
-consumed downstream** in default unsupervised mode — see the "What is
-actually on the critical path?" note below.
+aggregation.
 
 ---
 
@@ -38,35 +35,17 @@ actually on the critical path?" note below.
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **What is actually on the critical path (default / unsupervised mode)?**
+> **Default critical path:**
 >
 > ```
-> DTW distances
->    │
->    ├─► V1 (EB null + shrinkage)          ─► z-scores        ┐  computed,
->    ├─► V2 (anchored mixture EM + gate)   ─► p_mod_raw       ┤  NOT consumed
->    │                                                         │  downstream
->    └─► kNN IVT-purity + Beta EM          ─► p_mod_knn  ─────┼──► HMM ─► p_mod_hmm
->                                                              │          │
->                                                              │          ▼
->                                                              │   threshold + Fisher
->                                                              │          │
->                                                              │          ▼
->                                                              │    mod_ratio, pvalue
->                                                              └── (only consumed if
->                                                                   emission_source is
->                                                                   switched to
->                                                                   p_mod_raw)
+> DTW distances ─► kNN IVT-purity + Beta EM ─► p_mod_knn ─► HMM ─► p_mod_hmm
+>                                                                     │
+>                                                                     ▼
+>                                                         threshold + Fisher
+>                                                                     │
+>                                                                     ▼
+>                                                            mod_ratio, pvalue
 > ```
->
-> The HMM's default `emission_source = "p_mod_knn"` is the reason the V1
-> shrinkage axis and the V2 `anchor_null` / `gate_mode` / `lambda_reg`
-> axes in `AblationConfig` produce metrics identical to baseline: those
-> paths write to `z_scores` and `p_mod_raw`, which site aggregation
-> never reads. They re-enter the output only when the caller explicitly
-> switches `emission_source` to `p_mod_raw` (e.g. via
-> `aggregate --score-field p_mod_raw`); otherwise they are kept purely
-> for ablation studies and debugging.
 
 ---
 
@@ -134,65 +113,9 @@ For each genomic position, compute DTW distances between ALL read pairs:
 
 ---
 
-## Stage 2 (V1): Empirical-Bayes Null Scoring  *(computed but not consumed by default)*
+## Stage 2: kNN IVT-Purity Scoring
 
-> V1 runs on every read at every position, producing `z_scores` on
-> `PositionStats`. In the default pipeline nothing downstream reads
-> `z_scores` or the shrunk `(μ̂, σ̂)` parameters — they are stored on
-> `PositionStats` for ablation studies and debugging only.
-
-### 2.1 Extract Per-Read Scores
-```
-For each read i at position p:
-
-  score[i] = log1p( median DTW distance to all IVT reads )
-
-  Native reads ─► HIGH scores (far from IVT)
-  IVT reads    ─► LOW scores  (close to IVT)
-```
-
-### 2.2 Fit Robust Null from IVT
-```
-Using only IVT reads:
-
-  μ_IVT = median(IVT_scores)
-  σ_IVT = MAD(IVT_scores) × 1.4826
-
-  This defines the NULL distribution: N(μ_IVT, σ_IVT²)
-```
-
-### 2.3 Hierarchical Shrinkage
-```
-Position with low IVT coverage borrows strength from neighbors:
-
-  ┌─────────────────────────────────────────────────────────┐
-  │  Position j with n_j IVT reads:                        │
-  │                                                        │
-  │  μ̂_j = (n_j × μ_j + κ × μ_local) / (n_j + κ)          │
-  │  σ̂_j = (n_j × σ_j + κ × σ_local) / (n_j + κ)          │
-  │                                                        │
-  │  κ (shrinkage strength) depends on IVT coverage:       │
-  │    n_IVT ≥ 20  → κ = 0.5   (trust this position)       │
-  │    5 ≤ n_IVT < 20 → κ = 2.0                            │
-  │    1 ≤ n_IVT < 5  → κ = 5.0   (borrow more)            │
-  │    n_IVT = 0      → use local/global entirely          │
-  └─────────────────────────────────────────────────────────┘
-
-Output: z-score = (score - μ̂) / σ̂
-```
-
----
-
-## Stage 2 (default emission path): kNN IVT-Purity Scoring
-
-> Note on V2 naming: `AblationConfig` labels the **anchored two-component
-> mixture EM** as "V2" (axes `anchor_null`, `gate_mode`, `lambda_reg`).
-> The mixture runs on every default call and writes `p_mod_raw`, but
-> that output is not on the default critical path (see overview above).
-> The kNN branch described in this section is what actually reaches the
-> HMM as emissions in default mode.
-
-### 2.4 k-Nearest Neighbor Classification
+### 2.1 k-Nearest Neighbor Classification
 ```
 For each read i, find k nearest neighbors in DTW distance space:
 
@@ -213,7 +136,7 @@ kNN_score[i] = 1 - (weighted IVT fraction among k neighbors)
   └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.5 Beta Calibration via EM
+### 2.2 Beta Calibration via EM
 ```
 Raw kNN scores ∈ [0,1] → calibrate to proper probabilities
 
@@ -227,7 +150,7 @@ Output: p_mod_knn ∈ [0, 1] for each read
 
 ---
 
-## Stage 3 (V3): HMM Spatial Smoothing
+## Stage 3: HMM Spatial Smoothing
 
 ### 3.1 Build Read Trajectories
 ```
@@ -328,21 +251,7 @@ Output: Smoothed p_mod_hmm
 │                         │                                               │
 │                         ▼                                               │
 │                                                                         │
-│   V1: EMPIRICAL-BAYES NULL    (computed, not on default critical path) │
-│   • score = log(median DTW to IVT)                                     │
-│   • Fit null from IVT: μ, σ via median + MAD                           │
-│   • Hierarchical shrinkage: borrow from neighbors if low coverage      │
-│   • Output: z-scores (not consumed by default; kept for ablation)      │
-│                                                                         │
-│   V2 mixture: anchored two-component EM + soft gate                    │
-│   • Output: p_mod_raw  (computed, not on default critical path;        │
-│     consumed only if emission_source is explicitly switched, e.g. via  │
-│     `aggregate --score-field p_mod_raw`)                               │
-│                                                                         │
-│                         │                                               │
-│                         ▼                                               │
-│                                                                         │
-│   kNN IVT-PURITY + BETA EM  (DEFAULT HMM emission source)              │
+│   kNN IVT-PURITY + BETA EM  (HMM emission source)                      │
 │   • kNN_score = 1 - (IVT fraction among k nearest neighbors)          │
 │   • Calibrate via Beta EM: P(mod | kNN_score)                          │
 │   • Output: p_mod_knn                                                  │
@@ -350,9 +259,9 @@ Output: Smoothed p_mod_hmm
 │                         │                                               │
 │                         ▼                                               │
 │                                                                         │
-│   V3: HMM SMOOTHING                                                     │
+│   HMM SMOOTHING                                                         │
 │   • 3-state: Unmodified → Flank → Modified                             │
-│   • Emissions: p_mod_knn (default)                                     │
+│   • Emissions: p_mod_knn                                               │
 │   • Gap-aware transitions: P(stay) = 0.98^gap                         │
 │   • Forward-backward → posterior                                       │
 │   • Output: p_mod_hmm (FINAL)                                          │
@@ -373,14 +282,11 @@ Output: Smoothed p_mod_hmm
 
 | Stage | Equation |
 |-------|----------|
-| **V1 Score** | `score[i] = log1p(median(DTW(i, IVT_controls)))` |
-| **V1 Null** | `μ = median(IVT_scores), σ = MAD(IVT_scores) × 1.4826` |
-| **V1 Shrinkage** | `μ̂ = (n × μ_local + κ × μ_window) / (n + κ)` |
-| **V2 kNN** | `kNN[i] = 1 - Σ wⱼ·I[IVT](j) / Σ wⱼ` (k neighbors) |
-| **V2 Calibrate** | `P(mod\|kNN) = f_Beta_alt(kNN) / [f_Beta_null + f_Beta_alt]` |
-| **V3 Transition** | `P(stay\|gap) = 0.98^gap` |
-| **V3 Emission** | `P(obs\|state) = Beta(p_mod_knn; a_state, b_state)` |
-| **V3 Posterior** | `γ_t(s) ∝ α_t(s) × β_t(s)` (forward-backward) |
+| **kNN score** | `kNN[i] = 1 - Σ wⱼ·I[IVT](j) / Σ wⱼ` (k neighbors) |
+| **Beta calibration** | `P(mod\|kNN) = f_Beta_alt(kNN) / [f_Beta_null + f_Beta_alt]` |
+| **HMM transition** | `P(stay\|gap) = 0.98^gap` |
+| **HMM emission** | `P(obs\|state) = Beta(p_mod_knn; a_state, b_state)` |
+| **HMM posterior** | `γ_t(s) ∝ α_t(s) × β_t(s)` (forward-backward) |
 
 ---
 
@@ -392,6 +298,6 @@ Output: Smoothed p_mod_hmm
 
 **(B)** Pairwise DTW distance matrices are computed for each position. Modified reads show elevated distances to IVT controls.
 
-**(C)** V1: Empirical-Bayes null scoring with hierarchical shrinkage establishes robust baseline statistics. V2: kNN IVT-purity scoring quantifies neighborhood composition in DTW space, calibrated via Beta EM. V3: A 3-state HMM with gap-aware transitions smooths probabilities along read trajectories.
+**(C)** kNN IVT-purity scoring quantifies neighborhood composition in DTW space, calibrated via Beta EM. A 3-state HMM with gap-aware transitions then smooths the calibrated probabilities along read trajectories.
 
 **(D)** Final output: per-read modification probabilities aggregated to site-level statistics.

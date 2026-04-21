@@ -2,7 +2,7 @@
 
 ## Overview
 
-Baleen is a computational pipeline for detecting RNA modifications from Oxford Nanopore direct RNA sequencing (DRS) data. It compares **native RNA** (containing modifications) against **in vitro transcribed (IVT) RNA** (modification-free control) by quantifying signal shape differences using Dynamic Time Warping (DTW) and a hierarchical Bayesian-HMM framework.
+Baleen is a computational pipeline for detecting RNA modifications from Oxford Nanopore direct RNA sequencing (DRS) data. It compares **native RNA** (containing modifications) against **in vitro transcribed (IVT) RNA** (modification-free control) by quantifying signal shape differences using Dynamic Time Warping (DTW), a Beta-calibrated kNN IVT-purity score, and a gap-aware per-read HMM.
 
 ---
 
@@ -11,7 +11,7 @@ Baleen is a computational pipeline for detecting RNA modifications from Oxford N
 **Overall structure:** Left-to-right horizontal flow with three main panels:
 - **Panel A: Data Preparation** (input files → signal extraction)
 - **Panel B: Distance Computation** (DTW pairwise matrix)
-- **Panel C: Statistical Inference** (V1 → V2 → V3 hierarchical pipeline)
+- **Panel C: Statistical Inference** (kNN + Beta EM → HMM)
 
 Use a **color scheme** of blues/greens for native data, oranges/yellows for IVT data, and purple for statistical outputs.
 
@@ -136,63 +136,9 @@ that minimizes cumulative distance.
 
 ---
 
-## Panel C: Hierarchical Statistical Inference (V1 → V2 → V3)
+## Panel C: Statistical Inference (kNN + Beta EM → HMM)
 
-### C1. V1: Empirical-Bayes Null Scoring
-
-> **Runs every call, but `z_scores` is NOT on the default critical
-> path.** The default HMM emission source is `p_mod_knn` (see C2a / C3),
-> so the `shrinkage` ablation axis produces metrics identical to
-> baseline. The shrunk `(μ̂, σ̂)` and `z_scores` are kept on
-> `PositionStats` for ablation studies and debugging only; no default
-> downstream stage reads them.
-**Visual:** Three-step process
-
-```
-Step 1: Extract IVT Distances
-┌─────────────────────────────────────────────┐
-│ For each read i:                            │
-│   score[i] = median(DTW(i, IVT_controls))   │
-│                                             │
-│ Native reads → high scores (distant from IVT)│
-│ IVT reads → low scores (similar to IVT)     │
-└─────────────────────────────────────────────┘
-                    │
-                    ▼
-Step 2: Fit Robust Null (IVT only)
-┌─────────────────────────────────────────────┐
-│   μ_IVT = median(IVT_scores)                │
-│   σ_IVT = MAD(IVT_scores) × 1.482           │
-│                                             │
-│   [Gaussian null distribution]              │
-│         ▲                                   │
-│        ╱ ╲                                  │
-│       ╱   ╲                                 │
-│      ╱     ╲                                │
-│  ───┴───────┴───                            │
-│     μ_IVT                                   │
-└─────────────────────────────────────────────┘
-                    │
-                    ▼
-Step 3: Hierarchical Shrinkage
-┌─────────────────────────────────────────────┐
-│ Position j with n_j IVT reads:              │
-│                                             │
-│ μ̂_j = (n_j × μ_j + κ × μ_local) / (n_j + κ) │
-│                                             │
-│ κ depends on IVT coverage:                  │
-│   HIGH (≥20): κ=0.5  (trust position)       │
-│   MEDIUM (5-19): κ=2.0                      │
-│   LOW (1-4): κ=5.0 (shrink to neighbors)    │
-│   ZERO: use local/global only               │
-│                                             │
-│ Output: z-score = (score - μ̂) / σ̂          │
-└─────────────────────────────────────────────┘
-```
-
-**Caption:** V1 establishes a robust null distribution from IVT controls, with hierarchical shrinkage to borrow strength across positions.
-
-### C2. V2a: kNN IVT-Purity Scoring (Default Emission Source)
+### C1. kNN IVT-Purity Scoring
 **Visual:** k-nearest neighbor classification in DTW space
 
 ```
@@ -226,45 +172,7 @@ P(mod | score) = f_alt(score) / [f_null(score) + f_alt(score)]
 
 **Caption:** kNN IVT-purity scoring quantifies how isolated a read is from IVT controls in DTW distance space. Modified reads cluster together, away from IVT neighbors.
 
-### C2b. V2b: Anchored Two-Component Mixture EM (Alternative Scoring)
-
-> **Runs every call, but `p_mod_raw` is NOT on the default critical
-> path.** The HMM reads `p_mod_knn` as emissions (see C3), so the
-> `anchor_null` / `gate_mode` / `lambda_reg` ablation axes produce
-> metrics identical to baseline. `p_mod_raw` is consumed only when the
-> caller explicitly switches the HMM `emission_source` to
-> `"p_mod_raw"` (e.g. via `aggregate --score-field p_mod_raw`);
-> otherwise it is kept on `PositionStats` for ablation and debugging.
-**Visual:** Mixture model fitting on z-scores
-
-```
-┌─────────────────────────────────────────────────────────┐
-│            Native z-scores histogram                   │
-│                                                         │
-│     ▓▓▓▓▓▓▓                                              │
-│    ▓▓▓▓▓▓▓▓▓▓     ░░░░░░░                               │
-│   ▓▓▓▓▓▓▓▓▓▓▓▓   ░░░░░░░░░░                             │
-│  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓ ░░░░░░░░░░░░░                            │
-│ ─┴──────────────┴────────────────┴───                    │
-│  0   null (unmod)   alt (modified)                      │
-│                                                         │
-│ Null: N(μ_IVT, σ_IVT)  — fixed from IVT                │
-│ Alt:  N(μ_alt, σ_alt) — learned via EM                 │
-│                                                         │
-│ P(mod | z) = π × f_alt(z) / [(1-π)×f_null(z) + π×f_alt]│
-└─────────────────────────────────────────────────────────┘
-```
-
-**Soft Gating Mechanism:**
-```
-gate_weight = σ(π) × σ(BIC_mix - BIC_null) × σ(separation)
-
-Final: p_mod_raw = gate_weight × mixture_posterior + (1-gate_weight) × z_fallback
-```
-
-**Note:** The pipeline computes BOTH `p_mod_raw` (mixture) and `p_mod_knn` (kNN). By default, `p_mod_knn` is used as the HMM emission source.
-
-### C3. V3: HMM Spatial Smoothing
+### C2. HMM Spatial Smoothing
 **Visual:** Hidden Markov Model along read trajectory
 
 ```
@@ -279,17 +187,8 @@ Read trajectory (genomic positions along a single read):
 │   States: U=Unmodified, F=Flank, M=Modified             │
 │                                                          │
 │   Transitions: P(stay) = 0.98^(gap_in_bases)            │
-│   Emissions: P(p_mod_knn | state)  ← DEFAULT            │
+│   Emissions: P(p_mod_knn | state)                       │
 └──────────────────────────────────────────────────────────┘
-
-Emission Source Selection:
-┌─────────────────────────────────────────────────────────┐
-│  DEFAULT: emission_source = "p_mod_knn"                │
-│           Uses kNN IVT-purity scores as HMM emissions  │
-│                                                         │
-│  ALTERNATIVE: emission_source = "p_mod_raw"            │
-│               Uses V2 mixture posteriors as emissions  │
-└─────────────────────────────────────────────────────────┘
 
 3-State HMM Topology:
 ┌─────────────────────────────────────────┐
@@ -323,7 +222,7 @@ P(mod | trajectory) = Σ_s∈{F,M} γ_t(s)
 where γ_t(s) ∝ α_t(s) × β_t(s)
 ```
 
-**Caption:** V3 applies a 3-state HMM along each read's genomic trajectory, smoothing modification probabilities and capturing the ±2-base signal halo around true modification sites.
+**Caption:** The HMM runs along each read's genomic trajectory, smoothing modification probabilities and capturing the ±2-base signal halo around true modification sites.
 
 ---
 
@@ -333,42 +232,20 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 **Visual:** Site-level aggregation
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Position │ Kmer │ P(mod)_raw │ P(mod)_kNN │ P(mod)_HMM │
-│──────────┼──────┼────────────┼────────────┼────────────│
-│   142    │ GGACU│   0.87     │   0.92     │   0.95     │
-│   143    │ GACUA│   0.12     │   0.08     │   0.05     │
-│   144    │ ACUAG│   0.91     │   0.88     │   0.93     │
-└─────────────────────────────────────────────────────────┘
-```
-
-### D2. Three Training Modes
-**Visual:** Decision tree
-
-```
-                    Labeled data?
-                   ╱            ╲
-                 No              Yes
-                 │                │
-                 ▼                ▼
-         ┌──────────────┐  ┌──────────────────┐
-         │  UNSUPERVISED│  │ Positions < 50?  │
-         │  (defaults)  │  │  or < 3 contigs? │
-         └──────────────┘  │   ╱        ╲     │
-                           │  Yes        No   │
-                           │   │          │   │
-                           ▼   ▼          ▼   ▼
-                    ┌─────────────┐ ┌─────────────┐
-                    │SEMI-SUPERVISED│ │ SUPERVISED │
-                    │ (Platt scale)│ │(MLE+KDE)   │
-                    └─────────────┘ └─────────────┘
+┌─────────────────────────────────────────────┐
+│ Position │ Kmer │ P(mod)_kNN │ P(mod)_HMM   │
+│──────────┼──────┼────────────┼──────────────│
+│   142    │ GGACU│   0.92     │   0.95       │
+│   143    │ GACUA│   0.08     │   0.05       │
+│   144    │ ACUAG│   0.88     │   0.93       │
+└─────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Key Algorithmic Features to Highlight
 
-1. **kNN IVT-purity scoring (default):** Quantifies neighborhood composition in DTW space — modified reads cluster together, away from IVT neighbors. Calibrated via Beta EM. Used as the DEFAULT emission source for HMM.
+1. **kNN IVT-purity scoring:** Quantifies neighborhood composition in DTW space — modified reads cluster together, away from IVT neighbors. Calibrated via Beta EM. Serves as the HMM emission source.
 
 2. **Parallelization:** Contigs processed in parallel using `ProcessPoolExecutor` with spawn context for CUDA safety
 
@@ -376,13 +253,9 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 
 4. **CUDA acceleration:** GPU-accelerated DTW computation with automatic CPU fallback
 
-5. **Hierarchical shrinkage:** Low-coverage positions borrow strength from neighboring positions
+5. **Gap-aware transitions:** HMM transition probability P(stay) = 0.98^gap naturally handles uneven genomic spacing
 
-6. **Soft gating:** Continuous blending instead of hard binary decisions reduces boundary artifacts (for mixture-based scoring)
-
-7. **Gap-aware transitions:** HMM transition probability P(stay) = 0.98^gap naturally handles uneven genomic spacing
-
-8. **3-state topology:** Explicit Flank state absorbs signal halo around modification sites
+6. **3-state topology:** Explicit Flank state absorbs signal halo around modification sites
 
 ---
 
@@ -400,11 +273,11 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  C. HIERARCHICAL INFERENCE (V1 → V2 → V3)                          │
-│  ┌────────────┐   ┌────────────┐   ┌────────────┐                 │
-│  │    V1      │──▶│    V2      │──▶│    V3      │                 │
-│  │ (EB null)  │   │ (Mixture)  │   │   (HMM)    │                 │
-│  └────────────┘   └────────────┘   └────────────┘                 │
+│  C. STATISTICAL INFERENCE                                          │
+│  ┌──────────────────────┐     ┌────────────┐                       │
+│  │ kNN + Beta EM        │────▶│   HMM      │                       │
+│  │ (p_mod_knn)          │     │ (p_mod_hmm)│                       │
+│  └──────────────────────┘     └────────────┘                       │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
@@ -424,20 +297,14 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Key Equations                                                      │
 │                                                                     │
-│  V1: z = (score - μ̂) / σ̂   where μ̂, σ̂ are shrunk null parameters  │
-│      μ̂_j = (n_j × μ_j + κ × μ_local) / (n_j + κ)  (shrinkage)      │
-│                                                                     │
-│  V2a (kNN): score[i] = 1 - Σ w_j·I[IVT](j) / Σ w_j  (kNN purity)   │
-│             P(mod|score) calibrated via Beta EM (DEFAULT)           │
-│                                                                     │
-│  V2b (Mixture): P(mod|z) = π·f_alt(z) / [(1-π)·f_null + π·f_alt]   │
-│                 with soft gating: gate = σ(π)·σ(ΔBIC)·σ(sep)        │
-│                                                                     │
-│  V3: γ_t(s) ∝ α_t(s)·β_t(s)  via forward-backward                  │
-│      P(stay|gap) = p_stay^gap  (gap-aware transitions)              │
-│      Emissions from p_mod_knn (default) or p_mod_raw                │
-│                                                                     │
 │  DTW: D(A,B) = min_{warping} Σ |A_i - B_j|                        │
+│                                                                     │
+│  kNN: score[i] = 1 - Σ w_j·I[IVT](j) / Σ w_j  (kNN purity)         │
+│       P(mod|score) calibrated via Beta EM  →  p_mod_knn             │
+│                                                                     │
+│  HMM: γ_t(s) ∝ α_t(s)·β_t(s)  via forward-backward                  │
+│       P(stay|gap) = p_stay^gap  (gap-aware transitions)             │
+│       Emissions from p_mod_knn                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -465,6 +332,6 @@ where γ_t(s) ∝ α_t(s) × β_t(s)
 
 **(B)** Pairwise DTW distance computation. For each position, a symmetric distance matrix captures signal shape differences between all read pairs. Native-IVT distances are elevated at modified positions.
 
-**(C)** Hierarchical statistical inference. V1 (Empirical-Bayes): Robust null distribution from IVT controls with hierarchical shrinkage. V2a (kNN IVT-purity, default): Quantifies neighborhood composition in DTW space, calibrated via Beta EM. V2b (Mixture EM, alternative): Two-component mixture with soft gating produces raw P(mod). V3 (HMM): 3-state forward-backward smoothing along read trajectories, using kNN scores as default emission source, yields final modification probabilities.
+**(C)** Statistical inference. kNN IVT-purity scoring quantifies neighborhood composition in DTW space and is calibrated via Beta EM into `p_mod_knn`. A 3-state HMM with gap-aware transitions then smooths these probabilities along each read's genomic trajectory via forward–backward, yielding the final per-read, per-position modification probabilities.
 
 **(D)** Output. Site-level modification probabilities are aggregated across reads via per-site thresholding and Fisher combination into `mod_ratio` and `pvalue`.
