@@ -195,10 +195,8 @@ class TestCmdRun:
 
     @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.write_site_tsv")
     def test_run_args_forwarded_correctly(
         self,
-        mock_write,
         mock_validate,
         mock_pipeline,
         sample_args_run,
@@ -207,8 +205,17 @@ class TestCmdRun:
         """Test that args are forwarded correctly to run_pipeline_streaming."""
         sample_args_run.output_dir = str(tmp_path)
 
-        # Mock the streaming pipeline to return empty results
-        mock_pipeline.return_value = ({}, [], Mock())
+        # Mock the streaming pipeline to return new (output_paths, metadata) shape
+        mock_pipeline.return_value = (
+            {
+                "site_tsv": tmp_path / "site_results.tsv",
+                "read_bam": None,
+                "per_contig_dir": None,
+                "n_total_sites": 0,
+                "n_significant": 0,
+            },
+            Mock(),
+        )
 
         _cmd_run(sample_args_run)
 
@@ -225,10 +232,8 @@ class TestCmdRun:
 
     @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.write_site_tsv")
     def test_run_creates_output_dir(
         self,
-        mock_write,
         mock_validate,
         mock_pipeline,
         sample_args_run,
@@ -238,7 +243,16 @@ class TestCmdRun:
         output_path = tmp_path / "new_output"
         sample_args_run.output_dir = str(output_path)
 
-        mock_pipeline.return_value = ({}, [], Mock())
+        mock_pipeline.return_value = (
+            {
+                "site_tsv": output_path / "site_results.tsv",
+                "read_bam": None,
+                "per_contig_dir": None,
+                "n_total_sites": 0,
+                "n_significant": 0,
+            },
+            Mock(),
+        )
 
         _cmd_run(sample_args_run)
 
@@ -247,10 +261,8 @@ class TestCmdRun:
 
     @patch("baleen.cli.run_pipeline_streaming")
     @patch("baleen.cli._validate_input_files")
-    @patch("baleen.cli.write_site_tsv")
     def test_run_cuda_flag_handling(
         self,
-        mock_write,
         mock_validate,
         mock_pipeline,
         sample_args_run,
@@ -261,7 +273,16 @@ class TestCmdRun:
         sample_args_run.cuda = "0"
         sample_args_run.no_cuda = False
 
-        mock_pipeline.return_value = ({}, [], Mock())
+        mock_pipeline.return_value = (
+            {
+                "site_tsv": tmp_path / "site_results.tsv",
+                "read_bam": None,
+                "per_contig_dir": None,
+                "n_total_sites": 0,
+                "n_significant": 0,
+            },
+            Mock(),
+        )
 
         _cmd_run(sample_args_run)
 

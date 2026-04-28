@@ -4,13 +4,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
 import multiprocessing as mp
+import os
 import pickle
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
-from typing import Literal, Optional, Protocol, TypedDict, Union, cast
+from typing import Any, Literal, Optional, Protocol, TypedDict, Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,6 +31,24 @@ def _fmt_elapsed(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(seconds, 60)
     return f"{int(minutes)}m{secs:.1f}s"
+
+
+def _sanitize_contig_filename(name: str) -> str:
+    """Map an arbitrary contig name to a safe filesystem stem.
+
+    SAM spec permits characters like ``/``, ``\\``, ``..`` in reference names.
+    To avoid path traversal or collisions when writing per-contig artifacts,
+    we replace anything outside ``[A-Za-z0-9._-]`` with ``_`` and append a
+    short hash of the original name as a disambiguator.
+    """
+    import hashlib
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    if safe != name:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+        safe = f"{safe}-{digest}"
+    return safe
 
 PathLike = Union[str, Path]
 
@@ -72,6 +91,21 @@ class PipelineMetadata:
     n_contigs_passed_filter: int
     n_contigs_skipped: int
     filter_results: list[_bam.ContigFilterResult]
+
+
+@dataclass
+class ContigSummary:
+    """Lightweight per-contig outcome returned by the streaming worker.
+
+    Holds counts and on-disk paths to the per-contig TSV/BAM slices —
+    no per-read arrays — so the main process memory stays O(N_contigs).
+    """
+    contig_name: str
+    n_sites: int
+    n_positions: int
+    n_significant: int
+    tsv_path: Path
+    bam_path: Optional[Path] = None
 
 
 class _SerializedPayload(TypedDict):
@@ -555,6 +589,9 @@ def _process_contig_streaming(
     primary_only: bool,
     cleanup_temp: bool,
     num_cuda_streams: int,
+    per_contig_dir: Path,
+    bam_header_dict: Optional[dict] = None,
+    write_bam: bool = True,
     run_hmm: bool = True,
     hmm_params: object = None,
     keep_intermediate: bool = False,
@@ -567,15 +604,22 @@ def _process_contig_streaming(
     mod_threshold: float = 0.9,
     show_progress: bool = True,
     cuda_device: int = 0,
-) -> tuple[str, "ContigModificationResult", list["SiteResult"]]:
-    """Process a single contig end-to-end: DTW → HMM → site aggregation.
+) -> ContigSummary:
+    """Process a single contig end-to-end and flush its outputs to disk.
 
-    Unlike :func:`_process_contig`, this fuses all stages so distance matrices
-    can be garbage-collected before returning.  Only lightweight results are
-    returned to the caller.
+    Stages: DTW → HMM → site aggregation → flush per-contig TSV (always)
+    and per-contig BAM (when ``write_bam=True``).  The ``cmr`` is dropped
+    before return so peak memory is bounded by a single contig's footprint.
 
     Parameters
     ----------
+    per_contig_dir
+        Directory under which ``<contig>.tsv`` and ``<contig>.bam`` are written.
+    bam_header
+        Pre-built ``pysam.AlignmentHeader`` for output BAMs.  May be ``None``
+        when ``write_bam=False``.
+    write_bam
+        Whether to flush a per-contig BAM slice.
     run_hmm
         Whether to run HMM smoothing (V3).
     hmm_params
@@ -589,12 +633,17 @@ def _process_contig_streaming(
 
     Returns
     -------
-    tuple[str, ContigModificationResult, list[SiteResult]]
-        ``(contig_name, hmm_result, per_site_results)`` — distance matrices
-        are **not** included.
+    ContigSummary
+        Lightweight summary of counts + on-disk slice paths.  The full
+        ``cmr``/``sites`` payload is **not** returned.
     """
-    from baleen.eventalign._aggregation import aggregate_contig, _benjamini_hochberg
+    from baleen.eventalign._aggregation import (
+        _benjamini_hochberg,
+        aggregate_contig,
+        write_site_tsv_rows,
+    )
     from baleen.eventalign._hierarchical import compute_sequential_modification_probabilities
+    from baleen.eventalign._read_bam import flush_contig_to_bam
 
     # Stage 1: DTW
     contig_name, contig_result = _process_contig(
@@ -660,7 +709,46 @@ def _process_contig_streaming(
             pickle.dump(contig_result, fh)
         logger.info("  Saved intermediate: %s", pkl_path)
 
-    return contig_name, cmr, sites
+    # Stage 4: Streaming flush of per-contig outputs
+    per_contig_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _sanitize_contig_filename(contig_name)
+    tsv_path = per_contig_dir / f"{safe_name}.tsv"
+    tsv_tmp = tsv_path.with_suffix(tsv_path.suffix + ".tmp")
+    success = False
+    try:
+        with tsv_tmp.open("w", newline="") as f:
+            write_site_tsv_rows(f, sites)
+        os.replace(tsv_tmp, tsv_path)
+        success = True
+    finally:
+        if not success:
+            tsv_tmp.unlink(missing_ok=True)
+
+    bam_path: Optional[Path] = None
+    if write_bam and bam_header_dict is not None:
+        import pysam
+        bam_header = pysam.AlignmentHeader.from_dict(bam_header_dict)
+        bam_path = per_contig_dir / f"{safe_name}.bam"
+        flush_contig_to_bam(cmr, native_bam, ivt_bam, bam_header, bam_path)
+
+    n_significant = sum(1 for s in sites if s.padj < 0.05)
+    n_positions = len(cmr.position_stats)
+    n_sites = len(sites)
+
+    # Drop the heavy payload before returning to the parent process.
+    del cmr
+    del sites
+    del contig_result
+
+    return ContigSummary(
+        contig_name=contig_name,
+        n_sites=n_sites,
+        n_positions=n_positions,
+        n_significant=n_significant,
+        tsv_path=tsv_path,
+        bam_path=bam_path,
+    )
 
 
 def run_pipeline(
@@ -974,21 +1062,34 @@ def run_pipeline_streaming(
     subsample_n: int = 300,
     legacy_scoring: bool = False,
     mod_threshold: float = 0.9,
-) -> tuple[dict[str, "ContigModificationResult"], list["SiteResult"], PipelineMetadata]:
+    write_bam: bool = True,
+) -> tuple[dict[str, Any], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
-    Each contig is processed end-to-end in a single worker.  Distance matrices
-    are discarded after HMM scoring, so only lightweight results are kept in
-    memory.
+    Each contig is processed end-to-end in a worker, which writes its
+    own ``<contig>.tsv`` and ``<contig>.bam`` slices to
+    ``<output_dir>/per_contig/`` and drops the heavy ``cmr`` before
+    returning.  The main process then merges slices into final outputs.
+
+    Peak memory is bounded by ``O(single_contig + N_workers)`` rather than
+    growing with the total number of contigs.
 
     Parameters
     ----------
+    output_dir
+        Required.  Final outputs are written to ``<output_dir>/site_results.tsv``
+        and (when *write_bam*) ``<output_dir>/read_results.bam``.  If ``None``,
+        a temporary directory is used and cleaned up on exit.
     target_contigs
         If given, only process these contig(s).  Contigs not passing depth
         filters are silently skipped.
     keep_intermediate
-        Save per-contig ``ContigResult`` pickle files under
-        ``output_dir/intermediate/``.
+        Save per-contig ``ContigResult`` pickles under
+        ``<output_dir>/intermediate/`` and keep ``<output_dir>/per_contig/``
+        on disk after merging.
+    write_bam
+        Whether to produce a final ``read_results.bam`` (set to False to
+        skip mod-BAM construction entirely).
     run_hmm
         Whether to run HMM smoothing (V3).
     hmm_params
@@ -996,11 +1097,12 @@ def run_pipeline_streaming(
 
     Returns
     -------
-    tuple[dict[str, ContigModificationResult], list[SiteResult], PipelineMetadata]
-        ``(hmm_results, per_transcript_fdr_sites, metadata)``
+    tuple[dict[str, Any], PipelineMetadata]
+        ``(output_paths, metadata)`` where ``output_paths`` is a dict with
+        keys ``site_tsv`` (Path), ``read_bam`` (Path or None),
+        ``per_contig_dir`` (Path or None), ``n_total_sites`` (int), and
+        ``n_significant`` (int).
     """
-    from baleen.eventalign._aggregation import SiteResult
-
     pipeline_t0 = time.perf_counter()
     logger.info("=" * 60)
     logger.info("Starting baleen streaming pipeline")
@@ -1098,27 +1200,85 @@ def run_pipeline_streaming(
         filter_results=filter_results,
     )
 
-    hmm_results: dict[str, ContigModificationResult] = {}
-    all_sites: list[SiteResult] = []
+    # Resolve output_dir (use a tempdir if not given, cleaned up on exit).
+    output_dir_temp: Optional[Path] = None
+    if output_dir is None:
+        output_dir_temp = Path(tempfile.mkdtemp(prefix="baleen-output-"))
+        output_dir_path = output_dir_temp
+        logger.warning(
+            "  output_dir not specified; using temporary %s (will be removed)",
+            output_dir_path,
+        )
+    else:
+        output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    per_contig_dir = output_dir_path / "per_contig"
+    per_contig_dir.mkdir(parents=True, exist_ok=True)
+
+    site_tsv_path = output_dir_path / "site_results.tsv"
+    final_bam_path: Optional[Path] = (
+        output_dir_path / "read_results.bam" if write_bam else None
+    )
 
     if not passed_contigs:
         logger.warning("[Step 5/5] No contigs to process; returning empty results.")
+        # Still write an empty TSV (header only) for consistency, unless we
+        # are going to delete the parent tempdir on the way out.
+        from baleen.eventalign._aggregation import write_site_tsv
+        write_site_tsv([], site_tsv_path)
+        # Clean up empty per_contig dir we just created.
+        shutil.rmtree(per_contig_dir, ignore_errors=True)
+        returned_site_tsv: Optional[Path] = site_tsv_path
+        if output_dir_temp is not None:
+            shutil.rmtree(output_dir_temp, ignore_errors=True)
+            returned_site_tsv = None
         elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)
         logger.info("Pipeline finished (no results) in %s", elapsed)
-        return hmm_results, all_sites, metadata
+        return (
+            {
+                "site_tsv": returned_site_tsv,
+                "read_bam": None,
+                "per_contig_dir": None,
+                "n_total_sites": 0,
+                "n_significant": 0,
+            },
+            metadata,
+        )
 
-    # ---- Step 5: Per-contig streaming (DTW → HMM → aggregation) ----
-    logger.info("[Step 5/5] Processing %d contigs (streaming: DTW → HMM → aggregation)...",
+    # ---- Step 5: Per-contig streaming (DTW → HMM → aggregation → flush) ----
+    logger.info("[Step 5/5] Processing %d contigs (streaming flush: DTW → HMM → aggregation → disk)...",
                 len(passed_contigs))
     step5_t0 = time.perf_counter()
     tmp_root = Path(tempfile.mkdtemp(prefix="baleen-streaming-"))
 
-    intermediate_dir = None
-    if keep_intermediate and output_dir is not None:
-        intermediate_dir = Path(output_dir) / "intermediate"
+    intermediate_dir: Optional[Path] = None
+    if keep_intermediate:
+        intermediate_dir = output_dir_path / "intermediate"
+
+    # Build BAM header once (heavy I/O).  pysam.AlignmentHeader is NOT
+    # picklable (cdef-class with non-trivial __cinit__), so we ship its
+    # ``to_dict()`` representation across the spawn boundary and rebuild
+    # in each worker via ``pysam.AlignmentHeader.from_dict``.
+    bam_header_dict: Optional[dict] = None
+    if write_bam:
+        # Ensure full input BAMs are indexed for per-contig fetch().
+        from baleen.eventalign._read_bam import (
+            _build_header_from_bam,
+            _ensure_bam_indexed,
+            merge_contig_bams,
+        )
+        _ensure_bam_indexed(native_bam)
+        _ensure_bam_indexed(ivt_bam)
+        bam_header_dict = _build_header_from_bam(native_bam, ref_fasta).to_dict()
+
+    from baleen.eventalign._aggregation import merge_contig_tsvs
 
     gpu_mems = _get_gpu_memory(cuda_devices) if gpu_memory_limit is None else [gpu_memory_limit]
     gpu_workers, device_for_worker = _gpu_concurrent_workers(threads, gpu_mems, cuda_devices)
+
+    summaries: list[ContigSummary] = []
+    failed: list[str] = []
 
     try:
         worker_kwargs = dict(
@@ -1141,6 +1301,9 @@ def run_pipeline_streaming(
             primary_only=primary_only,
             cleanup_temp=cleanup_temp,
             num_cuda_streams=num_cuda_streams,
+            per_contig_dir=per_contig_dir,
+            bam_header_dict=bam_header_dict,
+            write_bam=write_bam,
             run_hmm=run_hmm,
             hmm_params=hmm_params,
             keep_intermediate=keep_intermediate,
@@ -1169,7 +1332,6 @@ def run_pipeline_streaming(
                     ): contig
                     for idx, contig in enumerate(passed_contigs, 1)
                 }
-                failed = []
                 with tqdm(
                     total=len(passed_contigs),
                     desc="Pipeline",
@@ -1179,41 +1341,91 @@ def run_pipeline_streaming(
                     for future in as_completed(futures):
                         contig = futures[future]
                         try:
-                            contig_name, cmr, sites = future.result()
+                            summary = future.result()
                         except Exception:
                             logger.exception("Worker failed for contig %s", contig)
                             failed.append(contig)
                             pbar.update(1)
                             continue
-                        hmm_results[contig_name] = cmr
-                        all_sites.extend(sites)
-                        n_pos = len(cmr.position_stats)
-                        pbar.set_postfix_str(f"{contig_name} ({n_pos} pos)")
+                        summaries.append(summary)
+                        pbar.set_postfix_str(
+                            f"{summary.contig_name} ({summary.n_sites} sites)"
+                        )
                         pbar.update(1)
                 if failed:
                     logger.error("%d contig(s) failed: %s", len(failed), ", ".join(failed))
         else:
             for contig_idx, contig in enumerate(passed_contigs, 1):
-                contig_name, cmr, sites = _process_contig_streaming(
-                    contig=contig,
-                    contig_idx=contig_idx,
-                    total_contigs=len(passed_contigs),
-                    cuda_device=device_for_worker[0] if device_for_worker else 0,
-                    **worker_kwargs,
-                )
-                hmm_results[contig_name] = cmr
-                all_sites.extend(sites)
+                try:
+                    summary = _process_contig_streaming(
+                        contig=contig,
+                        contig_idx=contig_idx,
+                        total_contigs=len(passed_contigs),
+                        cuda_device=device_for_worker[0] if device_for_worker else 0,
+                        **worker_kwargs,
+                    )
+                except Exception:
+                    logger.exception("Worker failed for contig %s", contig)
+                    failed.append(contig)
+                    continue
+                summaries.append(summary)
+            if failed:
+                logger.error("%d contig(s) failed: %s", len(failed), ", ".join(failed))
     finally:
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
-    total_positions = sum(len(cmr.position_stats) for cmr in hmm_results.values())
+    # ---- Final merge step ----
+    sorted_summaries = sorted(summaries, key=lambda s: s.contig_name)
+
+    merge_contig_tsvs(
+        [s.tsv_path for s in sorted_summaries],
+        site_tsv_path,
+    )
+
+    if write_bam:
+        bam_inputs = [s.bam_path for s in sorted_summaries if s.bam_path is not None]
+        if bam_inputs:
+            merge_contig_bams(bam_inputs, final_bam_path, threads=max(threads, 1))
+        else:
+            final_bam_path = None
+
+    n_total_sites = sum(s.n_sites for s in sorted_summaries)
+    n_significant = sum(s.n_significant for s in sorted_summaries)
+    total_positions = sum(s.n_positions for s in sorted_summaries)
+
+    if not keep_intermediate:
+        shutil.rmtree(per_contig_dir, ignore_errors=True)
+        per_contig_dir_out: Optional[Path] = None
+    else:
+        per_contig_dir_out = per_contig_dir
+
     step5_elapsed = _fmt_elapsed(time.perf_counter() - step5_t0)
     logger.info("[Step 5/5] Streaming complete (%s)", step5_elapsed)
     pipeline_elapsed = _fmt_elapsed(time.perf_counter() - pipeline_t0)
     logger.info("=" * 60)
-    logger.info("Streaming pipeline complete: %d contigs, %d positions, %d sites, %s",
-                len(hmm_results), total_positions, len(all_sites), pipeline_elapsed)
+    logger.info(
+        "Streaming pipeline complete: %d contigs, %d positions, %d sites, %s",
+        len(sorted_summaries), total_positions, n_total_sites, pipeline_elapsed,
+    )
     logger.info("=" * 60)
 
-    return hmm_results, all_sites, metadata
+    output_paths: dict[str, Any] = {
+        "site_tsv": site_tsv_path,
+        "read_bam": final_bam_path,
+        "per_contig_dir": per_contig_dir_out,
+        "n_total_sites": n_total_sites,
+        "n_significant": n_significant,
+    }
+
+    if output_dir_temp is not None:
+        # Caller did not pass an output_dir — clean up everything we wrote
+        # and null the paths in the returned dict so callers do not chase
+        # references to deleted files.  If the caller needs persistence,
+        # they should pass output_dir.
+        shutil.rmtree(output_dir_temp, ignore_errors=True)
+        output_paths["site_tsv"] = None
+        output_paths["read_bam"] = None
+        output_paths["per_contig_dir"] = None
+
+    return output_paths, metadata

@@ -397,6 +397,32 @@ def _compute_accuracy(sites: list, known_mods: set[tuple[str, int]]) -> dict:
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
+def _load_sites_from_tsv(tsv_path: Path) -> list:
+    """Re-parse merged site_results.tsv into objects with the attributes
+    expected by :func:`_compute_accuracy`.
+    """
+    import csv
+    from types import SimpleNamespace
+
+    sites: list = []
+    if not tsv_path.exists():
+        return sites
+    with tsv_path.open("r", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            sites.append(SimpleNamespace(
+                contig=row["contig"],
+                position=int(row["position"]),
+                mod_ratio=float(row["mod_ratio"]),
+                mean_p_mod=float(row["mean_p_mod"]),
+                effect_size=float(row["effect_size"]),
+                stoichiometry=float(row["stoichiometry"]),
+                pvalue=float(row["pvalue"]),
+                padj=float(row["padj"]),
+            ))
+    return sites
+
+
 def _run_single_stoich(
     stoich: str,
     *,
@@ -405,39 +431,46 @@ def _run_single_stoich(
     mod_threshold: float,
     testdata: Path,
     profile: cProfile.Profile | None,
-) -> tuple[dict, list, float]:
-    """Run pipeline for one stoichiometry level. Returns (hmm_results, sites, wall_s)."""
+) -> tuple[list, float]:
+    """Run pipeline for one stoichiometry level. Returns (sites, wall_s)."""
+    import tempfile
+
     from baleen.eventalign._pipeline import run_pipeline_streaming
 
     stoich_dir = testdata / stoich / "data"
     native_dir = stoich_dir / "native_1"
     control_dir = stoich_dir / "control_1"
 
-    call_kwargs = dict(
-        native_bam=native_dir / "native_1.bam",
-        native_fastq=native_dir / "fastq" / "pass.fq.gz",
-        native_blow5=native_dir / "blow5" / "nanopore.blow5",
-        ivt_bam=control_dir / "control_1.bam",
-        ivt_fastq=control_dir / "fastq" / "pass.fq.gz",
-        ivt_blow5=control_dir / "blow5" / "nanopore.blow5",
-        ref_fasta=testdata / "ref.fa",
-        use_cuda=use_cuda,
-        threads=threads,
-        mod_threshold=mod_threshold,
-        output_dir=None,
-    )
+    with tempfile.TemporaryDirectory(prefix="baleen_bench_") as tmpdir:
+        call_kwargs = dict(
+            native_bam=native_dir / "native_1.bam",
+            native_fastq=native_dir / "fastq" / "pass.fq.gz",
+            native_blow5=native_dir / "blow5" / "nanopore.blow5",
+            ivt_bam=control_dir / "control_1.bam",
+            ivt_fastq=control_dir / "fastq" / "pass.fq.gz",
+            ivt_blow5=control_dir / "blow5" / "nanopore.blow5",
+            ref_fasta=testdata / "ref.fa",
+            use_cuda=use_cuda,
+            threads=threads,
+            mod_threshold=mod_threshold,
+            output_dir=tmpdir,
+            write_bam=False,
+        )
 
-    t0 = time.perf_counter()
-    if profile is not None:
-        profile.enable()
-        try:
-            _hmm_results, sites, _metadata = run_pipeline_streaming(**call_kwargs)
-        finally:
-            profile.disable()
-    else:
-        _hmm_results, sites, _metadata = run_pipeline_streaming(**call_kwargs)
-    wall_s = time.perf_counter() - t0
-    return _hmm_results, sites, wall_s
+        t0 = time.perf_counter()
+        if profile is not None:
+            profile.enable()
+            try:
+                output_paths, _metadata = run_pipeline_streaming(**call_kwargs)
+            finally:
+                profile.disable()
+        else:
+            output_paths, _metadata = run_pipeline_streaming(**call_kwargs)
+        wall_s = time.perf_counter() - t0
+
+        sites = _load_sites_from_tsv(Path(output_paths["site_tsv"]))
+
+    return sites, wall_s
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -497,7 +530,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             wall_s_total = 0.0
             sites_first: list | None = None
             for _r in range(args.repeat):
-                _hmm, sites, wall_s = _run_single_stoich(
+                sites, wall_s = _run_single_stoich(
                     stoich,
                     use_cuda=use_cuda,
                     threads=threads,

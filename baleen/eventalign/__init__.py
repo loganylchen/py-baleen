@@ -37,6 +37,7 @@ from baleen.eventalign._bam import (
 )
 from baleen.eventalign._pipeline import (
     ContigResult,
+    ContigSummary,
     PipelineMetadata,
     PositionResult,
     load_results,
@@ -74,12 +75,17 @@ from baleen.eventalign._aggregation import (
     SiteResult,
     aggregate_all,
     aggregate_contig,
+    merge_contig_tsvs,
     write_site_tsv,
+    write_site_tsv_header,
+    write_site_tsv_rows,
 )
 from baleen.eventalign._signal import PositionSignals
 from baleen.eventalign._read_bam import (
+    flush_contig_to_bam,
     load_read_results,
     load_read_results_iter,
+    merge_contig_bams,
     write_mod_bam,
 )
 
@@ -119,6 +125,12 @@ __all__ = [
     "aggregate_contig",
     "aggregate_all",
     "write_site_tsv",
+    "write_site_tsv_header",
+    "write_site_tsv_rows",
+    "merge_contig_tsvs",
+    "ContigSummary",
+    "flush_contig_to_bam",
+    "merge_contig_bams",
     "load_read_results",
     "load_read_results_iter",
     "write_mod_bam",

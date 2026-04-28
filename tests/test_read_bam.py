@@ -363,3 +363,191 @@ def test_public_api_exports():
     assert callable(load_read_results)
     assert callable(load_read_results_iter)
     assert callable(write_mod_bam)
+
+
+# ---------------------------------------------------------------------------
+# Streaming-flush refactor: targeted regressions for the post-review fixes.
+# ---------------------------------------------------------------------------
+
+
+def test_flush_contig_to_bam_slice_is_coordinate_sorted():
+    """Per-contig slice from flush_contig_to_bam must be coordinate-sorted.
+
+    Native and IVT reads are read sequentially from two different input BAMs
+    (native first, then IVT). Without an explicit sort step inside
+    flush_contig_to_bam the merged output would interleave (native pos 100,
+    ivt pos 50) and break ``samtools index`` on the merged file. Verify the
+    slice is sorted by reference_start before any merge runs.
+    """
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    # Two reads per side, deliberately at different start positions so a
+    # naive native-then-IVT write would produce a non-sorted slice.
+    native_names = ["nat_a", "nat_b"]
+    ivt_names = ["ivt_a", "ivt_b"]
+
+    n_total = 4
+    pr = PositionResult(
+        position=100, reference_kmer="AACGU",
+        n_native_reads=2, n_ivt_reads=2,
+        native_read_names=list(native_names),
+        ivt_read_names=list(ivt_names),
+        distance_matrix=np.eye(n_total),
+    )
+    cr = ContigResult(contig="chrZ", native_depth=2.0, ivt_depth=2.0,
+                      positions={100: pr})  # noqa: F841
+
+    ps = hier.PositionStats(
+        position=100, reference_kmer="AACGU",
+        coverage_class=hier.CoverageClass.HIGH,
+        n_ivt=2, n_native=2,
+        native_read_names=list(native_names),
+        ivt_read_names=list(ivt_names),
+        mu_raw=1.0, sigma_raw=0.5, mu_shrunk=1.0, sigma_shrunk=0.5,
+        scores=np.zeros(n_total), z_scores=np.zeros(n_total),
+        p_null=np.ones(n_total),
+        p_mod_raw=np.array([0.8, 0.7, 0.1, 0.05]),
+        mixture_pi=0.5, mixture_null_gate=False, gate_weight=1.0,
+        p_mod_knn=np.array([0.8, 0.7, 0.1, 0.05]),
+        p_mod_hmm=np.array([0.85, 0.75, 0.05, 0.02]),
+    )
+    cmr = hier.ContigModificationResult(
+        contig="chrZ", position_stats={100: ps},
+        native_trajectories=[], ivt_trajectories=[],
+        global_mu=1.0, global_sigma=0.5,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        seq_len = 3000
+        ref = Path(tmp) / "ref.fa"
+        ref.write_text(">chrZ\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref))
+
+        # Build native BAM with reads at HIGH start positions, IVT BAM with
+        # reads at LOW start positions — order would be wrong without sort.
+        header = pysam.AlignmentHeader.from_dict({
+            "HD": {"VN": "1.6", "SO": "coordinate"},
+            "SQ": [{"SN": "chrZ", "LN": seq_len}],
+        })
+        native_bam = Path(tmp) / "native.bam"
+        ivt_bam = Path(tmp) / "ivt.bam"
+
+        def _make_bam(path, names, start_positions):
+            with pysam.AlignmentFile(str(path), "wb", header=header) as bf:
+                for name, st in zip(names, start_positions):
+                    a = pysam.AlignedSegment(bf.header)
+                    a.query_name = name
+                    a.flag = 0
+                    a.reference_id = 0
+                    a.reference_start = st
+                    a.mapping_quality = 60
+                    a.query_sequence = "A" * 500
+                    a.cigar = [(0, 500)]
+                    a.query_qualities = pysam.qualitystring_to_array("I" * 500)
+                    bf.write(a)
+            sp = str(path) + ".sorted.bam"
+            pysam.sort("-o", sp, str(path))
+            Path(sp).rename(path)
+            pysam.index(str(path))
+
+        # Native at high pos, IVT at low pos → naive append would interleave wrong.
+        _make_bam(native_bam, native_names, [800, 900])
+        _make_bam(ivt_bam, ivt_names, [50, 60])
+
+        out_path = Path(tmp) / "slice.bam"
+        ref_path_for_header = native_bam
+        slice_header = read_bam._build_header_from_bam(ref_path_for_header, ref)
+        read_bam.flush_contig_to_bam(cmr, native_bam, ivt_bam, slice_header, out_path)
+
+        # Slice must exist and be coordinate-sorted.
+        with pysam.AlignmentFile(str(out_path), "rb") as bf:
+            starts = [r.reference_start for r in bf.fetch(until_eof=True)]
+        assert starts == sorted(starts), (
+            f"per-contig slice is not coordinate-sorted: {starts}"
+        )
+
+
+def test_merge_contig_bams_indexable_after_merge():
+    """merge_contig_bams output must be indexable (sort order preserved).
+
+    Regression test: if any input slice were unsorted, ``pysam.index`` on the
+    merged file would fail or produce corrupt indices. Build two slices via
+    flush_contig_to_bam, merge, and confirm we can fetch by region.
+    """
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    contig_results, hmm_results, native_names, ivt_names = _make_synthetic_data()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        seq_len = 3000
+        ref = Path(tmp) / "ref.fa"
+        ref.write_text(">ecoli23S\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref))
+
+        native_bam, ivt_bam = _make_synthetic_bams(
+            tmp, "ecoli23S", seq_len, native_names, ivt_names,
+        )
+
+        header = read_bam._build_header_from_bam(native_bam, ref)
+
+        slice_dir = Path(tmp) / "slices"
+        slice_dir.mkdir()
+        slice_path = slice_dir / "ecoli23S.bam"
+        read_bam.flush_contig_to_bam(
+            hmm_results["ecoli23S"], native_bam, ivt_bam, header, slice_path,
+        )
+
+        merged = Path(tmp) / "merged.bam"
+        read_bam.merge_contig_bams([slice_path], merged, threads=1)
+
+        # Index must exist and be usable (would raise on corrupt sort order).
+        assert (merged.with_suffix(".bam.bai")).exists()
+        with pysam.AlignmentFile(str(merged), "rb") as bf:
+            fetched = list(bf.fetch("ecoli23S"))
+        assert len(fetched) == 5
+
+
+def test_sanitize_contig_filename_handles_unsafe_chars():
+    """_sanitize_contig_filename must strip path-traversal characters."""
+    pipeline_mod = importlib.import_module("baleen.eventalign._pipeline")
+    sanitize = pipeline_mod._sanitize_contig_filename
+
+    assert sanitize("chr1") == "chr1"  # safe names pass through unchanged
+    assert "/" not in sanitize("../../etc/passwd")
+    assert "\\" not in sanitize("foo\\bar")
+    # Different unsafe inputs that map to the same plain stem must differ
+    # (hash disambiguator) so per-contig artifacts don't collide.
+    a = sanitize("a/b")
+    b = sanitize("a\\b")
+    assert a != b
+    assert a.startswith("a_b-")
+    assert b.startswith("a_b-")
+
+
+def test_bam_header_dict_is_picklable():
+    """Worker kwargs must be picklable for ProcessPoolExecutor (spawn).
+
+    pysam.AlignmentHeader itself is NOT picklable (cdef class with non-trivial
+    __cinit__).  The streaming pipeline must therefore ship ``to_dict()`` and
+    rebuild via ``from_dict()`` in each worker.
+    """
+    import pickle
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        seq_len = 1000
+        ref = Path(tmp) / "ref.fa"
+        ref.write_text(">chrX\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref))
+        native_bam, _ = _make_synthetic_bams(tmp, "chrX", seq_len, ["r0"], ["r1"])
+
+        header = read_bam._build_header_from_bam(native_bam, ref)
+
+        # The raw header object is NOT picklable.
+        with pytest.raises(TypeError):
+            pickle.dumps(header)
+
+        # to_dict() yields a picklable representation.
+        header_dict = header.to_dict()
+        blob = pickle.dumps(header_dict)
+        rebuilt = pysam.AlignmentHeader.from_dict(pickle.loads(blob))
+        assert "chrX" in rebuilt.references

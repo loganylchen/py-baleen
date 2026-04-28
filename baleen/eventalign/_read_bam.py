@@ -13,7 +13,11 @@ Tags written:
 Public API
 ----------
 write_mod_bam
-    Write mod-BAM from HMM results + original BAM files.
+    Write mod-BAM from HMM results + original BAM files (compat wrapper).
+flush_contig_to_bam
+    Write a single contig's per-read modification calls to one BAM slice.
+merge_contig_bams
+    Merge per-contig BAM slices into a single sorted, indexed mod-BAM.
 load_read_results
     Load read-level results into a DataFrame, optionally filtered by region.
 load_read_results_iter
@@ -25,9 +29,11 @@ from __future__ import annotations
 import array
 import logging
 import math
+import os
+import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Union
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Union
 
 import numpy as np
 import pandas as pd
@@ -41,6 +47,151 @@ logger = logging.getLogger(__name__)
 PathLike = Union[str, Path]
 
 
+def _ensure_bam_indexed(bam_path: PathLike) -> None:
+    """Index *bam_path* if no .bai sibling exists (idempotent, fast)."""
+    bam = Path(bam_path)
+    if Path(f"{bam}.bai").exists() or bam.with_suffix(".bai").exists():
+        return
+    pysam.index(str(bam))
+
+
+def flush_contig_to_bam(
+    cmr: "ContigModificationResult",
+    native_bam: PathLike,
+    ivt_bam: PathLike,
+    header: pysam.AlignmentHeader,
+    out_path: PathLike,
+) -> Path:
+    """Write a single contig's read-level mod calls to one (unsorted) BAM slice.
+
+    Uses ``fetch(contig)`` to scan only reads from this contig in the input
+    BAMs — requires the input BAMs to be indexed.
+
+    Parameters
+    ----------
+    cmr
+        ``ContigModificationResult`` for one contig.
+    native_bam, ivt_bam
+        Original input BAM paths.  Must be indexed.
+    header
+        Output BAM header (built once via :func:`_build_header_from_bam`).
+    out_path
+        Destination path for the per-contig BAM slice (unsorted).
+
+    Returns
+    -------
+    Path
+        The written per-contig BAM path.
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    contig = cmr.contig
+
+    # Build read_positions for just this one contig.
+    read_positions: dict[str, list[tuple[str, int, float, bool]]] = defaultdict(list)
+    for pos, ps in cmr.position_stats.items():
+        for i, name in enumerate(ps.native_read_names):
+            p = float(ps.p_mod_hmm[i])
+            if not math.isnan(p):
+                read_positions[name].append((contig, pos, p, True))
+        for j, name in enumerate(ps.ivt_read_names):
+            p = float(ps.p_mod_hmm[ps.n_native + j])
+            if not math.isnan(p):
+                read_positions[name].append((contig, pos, p, False))
+
+    # Write to an unsorted intermediate (native then IVT reads
+    # interleave by coordinate), then sort by position before flushing
+    # to *out_path* — keeps per-contig slices internally sorted so the
+    # downstream ``samtools merge`` produces a globally sorted output
+    # without an expensive whole-file resort.
+    unsorted_path = out.with_suffix(out.suffix + ".unsorted.tmp")
+    sorted_tmp = out.with_suffix(out.suffix + ".tmp")
+    success = False
+    try:
+        seen_reads: set[str] = set()
+        with pysam.AlignmentFile(str(unsorted_path), "wb", header=header) as bam_out:
+            for bam_path, is_native, rg_label in [
+                (native_bam, True, "native"),
+                (ivt_bam, False, "ivt"),
+            ]:
+                with pysam.AlignmentFile(str(bam_path), "rb") as bam_in:
+                    try:
+                        read_iter: Iterable[pysam.AlignedSegment] = bam_in.fetch(contig)
+                    except (ValueError, KeyError):
+                        # Contig not present in this input BAM — nothing to fetch.
+                        continue
+                    _scan_and_write(
+                        read_iter, bam_out, read_positions,
+                        is_native, rg_label, seen_reads,
+                    )
+        # Coordinate-sort the slice (single-threaded; the slice is small
+        # enough that parallelism here is mostly overhead).
+        pysam.sort("-o", str(sorted_tmp), str(unsorted_path))
+        os.replace(sorted_tmp, out)
+        success = True
+    finally:
+        unsorted_path.unlink(missing_ok=True)
+        if not success:
+            sorted_tmp.unlink(missing_ok=True)
+
+    return out
+
+
+def merge_contig_bams(
+    per_contig_bams: list[Path],
+    output_path: PathLike,
+    threads: int = 4,
+) -> Path:
+    """Merge a list of per-contig BAM slices into one sorted, indexed BAM.
+
+    Uses ``samtools merge`` — the per-contig slices are already sorted
+    by position within their contig (they come from ``fetch(contig)``
+    over a sorted input BAM), so a streaming merge produces a globally
+    sorted output without the cost of a re-sort.
+
+    Parameters
+    ----------
+    per_contig_bams
+        Sorted (alphabetically by contig name) list of per-contig BAMs.
+    output_path
+        Destination path for the merged BAM.
+    threads
+        Merge threads (``-@`` flag).
+
+    Returns
+    -------
+    Path
+        Final BAM path (or *output_path* if input list is empty).
+    """
+    out = Path(output_path)
+    if not per_contig_bams:
+        logger.warning("No per-contig BAMs to merge; %s not written.", out)
+        return out
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    success = False
+    try:
+        # -f overwrite tmp, -c combine @RG, -p combine @PG
+        pysam.merge(
+            "-f", "-c", "-p",
+            "-@", str(threads),
+            str(tmp),
+            *(str(p) for p in per_contig_bams),
+        )
+        os.replace(tmp, out)
+        pysam.index(str(out))
+        success = True
+    finally:
+        if not success:
+            tmp.unlink(missing_ok=True)
+            if out.exists():
+                out.unlink()
+
+    return out
+
+
 def write_mod_bam(
     hierarchical_results: dict[str, "ContigModificationResult"],
     native_bam: PathLike,
@@ -50,9 +201,8 @@ def write_mod_bam(
 ) -> Path:
     """Write mod-BAM with MM/ML tags from HMM results + original BAM reads.
 
-    For each read in the HMM results, copies the original alignment from
-    the input BAM and appends MM:Z / ML:B:C tags encoding per-base
-    modification probabilities, plus an RG:Z tag for sample identity.
+    Compatibility wrapper: loops :func:`flush_contig_to_bam` over each
+    contig into a tempdir, then calls :func:`merge_contig_bams`.
 
     Parameters
     ----------
@@ -75,78 +225,32 @@ def write_mod_bam(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Build reverse index — read_name -> [(contig, genomic_pos, p_mod, is_native)]
-    read_positions: dict[str, list[tuple[str, int, float, bool]]] = defaultdict(list)
-    for contig, cmr in hierarchical_results.items():
-        for pos, ps in cmr.position_stats.items():
-            for i, name in enumerate(ps.native_read_names):
-                p = float(ps.p_mod_hmm[i])
-                if not math.isnan(p):
-                    read_positions[name].append((contig, pos, p, True))
-
-            for j, name in enumerate(ps.ivt_read_names):
-                p = float(ps.p_mod_hmm[ps.n_native + j])
-                if not math.isnan(p):
-                    read_positions[name].append((contig, pos, p, False))
-
-    if not read_positions:
-        logger.warning("No reads with valid p_mod_hmm found; skipping mod-BAM output")
+    if not hierarchical_results:
+        logger.warning("No hierarchical results; skipping mod-BAM output")
         return out
 
-    logger.info(
-        "Building mod-BAM for %d reads across %d contigs",
-        len(read_positions), len(hierarchical_results),
-    )
+    _ensure_bam_indexed(native_bam)
+    _ensure_bam_indexed(ivt_bam)
 
-    # Step 2: Build header from the native BAM (preserves all @SQ lines)
     header = _build_header_from_bam(native_bam, ref_fasta)
 
-    # Step 3: Scan both BAMs, copy reads with MM/ML tags
-    tmp_unsorted = out.parent / f".{out.name}.unsorted.bam"
-    try:
-        n_records = 0
-        n_tagged = 0
-        seen_reads: set[str] = set()
+    logger.info(
+        "Building mod-BAM for %d contigs",
+        len(hierarchical_results),
+    )
 
-        with pysam.AlignmentFile(str(tmp_unsorted), "wb", header=header) as bam_out:
-            for bam_path, is_native, rg_label in [
-                (native_bam, True, "native"),
-                (ivt_bam, False, "ivt"),
-            ]:
-                count, tagged = _scan_and_write(
-                    bam_path, bam_out, read_positions, is_native, rg_label, seen_reads,
-                )
-                n_records += count
-                n_tagged += tagged
+    with tempfile.TemporaryDirectory(prefix="baleen-modbam-") as tmp:
+        tmp_dir = Path(tmp)
+        per_contig_paths: list[Path] = []
+        for contig in sorted(hierarchical_results.keys()):
+            cmr = hierarchical_results[contig]
+            slice_path = tmp_dir / f"{contig}.bam"
+            flush_contig_to_bam(cmr, native_bam, ivt_bam, header, slice_path)
+            per_contig_paths.append(slice_path)
+        merge_contig_bams(per_contig_paths, out)
 
-        # Sort and index
-        success = False
-        try:
-            try:
-                pysam.sort("-o", str(out), str(tmp_unsorted))
-            except Exception as exc:
-                raise RuntimeError(f"Failed to sort BAM file {out}.") from exc
-            try:
-                pysam.index(str(out))
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to index BAM file {out}. "
-                    "Records may not be properly sorted."
-                ) from exc
-            success = True
-        finally:
-            if not success and out.exists():
-                out.unlink()
-
-        logger.info(
-            "Wrote %d reads to mod-BAM (%d with MM/ML tags): %s",
-            n_records, n_tagged, out,
-        )
-        return out
-
-    finally:
-        if tmp_unsorted.exists():
-            tmp_unsorted.unlink()
+    logger.info("Wrote mod-BAM to %s", out)
+    return out
 
 
 def _build_header_from_bam(
@@ -174,14 +278,14 @@ def _build_header_from_bam(
 
 
 def _scan_and_write(
-    bam_path: PathLike,
+    read_iter: Iterable[pysam.AlignedSegment],
     bam_out: pysam.AlignmentFile,
     read_positions: dict[str, list[tuple[str, int, float, bool]]],
     is_native: bool,
     rg_label: str,
     seen_reads: set[str],
 ) -> tuple[int, int]:
-    """Scan an input BAM, copy reads that appear in HMM results with MM/ML tags.
+    """Iterate *read_iter*, copying matching reads to *bam_out* with MM/ML tags.
 
     Returns (n_written, n_tagged).
     """
@@ -189,69 +293,68 @@ def _scan_and_write(
     n_tagged = 0
     n_skipped_mapping = 0
 
-    with pysam.AlignmentFile(str(bam_path), "rb") as bam_in:
-        for read in bam_in.fetch(until_eof=True):
-            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+    for read in read_iter:
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+
+        name = read.query_name
+        if name not in read_positions:
+            continue
+        if name in seen_reads:
+            continue
+        seen_reads.add(name)
+
+        # Collect HMM positions for this read (matching native/ivt)
+        entries = [
+            (contig, gpos, p)
+            for contig, gpos, p, entry_is_native in read_positions[name]
+            if entry_is_native == is_native
+        ]
+        if not entries:
+            continue
+
+        # Map genomic positions -> query positions via aligned_pairs
+        # aligned_pairs returns (query_pos, ref_pos), ref_pos is 0-based
+        ref_to_query: dict[int, int | None] = {}
+        for qry, ref in read.get_aligned_pairs():
+            if ref is not None:
+                ref_to_query[ref] = qry
+
+        # Build (query_pos, p_mod) pairs, skipping deletions / unmapped
+        qpos_pmod: list[tuple[int, float]] = []
+        for _contig, gpos, p in entries:
+            ref_pos_0 = gpos - 1  # eventalign 1-based -> 0-based
+            qp = ref_to_query.get(ref_pos_0)
+            if qp is None:
+                n_skipped_mapping += 1
                 continue
+            qpos_pmod.append((qp, p))
 
-            name = read.query_name
-            if name not in read_positions:
-                continue
-            if name in seen_reads:
-                continue
-            seen_reads.add(name)
+        # Create output record (copy from original alignment)
+        a = pysam.AlignedSegment(bam_out.header)
+        a.query_name = read.query_name
+        a.flag = read.flag
+        a.reference_id = bam_out.get_tid(read.reference_name)
+        a.reference_start = read.reference_start
+        a.mapping_quality = read.mapping_quality
+        a.cigar = read.cigartuples
+        a.query_sequence = read.query_sequence
+        a.query_qualities = read.query_qualities
+        a.next_reference_id = -1
+        a.next_reference_start = -1
+        a.template_length = 0
 
-            # Collect HMM positions for this read (matching native/ivt)
-            entries = [
-                (contig, gpos, p)
-                for contig, gpos, p, entry_is_native in read_positions[name]
-                if entry_is_native == is_native
-            ]
-            if not entries:
-                continue
+        # Add MM/ML tags if we have mapped positions
+        if qpos_pmod:
+            qpos_pmod.sort(key=lambda x: x[0])
+            mm_str, ml_vals = _build_mm_ml(qpos_pmod)
+            a.set_tag("MM", mm_str, "Z")
+            a.set_tag("ML", ml_vals)
+            n_tagged += 1
 
-            # Map genomic positions -> query positions via aligned_pairs
-            # aligned_pairs returns (query_pos, ref_pos), ref_pos is 0-based
-            ref_to_query: dict[int, int | None] = {}
-            for qry, ref in read.get_aligned_pairs():
-                if ref is not None:
-                    ref_to_query[ref] = qry
-
-            # Build (query_pos, p_mod) pairs, skipping deletions / unmapped
-            qpos_pmod: list[tuple[int, float]] = []
-            for _contig, gpos, p in entries:
-                ref_pos_0 = gpos - 1  # eventalign 1-based -> 0-based
-                qp = ref_to_query.get(ref_pos_0)
-                if qp is None:
-                    n_skipped_mapping += 1
-                    continue
-                qpos_pmod.append((qp, p))
-
-            # Create output record (copy from original alignment)
-            a = pysam.AlignedSegment(bam_out.header)
-            a.query_name = read.query_name
-            a.flag = read.flag
-            a.reference_id = bam_out.get_tid(read.reference_name)
-            a.reference_start = read.reference_start
-            a.mapping_quality = read.mapping_quality
-            a.cigar = read.cigartuples
-            a.query_sequence = read.query_sequence
-            a.query_qualities = read.query_qualities
-            a.next_reference_id = -1
-            a.next_reference_start = -1
-            a.template_length = 0
-
-            # Add MM/ML tags if we have mapped positions
-            if qpos_pmod:
-                qpos_pmod.sort(key=lambda x: x[0])
-                mm_str, ml_vals = _build_mm_ml(qpos_pmod)
-                a.set_tag("MM", mm_str, "Z")
-                a.set_tag("ML", ml_vals)
-                n_tagged += 1
-
-            a.set_tag("RG", rg_label, "Z")
-            bam_out.write(a)
-            n_written += 1
+        a.set_tag("RG", rg_label, "Z")
+        bam_out.write(a)
+        n_written += 1
 
     if n_skipped_mapping > 0:
         logger.debug(

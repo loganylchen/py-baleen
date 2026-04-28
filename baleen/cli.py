@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from pathlib import Path
 
 from baleen.eventalign import (
@@ -300,7 +299,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
                 f5c_threads, args.threads)
 
     # Run streaming pipeline (DTW → HMM → aggregation fused per contig)
-    hmm_results, sites, metadata = run_pipeline_streaming(
+    output_paths, metadata = run_pipeline_streaming(
         native_bam=args.native_bam,
         native_fastq=args.native_fastq,
         native_blow5=args.native_blow5,
@@ -329,22 +328,14 @@ def _cmd_run(args: argparse.Namespace) -> None:
         subsample_n=args.subsample_n,
         legacy_scoring=args.legacy_scoring,
         mod_threshold=args.mod_threshold,
+        write_bam=not args.no_read_bam,
     )
 
-    # Write outputs
-    tsv_path = output_dir / "site_results.tsv"
-    write_site_tsv(sites, tsv_path)
+    tsv_path = output_paths["site_tsv"]
+    bam_path = output_paths.get("read_bam")
+    n_total = output_paths.get("n_total_sites", 0)
+    n_sig = output_paths.get("n_significant", 0)
 
-    bam_path = None
-    if not args.no_read_bam:
-        bam_path = output_dir / "read_results.bam"
-        t0 = time.perf_counter()
-        write_mod_bam(hmm_results, args.native_bam, args.ivt_bam, args.ref, bam_path)
-        logger.info("mod-BAM done in %.1fs", time.perf_counter() - t0)
-
-    # Summary
-    n_sig = sum(1 for s in sites if s.padj < 0.05)
-    n_total = len(sites)
     logger.info("=" * 60)
     logger.info("RESULTS SUMMARY")
     logger.info("  Total sites:      %d", n_total)

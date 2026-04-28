@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -294,11 +296,38 @@ _TSV_COLUMNS = [
 ]
 
 
+def write_site_tsv_header(file: IO[str]) -> None:
+    """Write the TSV column header (single row) to *file*."""
+    writer = csv.writer(file, delimiter="\t")
+    writer.writerow(_TSV_COLUMNS)
+
+
+def write_site_tsv_rows(file: IO[str], sites: list[SiteResult]) -> None:
+    """Write *sites* as TSV data rows (no header) to *file*."""
+    writer = csv.writer(file, delimiter="\t")
+    for site in sites:
+        writer.writerow([
+            site.contig,
+            site.position,
+            site.kmer,
+            f"{site.mod_ratio:.6f}",
+            f"{site.ci_low:.6f}",
+            f"{site.ci_high:.6f}",
+            f"{site.pvalue:.6e}",
+            f"{site.padj:.6e}",
+            f"{site.effect_size:.6f}",
+            site.n_native,
+            site.n_ivt,
+            f"{site.mean_p_mod:.6f}",
+            f"{site.stoichiometry:.6f}",
+        ])
+
+
 def write_site_tsv(
     sites: list[SiteResult],
     path: str | Path,
 ) -> Path:
-    """Write site-level results to a TSV file.
+    """Write site-level results to a TSV file (header + rows).
 
     Parameters
     ----------
@@ -316,24 +345,52 @@ def write_site_tsv(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with out.open("w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(_TSV_COLUMNS)
-        for site in sites:
-            writer.writerow([
-                site.contig,
-                site.position,
-                site.kmer,
-                f"{site.mod_ratio:.6f}",
-                f"{site.ci_low:.6f}",
-                f"{site.ci_high:.6f}",
-                f"{site.pvalue:.6e}",
-                f"{site.padj:.6e}",
-                f"{site.effect_size:.6f}",
-                site.n_native,
-                site.n_ivt,
-                f"{site.mean_p_mod:.6f}",
-                f"{site.stoichiometry:.6f}",
-            ])
+        write_site_tsv_header(f)
+        write_site_tsv_rows(f, sites)
 
     logger.info("Wrote %d site results to %s", len(sites), out)
+    return out
+
+
+def merge_contig_tsvs(
+    per_contig_tsvs: list[Path],
+    output_path: str | Path,
+) -> Path:
+    """Concat per-contig TSV slices (rows-only) into one TSV with a header.
+
+    The caller is responsible for sorting *per_contig_tsvs* in the desired
+    output order (typically alphabetic by contig name).
+
+    Parameters
+    ----------
+    per_contig_tsvs
+        List of per-contig TSV paths.  Each file contains data rows
+        only (no header) — produced via :func:`write_site_tsv_rows`.
+    output_path
+        Final TSV path.
+
+    Returns
+    -------
+    Path
+        The written final TSV path.
+    """
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    success = False
+    try:
+        with tmp.open("w", newline="") as fout:
+            write_site_tsv_header(fout)
+            for p in per_contig_tsvs:
+                src = Path(p)
+                if not src.exists():
+                    continue
+                with src.open("r") as fin:
+                    shutil.copyfileobj(fin, fout)
+        os.replace(tmp, out)
+        success = True
+    finally:
+        if not success:
+            tmp.unlink(missing_ok=True)
+
     return out
