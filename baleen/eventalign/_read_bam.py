@@ -62,10 +62,12 @@ def flush_contig_to_bam(
     header: pysam.AlignmentHeader,
     out_path: PathLike,
 ) -> Path:
-    """Write a single contig's read-level mod calls to one (unsorted) BAM slice.
+    """Write a single contig's read-level mod calls to one coordinate-sorted BAM slice.
 
     Uses ``fetch(contig)`` to scan only reads from this contig in the input
-    BAMs — requires the input BAMs to be indexed.
+    BAMs — requires the input BAMs to be indexed.  Native and IVT reads are
+    written interleaved, then ``pysam.sort`` orders the slice by coordinate
+    before the atomic rename to *out_path*.
 
     Parameters
     ----------
@@ -76,7 +78,7 @@ def flush_contig_to_bam(
     header
         Output BAM header (built once via :func:`_build_header_from_bam`).
     out_path
-        Destination path for the per-contig BAM slice (unsorted).
+        Destination path for the per-contig BAM slice (coordinate-sorted).
 
     Returns
     -------
@@ -145,10 +147,10 @@ def merge_contig_bams(
 ) -> Path:
     """Merge a list of per-contig BAM slices into one sorted, indexed BAM.
 
-    Uses ``samtools merge`` — the per-contig slices are already sorted
-    by position within their contig (they come from ``fetch(contig)``
-    over a sorted input BAM), so a streaming merge produces a globally
-    sorted output without the cost of a re-sort.
+    Uses ``samtools merge`` — each per-contig slice has already been
+    coordinate-sorted by :func:`flush_contig_to_bam` (which calls
+    ``pysam.sort`` internally), so a streaming k-way merge produces a
+    globally sorted output without the cost of a whole-file re-sort.
 
     Parameters
     ----------
@@ -239,12 +241,16 @@ def write_mod_bam(
         len(hierarchical_results),
     )
 
+    # Lazy import to avoid a circular dependency (_pipeline imports
+    # flush_contig_to_bam from this module).
+    from baleen.eventalign._pipeline import _sanitize_contig_filename
+
     with tempfile.TemporaryDirectory(prefix="baleen-modbam-") as tmp:
         tmp_dir = Path(tmp)
         per_contig_paths: list[Path] = []
         for contig in sorted(hierarchical_results.keys()):
             cmr = hierarchical_results[contig]
-            slice_path = tmp_dir / f"{contig}.bam"
+            slice_path = tmp_dir / f"{_sanitize_contig_filename(contig)}.bam"
             flush_contig_to_bam(cmr, native_bam, ivt_bam, header, slice_path)
             per_contig_paths.append(slice_path)
         merge_contig_bams(per_contig_paths, out)

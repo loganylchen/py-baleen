@@ -359,7 +359,7 @@ def _process_contig(
         native_stats[contig].mean_depth, ivt_stats[contig].mean_depth,
     )
 
-    contig_tmp = tmp_root / contig
+    contig_tmp = tmp_root / _sanitize_contig_filename(contig)
     contig_tmp.mkdir(parents=True, exist_ok=True)
 
     _max_reads = subsample_n if subsample else None
@@ -701,10 +701,14 @@ def _process_contig_streaming(
         contig_name, len(sites), _fmt_elapsed(agg_elapsed),
     )
 
+    # Sanitize once — SAM permits unsafe characters (``/``, ``..``, ``\``)
+    # in contig names; we use the sanitized stem for every on-disk artifact.
+    safe_name = _sanitize_contig_filename(contig_name)
+
     # Optionally save intermediate ContigResult
     if keep_intermediate and intermediate_dir is not None:
         intermediate_dir.mkdir(parents=True, exist_ok=True)
-        pkl_path = intermediate_dir / f"{contig_name}.pkl"
+        pkl_path = intermediate_dir / f"{safe_name}.pkl"
         with pkl_path.open("wb") as fh:
             pickle.dump(contig_result, fh)
         logger.info("  Saved intermediate: %s", pkl_path)
@@ -712,7 +716,6 @@ def _process_contig_streaming(
     # Stage 4: Streaming flush of per-contig outputs
     per_contig_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = _sanitize_contig_filename(contig_name)
     tsv_path = per_contig_dir / f"{safe_name}.tsv"
     tsv_tmp = tsv_path.with_suffix(tsv_path.suffix + ".tmp")
     success = False
