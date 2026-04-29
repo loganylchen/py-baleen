@@ -30,6 +30,7 @@ import array
 import logging
 import math
 import os
+import shutil
 import tempfile
 from collections import defaultdict
 from pathlib import Path
@@ -140,10 +141,29 @@ def flush_contig_to_bam(
     return out
 
 
+_MERGE_BATCH_SIZE = 100
+
+
+def _samtools_merge(
+    inputs: list[Path],
+    out_path: Path,
+    threads: int,
+) -> None:
+    """Run ``samtools merge`` once with the given inputs."""
+    # -f overwrite tmp, -c combine @RG, -p combine @PG
+    pysam.merge(
+        "-f", "-c", "-p",
+        "-@", str(threads),
+        str(out_path),
+        *(str(p) for p in inputs),
+    )
+
+
 def merge_contig_bams(
     per_contig_bams: list[Path],
     output_path: PathLike,
     threads: int = 4,
+    batch_size: int = _MERGE_BATCH_SIZE,
 ) -> Path:
     """Merge a list of per-contig BAM slices into one sorted, indexed BAM.
 
@@ -151,6 +171,14 @@ def merge_contig_bams(
     coordinate-sorted by :func:`flush_contig_to_bam` (which calls
     ``pysam.sort`` internally), so a streaming k-way merge produces a
     globally sorted output without the cost of a whole-file re-sort.
+
+    For large transcriptomes (thousands of contigs), opening every input
+    BAM in one ``samtools merge`` call hits filesystem-level limits
+    (file-descriptor limits, NFS handle caps, FUSE quirks).  We therefore
+    merge in **batches of ``batch_size``** into intermediate BAMs in a
+    tempdir, then merge those intermediates — repeating until a single
+    merge call covers the remaining inputs.  Output is bit-identical to
+    a flat one-shot merge.
 
     Parameters
     ----------
@@ -160,6 +188,9 @@ def merge_contig_bams(
         Destination path for the merged BAM.
     threads
         Merge threads (``-@`` flag).
+    batch_size
+        Maximum number of inputs per ``samtools merge`` invocation.
+        Each level of the tree opens at most this many files at once.
 
     Returns
     -------
@@ -171,17 +202,63 @@ def merge_contig_bams(
         logger.warning("No per-contig BAMs to merge; %s not written.", out)
         return out
 
+    if batch_size < 2:
+        raise ValueError(f"batch_size must be >= 2, got {batch_size}")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")
     success = False
+    cleanup_dir: Path | None = None
     try:
-        # -f overwrite tmp, -c combine @RG, -p combine @PG
-        pysam.merge(
-            "-f", "-c", "-p",
-            "-@", str(threads),
-            str(tmp),
-            *(str(p) for p in per_contig_bams),
-        )
+        if len(per_contig_bams) <= batch_size:
+            # Fast path: one-shot merge.
+            _samtools_merge(per_contig_bams, tmp, threads)
+        else:
+            # Multi-level merge.  Each level reduces the input count by
+            # ~``batch_size``×; for 2924 inputs at batch=100 this is
+            # one intermediate level (30 files) + one final merge.
+            cleanup_dir = Path(
+                tempfile.mkdtemp(prefix="baleen-merge-", dir=out.parent)
+            )
+            current = list(per_contig_bams)
+            level = 0
+            while len(current) > batch_size:
+                logger.info(
+                    "Chunked merge level %d: %d inputs → %d batches "
+                    "of %d (size %d)",
+                    level,
+                    len(current),
+                    (len(current) + batch_size - 1) // batch_size,
+                    batch_size,
+                    batch_size,
+                )
+                next_level: list[Path] = []
+                for batch_idx in range(
+                    0, len(current), batch_size
+                ):
+                    batch = current[batch_idx : batch_idx + batch_size]
+                    chunk_out = (
+                        cleanup_dir
+                        / f"L{level}_B{batch_idx // batch_size:05d}.bam"
+                    )
+                    _samtools_merge(batch, chunk_out, threads)
+                    next_level.append(chunk_out)
+                # Drop previous-level intermediates eagerly to keep the
+                # tempdir bounded.  Don't unlink the original input
+                # ``per_contig_bams`` (level 0); the caller owns those.
+                if level > 0:
+                    for p in current:
+                        p.unlink(missing_ok=True)
+                current = next_level
+                level += 1
+            # Final merge: ``current`` has ≤ batch_size entries.
+            logger.info(
+                "Chunked merge final level %d: %d inputs",
+                level,
+                len(current),
+            )
+            _samtools_merge(current, tmp, threads)
+
         os.replace(tmp, out)
         pysam.index(str(out))
         success = True
@@ -190,6 +267,8 @@ def merge_contig_bams(
             tmp.unlink(missing_ok=True)
             if out.exists():
                 out.unlink()
+        if cleanup_dir is not None:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
     return out
 

@@ -551,3 +551,68 @@ def test_bam_header_dict_is_picklable():
         blob = pickle.dumps(header_dict)
         rebuilt = pysam.AlignmentHeader.from_dict(pickle.loads(blob))
         assert "chrX" in rebuilt.references
+
+
+def test_merge_contig_bams_chunked_matches_one_shot():
+    """Chunked merge (batch_size < N) must produce a BAM bit-equivalent
+    in record set to a single one-shot merge.
+
+    Regression: ``samtools merge`` on thousands of inputs hits filesystem
+    limits (fd, NFS, FUSE).  ``merge_contig_bams`` therefore merges in
+    batches of ``batch_size`` and re-merges the intermediates.  Result
+    must be identical (same reads, same order) to the one-shot merge.
+    """
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    contig_results, hmm_results, native_names, ivt_names = _make_synthetic_data()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        seq_len = 3000
+        ref = Path(tmp) / "ref.fa"
+        ref.write_text(">ecoli23S\n" + "A" * seq_len + "\n")
+        pysam.faidx(str(ref))
+
+        native_bam, ivt_bam = _make_synthetic_bams(
+            tmp, "ecoli23S", seq_len, native_names, ivt_names,
+        )
+
+        header = read_bam._build_header_from_bam(native_bam, ref)
+
+        # Build 5 identical slices (cheap proxy for "many contigs").
+        slice_dir = Path(tmp) / "slices"
+        slice_dir.mkdir()
+        slices: list[Path] = []
+        for i in range(5):
+            slice_path = slice_dir / f"slice_{i:02d}.bam"
+            read_bam.flush_contig_to_bam(
+                hmm_results["ecoli23S"],
+                native_bam,
+                ivt_bam,
+                header,
+                slice_path,
+            )
+            slices.append(slice_path)
+
+        one_shot = Path(tmp) / "one_shot.bam"
+        chunked = Path(tmp) / "chunked.bam"
+
+        read_bam.merge_contig_bams(slices, one_shot, threads=1, batch_size=100)
+        # batch_size=2 forces ≥2 merge levels for 5 inputs.
+        read_bam.merge_contig_bams(slices, chunked, threads=1, batch_size=2)
+
+        with pysam.AlignmentFile(str(one_shot), "rb") as a, \
+             pysam.AlignmentFile(str(chunked), "rb") as b:
+            a_reads = [(r.query_name, r.reference_start) for r in a.fetch(until_eof=True)]
+            b_reads = [(r.query_name, r.reference_start) for r in b.fetch(until_eof=True)]
+        assert a_reads == b_reads, "chunked merge diverges from one-shot merge"
+        assert chunked.with_suffix(".bam.bai").exists()
+
+
+def test_merge_contig_bams_rejects_invalid_batch_size():
+    """batch_size < 2 has no valid recursion behaviour and must raise."""
+    read_bam = importlib.import_module("baleen.eventalign._read_bam")
+    with pytest.raises(ValueError, match="batch_size must be >= 2"):
+        read_bam.merge_contig_bams(
+            [Path("/tmp/dummy.bam")] * 3,
+            Path("/tmp/out.bam"),
+            batch_size=1,
+        )
