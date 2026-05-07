@@ -52,6 +52,7 @@ def sample_args_run():
         subsample_n=300,
         legacy_scoring=False,
         mod_threshold=0.9,
+        resume=False,
     )
     return args
 

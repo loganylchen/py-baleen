@@ -116,6 +116,12 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Save per-contig DTW intermediate results (ContigResult files)",
     )
     pipe.add_argument(
+        "--resume", action="store_true", default=False,
+        help="Resume an interrupted run by reusing per-contig slices already "
+             "present under <output_dir>/per_contig/. Aborts if the saved "
+             "parameter fingerprint disagrees with the current invocation.",
+    )
+    pipe.add_argument(
         "--no-subsample", action="store_true", default=False,
         help="Disable read subsampling (by default, reads are subsampled per condition per contig)",
     )
@@ -330,6 +336,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         legacy_scoring=args.legacy_scoring,
         mod_threshold=args.mod_threshold,
         write_bam=not args.no_read_bam,
+        resume=args.resume,
     )
 
     tsv_path = output_paths["site_tsv"]

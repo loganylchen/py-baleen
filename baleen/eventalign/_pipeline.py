@@ -50,6 +50,197 @@ def _sanitize_contig_filename(name: str) -> str:
         safe = f"{safe}-{digest}"
     return safe
 
+
+# ---- Resume fingerprint ----------------------------------------------------
+# A small JSON file under ``per_contig_dir`` records the inputs + parameters
+# of the run that produced the existing per-contig slices.  ``--resume``
+# refuses to proceed unless every fingerprint field matches the current run,
+# so a half-finished run can never be silently mixed with outputs from a run
+# using different ``--min-depth``, modified BAMs, etc.
+
+_RESUME_PARAMS_FILENAME = ".run_params.json"
+_RESUME_FINGERPRINT_SCHEMA = 1
+
+
+def _file_fingerprint(path: Optional[PathLike]) -> Optional[dict]:
+    """Cheap (size, mtime_ns) fingerprint — much faster than hashing GBs."""
+    if path is None:
+        return None
+    try:
+        st = os.stat(str(path))
+    except OSError:
+        return None
+    return {
+        "path": str(Path(path).resolve()),
+        "size": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+    }
+
+
+def _compute_resume_fingerprint(
+    *,
+    native_bam: PathLike,
+    native_fastq: PathLike,
+    native_blow5: PathLike,
+    ivt_bam: PathLike,
+    ivt_fastq: PathLike,
+    ivt_blow5: PathLike,
+    ref_fasta: PathLike,
+    min_depth: float,
+    depth_mode: str,
+    padding: int,
+    min_mapq: int,
+    primary_only: bool,
+    subsample: bool,
+    subsample_n: int,
+    legacy_scoring: bool,
+    mod_threshold: float,
+    write_bam: bool,
+    run_hmm: bool,
+    target_contigs: Optional[list[str]],
+) -> dict:
+    """Build a JSON-serializable dict capturing everything that would
+    invalidate a partial run.
+    """
+    return {
+        "schema_version": _RESUME_FINGERPRINT_SCHEMA,
+        "inputs": {
+            "native_bam": _file_fingerprint(native_bam),
+            "native_fastq": _file_fingerprint(native_fastq),
+            "native_blow5": _file_fingerprint(native_blow5),
+            "ivt_bam": _file_fingerprint(ivt_bam),
+            "ivt_fastq": _file_fingerprint(ivt_fastq),
+            "ivt_blow5": _file_fingerprint(ivt_blow5),
+            "ref_fasta": _file_fingerprint(ref_fasta),
+        },
+        "params": {
+            "min_depth": float(min_depth),
+            "depth_mode": str(depth_mode),
+            "padding": int(padding),
+            "min_mapq": int(min_mapq),
+            "primary_only": bool(primary_only),
+            "subsample": bool(subsample),
+            "subsample_n": int(subsample_n),
+            "legacy_scoring": bool(legacy_scoring),
+            "mod_threshold": float(mod_threshold),
+            "write_bam": bool(write_bam),
+            "run_hmm": bool(run_hmm),
+            "target_contigs": (
+                sorted(target_contigs) if target_contigs else None
+            ),
+        },
+    }
+
+
+def _validate_resume_compatibility(
+    per_contig_dir: Path,
+    current: dict,
+) -> None:
+    """Compare ``current`` against the fingerprint stored under
+    ``per_contig_dir`` and raise on any mismatch.
+    """
+    import json as _json
+
+    fp_path = per_contig_dir / _RESUME_PARAMS_FILENAME
+    if not fp_path.exists():
+        raise RuntimeError(
+            f"Cannot resume: {fp_path} not found.  The directory "
+            f"{per_contig_dir} exists but lacks the parameter "
+            f"fingerprint required to verify compatibility.  "
+            f"Delete {per_contig_dir} or run without --resume."
+        )
+    try:
+        prior = _json.loads(fp_path.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Cannot resume: failed to read {fp_path}: {exc}"
+        ) from exc
+
+    mismatches: list[str] = []
+    for section in ("inputs", "params"):
+        prior_section = prior.get(section, {}) or {}
+        curr_section = current.get(section, {}) or {}
+        for key in sorted(set(prior_section) | set(curr_section)):
+            v_prev = prior_section.get(key)
+            v_now = curr_section.get(key)
+            if v_prev != v_now:
+                mismatches.append(
+                    f"  {section}.{key}: prior={v_prev!r} now={v_now!r}"
+                )
+    if mismatches:
+        raise RuntimeError(
+            "Cannot resume: parameter fingerprint mismatch.  "
+            "Resuming would silently mix outputs from different runs.\n"
+            + "\n".join(mismatches)
+            + f"\nDelete {per_contig_dir} or run without --resume."
+        )
+
+
+def _scan_completed_contigs(
+    per_contig_dir: Path,
+    passed_contigs: list[str],
+    write_bam: bool,
+) -> dict[str, "ContigSummary"]:
+    """Return contig→ContigSummary for contigs whose per-contig artifacts
+    already exist under ``per_contig_dir``.
+
+    A contig is "completed" iff its ``<safe_name>.tsv`` (and, when
+    ``write_bam=True``, ``<safe_name>.bam``) is present.  Atomic
+    rename in the worker guarantees these files are fully written.
+    Counts are recovered by parsing the TSV.
+    """
+    import csv as _csv
+
+    completed: dict[str, ContigSummary] = {}
+    for contig in passed_contigs:
+        safe = _sanitize_contig_filename(contig)
+        tsv = per_contig_dir / f"{safe}.tsv"
+        if not tsv.exists():
+            continue
+        bam = per_contig_dir / f"{safe}.bam"
+        if write_bam and not bam.exists():
+            continue
+
+        n_sites = 0
+        n_significant = 0
+        try:
+            with tsv.open(newline="") as fh:
+                reader = _csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    n_sites += 1
+                    padj_str = row.get("padj")
+                    if padj_str is None:
+                        continue
+                    try:
+                        if float(padj_str) < 0.05:
+                            n_significant += 1
+                    except (TypeError, ValueError):
+                        pass
+        except OSError:
+            # Treat unreadable slice as "not done"; worker will redo it.
+            continue
+
+        completed[contig] = ContigSummary(
+            contig_name=contig,
+            n_sites=n_sites,
+            n_positions=0,  # Not recoverable from TSV; only used for logging.
+            n_significant=n_significant,
+            tsv_path=tsv,
+            bam_path=bam if write_bam else None,
+        )
+    return completed
+
+
+def _write_resume_fingerprint(per_contig_dir: Path, current: dict) -> None:
+    """Persist the fingerprint atomically (tmp + rename)."""
+    import json as _json
+
+    fp_path = per_contig_dir / _RESUME_PARAMS_FILENAME
+    tmp = fp_path.with_suffix(fp_path.suffix + ".tmp")
+    tmp.write_text(_json.dumps(current, indent=2, sort_keys=True))
+    os.replace(tmp, fp_path)
+
+
 PathLike = Union[str, Path]
 
 
@@ -1066,6 +1257,7 @@ def run_pipeline_streaming(
     legacy_scoring: bool = False,
     mod_threshold: float = 0.9,
     write_bam: bool = True,
+    resume: bool = False,
 ) -> tuple[dict[str, Any], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -1224,7 +1416,44 @@ def run_pipeline_streaming(
         output_dir_path / "read_results.bam" if write_bam else None
     )
 
-    if not passed_contigs:
+    # ---- Resume: scan & validate before dispatching workers ----
+    fingerprint = _compute_resume_fingerprint(
+        native_bam=native_bam,
+        native_fastq=native_fastq,
+        native_blow5=native_blow5,
+        ivt_bam=ivt_bam,
+        ivt_fastq=ivt_fastq,
+        ivt_blow5=ivt_blow5,
+        ref_fasta=ref_fasta,
+        min_depth=min_depth,
+        depth_mode=depth_mode,
+        padding=padding,
+        min_mapq=min_mapq,
+        primary_only=primary_only,
+        subsample=subsample,
+        subsample_n=subsample_n,
+        legacy_scoring=legacy_scoring,
+        mod_threshold=mod_threshold,
+        write_bam=write_bam,
+        run_hmm=run_hmm,
+        target_contigs=target_contigs,
+    )
+    resumed_summaries: list[ContigSummary] = []
+    if resume:
+        _validate_resume_compatibility(per_contig_dir, fingerprint)
+        resumed_map = _scan_completed_contigs(
+            per_contig_dir, passed_contigs, write_bam,
+        )
+        resumed_summaries = list(resumed_map.values())
+        if resumed_summaries:
+            logger.info(
+                "[Resume] Skipping %d/%d contigs already on disk under %s",
+                len(resumed_summaries), len(passed_contigs), per_contig_dir,
+            )
+        passed_contigs = [c for c in passed_contigs if c not in resumed_map]
+    _write_resume_fingerprint(per_contig_dir, fingerprint)
+
+    if not passed_contigs and not resumed_summaries:
         logger.warning("[Step 5/5] No contigs to process; returning empty results.")
         # Still write an empty TSV (header only) for consistency, unless we
         # are going to delete the parent tempdir on the way out.
@@ -1280,7 +1509,7 @@ def run_pipeline_streaming(
     gpu_mems = _get_gpu_memory(cuda_devices) if gpu_memory_limit is None else [gpu_memory_limit]
     gpu_workers, device_for_worker = _gpu_concurrent_workers(threads, gpu_mems, cuda_devices)
 
-    summaries: list[ContigSummary] = []
+    summaries: list[ContigSummary] = list(resumed_summaries)
     failed: list[str] = []
 
     try:
@@ -1320,7 +1549,9 @@ def run_pipeline_streaming(
             show_progress=(threads <= 1),
         )
 
-        if threads > 1:
+        if not passed_contigs:
+            logger.info("  All contigs already on disk — no workers dispatched.")
+        elif threads > 1:
             logger.info("  Using %d parallel workers (spawn context)", threads)
             ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=threads, mp_context=ctx) as executor:
