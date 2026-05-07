@@ -1409,6 +1409,13 @@ def run_pipeline_streaming(
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
     per_contig_dir = output_dir_path / "per_contig"
+    # Detect prior state BEFORE we create the directory.  Missing dir or
+    # missing fingerprint both mean "no usable prior run" — even with
+    # --resume, treat it as a fresh run (nothing to skip, nothing to
+    # validate against).  This matters for legacy interrupted runs that
+    # pre-date the fingerprint file.
+    fp_path_pre = per_contig_dir / _RESUME_PARAMS_FILENAME
+    has_prior_fingerprint = per_contig_dir.exists() and fp_path_pre.exists()
     per_contig_dir.mkdir(parents=True, exist_ok=True)
 
     site_tsv_path = output_dir_path / "site_results.tsv"
@@ -1440,17 +1447,23 @@ def run_pipeline_streaming(
     )
     resumed_summaries: list[ContigSummary] = []
     if resume:
-        _validate_resume_compatibility(per_contig_dir, fingerprint)
-        resumed_map = _scan_completed_contigs(
-            per_contig_dir, passed_contigs, write_bam,
-        )
-        resumed_summaries = list(resumed_map.values())
-        if resumed_summaries:
-            logger.info(
-                "[Resume] Skipping %d/%d contigs already on disk under %s",
-                len(resumed_summaries), len(passed_contigs), per_contig_dir,
+        if has_prior_fingerprint:
+            _validate_resume_compatibility(per_contig_dir, fingerprint)
+            resumed_map = _scan_completed_contigs(
+                per_contig_dir, passed_contigs, write_bam,
             )
-        passed_contigs = [c for c in passed_contigs if c not in resumed_map]
+            resumed_summaries = list(resumed_map.values())
+            if resumed_summaries:
+                logger.info(
+                    "[Resume] Skipping %d/%d contigs already on disk under %s",
+                    len(resumed_summaries), len(passed_contigs), per_contig_dir,
+                )
+            passed_contigs = [c for c in passed_contigs if c not in resumed_map]
+        else:
+            logger.info(
+                "[Resume] No %s under %s; treating as a fresh run.",
+                _RESUME_PARAMS_FILENAME, per_contig_dir,
+            )
     _write_resume_fingerprint(per_contig_dir, fingerprint)
 
     if not passed_contigs and not resumed_summaries:

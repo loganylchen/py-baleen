@@ -118,8 +118,10 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     pipe.add_argument(
         "--resume", action="store_true", default=False,
         help="Resume an interrupted run by reusing per-contig slices already "
-             "present under <output_dir>/per_contig/. Aborts if the saved "
-             "parameter fingerprint disagrees with the current invocation.",
+             "present under <output_dir>/per_contig/. Aborts only if the "
+             "saved parameter fingerprint disagrees with the current "
+             "invocation; if the directory or fingerprint is missing the "
+             "run starts fresh.",
     )
     pipe.add_argument(
         "--no-subsample", action="store_true", default=False,
