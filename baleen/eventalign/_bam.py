@@ -285,7 +285,7 @@ def filter_contigs(
     ivt_stats: dict[str, ContigStats],
     *,
     min_depth: float = 15.0,
-    depth_mode: Literal["mean_coverage", "read_count"] = "mean_coverage",
+    depth_mode: Literal["mean_coverage", "read_count"] = "read_count",
 ) -> tuple[list[str], list[ContigFilterResult]]:
     """Filter contigs using presence, mapped-read, and depth constraints.
 
@@ -300,13 +300,13 @@ def filter_contigs(
         on ``depth_mode``.
     depth_mode : {"mean_coverage", "read_count"}, optional
         How ``min_depth`` is interpreted.
-        ``"mean_coverage"`` (default) requires ``ContigStats.mean_depth`` —
-        the per-base coverage averaged over every position of the contig
-        (including zero-coverage positions) — to be at least ``min_depth``.
-        ``"read_count"`` requires ``ContigStats.mapped_reads`` to be at least
-        ``min_depth`` instead; useful when a contig has localised high
+        ``"read_count"`` (default) requires ``ContigStats.mapped_reads`` to
+        be at least ``min_depth``; useful when a contig has localised high
         coverage but long zero-coverage stretches that would otherwise
         disqualify it under the mean-coverage criterion.
+        ``"mean_coverage"`` requires ``ContigStats.mean_depth`` — the
+        per-base coverage averaged over every position of the contig
+        (including zero-coverage positions) — to be at least ``min_depth``.
 
     Returns
     -------

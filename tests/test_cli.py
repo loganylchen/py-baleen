@@ -32,7 +32,7 @@ def sample_args_run():
         output_dir="test_output",
         padding=0,
         min_depth=15,
-        depth_mode="mean_coverage",
+        depth_mode="read_count",
         min_mapq=0,
         cuda=None,
         no_cuda=False,
@@ -128,7 +128,7 @@ class TestAddRunArgs:
         assert args.native_bam == "n.bam"
         assert args.ref == "r.fa"
         assert args.min_depth == 15  # default
-        assert args.depth_mode == "mean_coverage"  # default
+        assert args.depth_mode == "read_count"  # default
         assert args.cuda is None
         assert args.no_cuda is False
 

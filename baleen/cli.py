@@ -88,13 +88,14 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     pipe.add_argument(
         "--depth-mode",
         choices=["mean_coverage", "read_count"],
-        default="mean_coverage",
-        help="How --min-depth is interpreted. 'mean_coverage' (default) "
-             "requires the per-base coverage averaged over every position "
-             "of the contig (including zero-coverage positions) to be at "
-             "least --min-depth. 'read_count' requires the total number "
-             "of mapped reads on the contig to be at least --min-depth; "
-             "useful when coverage is concentrated in a localised hotspot.",
+        default="read_count",
+        help="How --min-depth is interpreted. 'read_count' (default) "
+             "requires the total number of mapped reads on the contig "
+             "to be at least --min-depth; useful when coverage is "
+             "concentrated in a localised hotspot. 'mean_coverage' "
+             "requires the per-base coverage averaged over every "
+             "position of the contig (including zero-coverage positions) "
+             "to be at least --min-depth.",
     )
     pipe.add_argument(
         "--min-mapq", type=int, default=0,

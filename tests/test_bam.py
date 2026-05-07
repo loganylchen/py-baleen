@@ -220,26 +220,26 @@ class TestFilterContigs:
     def test_both_pass(self):
         native = {"ctg1": ContigStats("ctg1", 5, 20.0)}
         ivt = {"ctg1": ContigStats("ctg1", 6, 21.0)}
-        passed, results = filter_contigs(native, ivt)
+        passed, results = filter_contigs(native, ivt, depth_mode="mean_coverage")
         assert passed == ["ctg1"]
         assert results[0].reason == FilterReason.PASSED
 
     def test_native_low_depth(self):
         native = {"ctg1": ContigStats("ctg1", 5, 10.0)}
         ivt = {"ctg1": ContigStats("ctg1", 6, 20.0)}
-        _, results = filter_contigs(native, ivt)
+        _, results = filter_contigs(native, ivt, depth_mode="mean_coverage")
         assert results[0].reason == FilterReason.LOW_DEPTH_NATIVE
 
     def test_ivt_low_depth(self):
         native = {"ctg1": ContigStats("ctg1", 5, 20.0)}
         ivt = {"ctg1": ContigStats("ctg1", 6, 10.0)}
-        _, results = filter_contigs(native, ivt)
+        _, results = filter_contigs(native, ivt, depth_mode="mean_coverage")
         assert results[0].reason == FilterReason.LOW_DEPTH_IVT
 
     def test_both_low_depth(self):
         native = {"ctg1": ContigStats("ctg1", 5, 10.0)}
         ivt = {"ctg1": ContigStats("ctg1", 6, 11.0)}
-        _, results = filter_contigs(native, ivt)
+        _, results = filter_contigs(native, ivt, depth_mode="mean_coverage")
         assert results[0].reason == FilterReason.LOW_DEPTH_BOTH
 
     def test_missing_in_native(self):
@@ -263,7 +263,7 @@ class TestFilterContigs:
             "pass": ContigStats("pass", 6, 21.0),
             "ivt_only": ContigStats("ivt_only", 6, 21.0),
         }
-        passed, results = filter_contigs(native, ivt)
+        passed, results = filter_contigs(native, ivt, depth_mode="mean_coverage")
         assert passed == ["pass"]
         assert {r.contig for r in results} == {"pass", "native_only", "ivt_only"}
 
@@ -276,7 +276,9 @@ class TestFilterContigs:
             "ctg1": ContigStats("ctg1", 6, 6.0),
             "ctg2": ContigStats("ctg2", 6, 6.0),
         }
-        passed, _ = filter_contigs(native, ivt, min_depth=5.0)
+        passed, _ = filter_contigs(
+            native, ivt, min_depth=5.0, depth_mode="mean_coverage",
+        )
         assert passed == ["ctg1"]
 
     def test_depth_mode_read_count_passes_hotspot_contig(self):
@@ -284,8 +286,10 @@ class TestFilterContigs:
         native = {"ctg1": ContigStats("ctg1", 100, 2.0)}
         ivt = {"ctg1": ContigStats("ctg1", 120, 2.5)}
 
-        # Default mean_coverage mode: rejected by low mean depth.
-        _, results_default = filter_contigs(native, ivt, min_depth=15.0)
+        # mean_coverage mode: rejected by low mean depth.
+        _, results_default = filter_contigs(
+            native, ivt, min_depth=15.0, depth_mode="mean_coverage",
+        )
         assert results_default[0].reason == FilterReason.LOW_DEPTH_BOTH
 
         # read_count mode with threshold 50: passes on total read count.
@@ -300,8 +304,10 @@ class TestFilterContigs:
         native = {"ctg1": ContigStats("ctg1", 3, 30.0)}
         ivt = {"ctg1": ContigStats("ctg1", 4, 30.0)}
 
-        # Default mean_coverage mode: passes on high mean depth.
-        passed_default, _ = filter_contigs(native, ivt, min_depth=15.0)
+        # mean_coverage mode: passes on high mean depth.
+        passed_default, _ = filter_contigs(
+            native, ivt, min_depth=15.0, depth_mode="mean_coverage",
+        )
         assert passed_default == ["ctg1"]
 
         # read_count mode with threshold 10: rejected for low read count.
