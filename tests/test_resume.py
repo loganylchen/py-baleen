@@ -63,6 +63,7 @@ def _baseline_fingerprint(paths: dict[str, Path]) -> dict:
         write_bam=True,
         run_hmm=True,
         target_contigs=None,
+        read_intersection=True,
     )
 
 
@@ -102,6 +103,7 @@ class TestComputeFingerprint:
             write_bam=True,
             run_hmm=True,
             target_contigs=None,
+            read_intersection=True,
         )
         assert fp1 != fp2
 
@@ -157,6 +159,7 @@ class TestValidateResumeCompatibility:
             write_bam=True,
             run_hmm=True,
             target_contigs=None,
+            read_intersection=True,
         )
         with pytest.raises(RuntimeError, match="mod_threshold"):
             _validate_resume_compatibility(per, fp_new)

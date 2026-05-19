@@ -196,6 +196,16 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--no-read-bam", action="store_true", default=False,
         help="Skip writing mod-BAM output (read_results.bam with MM/ML tags)",
     )
+    misc.add_argument(
+        "--no-read-intersection", action="store_true", default=False,
+        help=(
+            "Skip BAM ∩ FASTQ ∩ BLOW5 read-id intersection.  "
+            "By default the pipeline restricts every stage (contig stats, "
+            "min_depth filtering, subsampling) to reads present in all "
+            "three files per condition, avoiding f5c silently dropping "
+            "BAM reads whose UUIDs are absent from the BLOW5."
+        ),
+    )
 
 
 def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
@@ -339,6 +349,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         mod_threshold=args.mod_threshold,
         write_bam=not args.no_read_bam,
         resume=args.resume,
+        read_intersection=not args.no_read_intersection,
     )
 
     tsv_path = output_paths["site_tsv"]

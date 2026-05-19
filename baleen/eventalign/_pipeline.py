@@ -98,6 +98,7 @@ def _compute_resume_fingerprint(
     write_bam: bool,
     run_hmm: bool,
     target_contigs: Optional[list[str]],
+    read_intersection: bool,
 ) -> dict:
     """Build a JSON-serializable dict capturing everything that would
     invalidate a partial run.
@@ -128,6 +129,7 @@ def _compute_resume_fingerprint(
             "target_contigs": (
                 sorted(target_contigs) if target_contigs else None
             ),
+            "read_intersection": bool(read_intersection),
         },
     }
 
@@ -514,10 +516,21 @@ def _process_contig(
     num_workers: int = 1,
     show_progress: bool = True,
     cuda_device: int = 0,
+    allowed_native_reads_path: Optional[Path] = None,
+    allowed_ivt_reads_path: Optional[Path] = None,
 ) -> tuple[str, ContigResult]:
     """Process a single contig: BAM split → eventalign → signal extraction → DTW.
 
     This function is designed to be called in parallel by multiple worker processes.
+
+    Parameters
+    ----------
+    allowed_native_reads_path, allowed_ivt_reads_path : pathlib.Path or None
+        Optional paths to newline-separated UUID files restricting which
+        reads from the native / IVT BAM are included.  Used by the
+        read-id intersection step in ``run_pipeline_streaming`` to keep
+        every stage in sync with the BAM ∩ FASTQ ∩ BLOW5 set.  Worker
+        loads these once per call (cheap; a few MB max).
 
     Parameters
     ----------
@@ -553,6 +566,12 @@ def _process_contig(
     contig_tmp = tmp_root / _sanitize_contig_filename(contig)
     contig_tmp.mkdir(parents=True, exist_ok=True)
 
+    # Resolve the per-condition read-id intersection (if any).  Lazy load
+    # inside the worker so we don't pay the pickling cost across spawn.
+    from baleen.eventalign._read_ids import load_read_ids
+    allowed_native = load_read_ids(allowed_native_reads_path)
+    allowed_ivt = load_read_ids(allowed_ivt_reads_path)
+
     _max_reads = subsample_n if subsample else None
     logger.info("    Splitting BAM → native contig BAM...")
     native_contig_bam = _bam.split_bam_contig(
@@ -562,6 +581,7 @@ def _process_contig(
         primary_only=primary_only,
         min_mapq=min_mapq,
         max_reads=_max_reads,
+        allowed_reads=allowed_native,
         _validated=True,
     )
     logger.info("    Splitting BAM → IVT contig BAM...")
@@ -572,6 +592,7 @@ def _process_contig(
         primary_only=primary_only,
         min_mapq=min_mapq,
         max_reads=_max_reads,
+        allowed_reads=allowed_ivt,
         _validated=True,
     )
 
@@ -795,6 +816,8 @@ def _process_contig_streaming(
     mod_threshold: float = 0.9,
     show_progress: bool = True,
     cuda_device: int = 0,
+    allowed_native_reads_path: Optional[Path] = None,
+    allowed_ivt_reads_path: Optional[Path] = None,
 ) -> ContigSummary:
     """Process a single contig end-to-end and flush its outputs to disk.
 
@@ -866,6 +889,8 @@ def _process_contig_streaming(
         num_workers=num_workers,
         show_progress=show_progress,
         cuda_device=cuda_device,
+        allowed_native_reads_path=allowed_native_reads_path,
+        allowed_ivt_reads_path=allowed_ivt_reads_path,
     )
 
     # Stage 2: HMM smoothing
@@ -1258,6 +1283,7 @@ def run_pipeline_streaming(
     mod_threshold: float = 0.9,
     write_bam: bool = True,
     resume: bool = False,
+    read_intersection: bool = True,
 ) -> tuple[dict[str, Any], PipelineMetadata]:
     """Memory-efficient streaming pipeline: DTW → HMM → aggregation per contig.
 
@@ -1355,13 +1381,75 @@ def run_pipeline_streaming(
     _f5c.index_blow5(ivt_blow5)
     logger.info("[Step 2/5] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
 
+    # ---- Step 2.5: Read-ID intersection (BAM ∩ FASTQ ∩ BLOW5) ----
+    # f5c eventalign silently drops BAM reads whose UUIDs are not in
+    # the BLOW5 signal file; computing the intersection up-front keeps
+    # contig stats, ``min_depth`` filtering, and subsampling all in
+    # sync with the read set that will actually produce signals.
+    #
+    # The intersection sets are written to disk and passed by path
+    # (not by ``set[str]``) across the worker spawn boundary.
+    allowed_native_reads_path: Optional[Path] = None
+    allowed_ivt_reads_path: Optional[Path] = None
+    allowed_native: Optional[set[str]] = None
+    allowed_ivt: Optional[set[str]] = None
+    if read_intersection:
+        from baleen.eventalign._read_ids import (
+            compute_condition_intersection,
+            write_read_ids,
+        )
+
+        logger.info("[Step 2.5/5] Computing read-id intersection (BAM ∩ FASTQ ∩ BLOW5)...")
+        step_t0 = time.perf_counter()
+        allowed_native = compute_condition_intersection(
+            bam=native_bam,
+            fastq=native_fastq,
+            blow5=native_blow5,
+            primary_only=primary_only,
+            min_mapq=min_mapq,
+            label="native",
+        )
+        allowed_ivt = compute_condition_intersection(
+            bam=ivt_bam,
+            fastq=ivt_fastq,
+            blow5=ivt_blow5,
+            primary_only=primary_only,
+            min_mapq=min_mapq,
+            label="ivt",
+        )
+        logger.info(
+            "[Step 2.5/5] Intersection complete: native=%d, ivt=%d reads (%s)",
+            len(allowed_native), len(allowed_ivt),
+            _fmt_elapsed(time.perf_counter() - step_t0),
+        )
+
+        # Persist intersection sets to disk so workers can lazy-load via
+        # path instead of receiving multi-MB ``set[str]`` payloads across
+        # the spawn pickle boundary (2924 contigs × millions of reads
+        # would otherwise dominate dispatch cost).
+        _intersection_dir = Path(
+            tempfile.mkdtemp(prefix="baleen-intersection-")
+        )
+        allowed_native_reads_path = write_read_ids(
+            allowed_native, _intersection_dir / "allowed_native_reads.txt"
+        )
+        allowed_ivt_reads_path = write_read_ids(
+            allowed_ivt, _intersection_dir / "allowed_ivt_reads.txt"
+        )
+
     # ---- Step 3: BAM validation & contig stats ----
     logger.info("[Step 3/5] Validating BAMs and computing contig statistics...")
     step_t0 = time.perf_counter()
     _bam.validate_bam(native_bam)
     _bam.validate_bam(ivt_bam)
-    native_stats = _bam.get_contig_stats(native_bam, min_mapq=min_mapq, primary_only=primary_only, _validated=True)
-    ivt_stats = _bam.get_contig_stats(ivt_bam, min_mapq=min_mapq, primary_only=primary_only, _validated=True)
+    native_stats = _bam.get_contig_stats(
+        native_bam, min_mapq=min_mapq, primary_only=primary_only,
+        allowed_reads=allowed_native, _validated=True,
+    )
+    ivt_stats = _bam.get_contig_stats(
+        ivt_bam, min_mapq=min_mapq, primary_only=primary_only,
+        allowed_reads=allowed_ivt, _validated=True,
+    )
     logger.info("[Step 3/5] BAM stats complete: %d native contigs, %d IVT contigs (%s)",
                 len(native_stats), len(ivt_stats), _fmt_elapsed(time.perf_counter() - step_t0))
 
@@ -1444,6 +1532,7 @@ def run_pipeline_streaming(
         write_bam=write_bam,
         run_hmm=run_hmm,
         target_contigs=target_contigs,
+        read_intersection=read_intersection,
     )
     resumed_summaries: list[ContigSummary] = []
     if resume:
@@ -1560,6 +1649,8 @@ def run_pipeline_streaming(
             num_workers=gpu_workers,
             mod_threshold=mod_threshold,
             show_progress=(threads <= 1),
+            allowed_native_reads_path=allowed_native_reads_path,
+            allowed_ivt_reads_path=allowed_ivt_reads_path,
         )
 
         if not passed_contigs:
@@ -1621,6 +1712,11 @@ def run_pipeline_streaming(
     finally:
         if cleanup_temp and tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
+        # Clean up intersection set files (only present when read_intersection=True).
+        if allowed_native_reads_path is not None:
+            inter_parent = Path(allowed_native_reads_path).parent
+            if inter_parent.name.startswith("baleen-intersection-") and inter_parent.exists():
+                shutil.rmtree(inter_parent, ignore_errors=True)
 
     # ---- Final merge step ----
     sorted_summaries = sorted(summaries, key=lambda s: s.contig_name)

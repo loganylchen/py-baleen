@@ -29,6 +29,7 @@ dependencies = [
     "pysam>=0.21",
     "tqdm>=4.60",
     "pandas>=1.5",
+    "pyslow5",
 ]
 
 [project.urls]

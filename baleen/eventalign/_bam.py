@@ -25,6 +25,7 @@ class _AlignedSegmentProtocol(Protocol):
     is_secondary: bool
     is_supplementary: bool
     mapping_quality: int
+    query_name: Optional[str]
 
 
 class _IndexStatProtocol(Protocol):
@@ -181,13 +182,21 @@ def _read_passes_filters(
     *,
     primary_only: bool,
     min_mapq: int,
+    allowed_reads: Optional[set[str]] = None,
 ) -> bool:
-    """Return True if read satisfies primary/MAPQ filters."""
+    """Return True if read satisfies primary/MAPQ filters.
+
+    When *allowed_reads* is given, the read's ``query_name`` must also be
+    a member of that set (used to enforce the BAM ∩ FASTQ ∩ BLOW5 read-id
+    intersection upstream).
+    """
     if read.is_unmapped:
         return False
     if primary_only and (read.is_secondary or read.is_supplementary):
         return False
     if read.mapping_quality < min_mapq:
+        return False
+    if allowed_reads is not None and read.query_name not in allowed_reads:
         return False
     return True
 
@@ -197,6 +206,7 @@ def get_contig_stats(
     *,
     min_mapq: int = 0,
     primary_only: bool = True,
+    allowed_reads: Optional[set[str]] = None,
     _validated: bool = False,
 ) -> dict[str, ContigStats]:
     """Collect mapped-read and mean-depth statistics per contig.
@@ -209,6 +219,13 @@ def get_contig_stats(
         Minimum read mapping quality to include.
     primary_only : bool, optional
         If ``True``, include only primary alignments.
+    allowed_reads : set of str, optional
+        If given, only reads whose ``query_name`` belongs to this set
+        contribute to per-contig statistics.  This makes ``min_depth``
+        downstream filtering intersection-aware: a contig that loses
+        its support after BAM ∩ FASTQ ∩ BLOW5 will fall below
+        ``min_depth`` instead of being scheduled for an eventalign run
+        that produces nothing.
 
     Returns
     -------
@@ -222,6 +239,11 @@ def get_contig_stats(
 
     stats: dict[str, ContigStats] = {}
     t0 = time.perf_counter()
+
+    # When restricting by an allowed-reads set we cannot trust the bgzf
+    # index counts (they do not know about the intersection), so we
+    # always walk the fetch() iterator.
+    force_scan = allowed_reads is not None
 
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         index_stats = {item.contig: item for item in bam.get_index_statistics()}
@@ -238,10 +260,15 @@ def get_contig_stats(
             if total_mapped <= 0:
                 continue
 
-            if primary_only or min_mapq > 0:
+            if force_scan or primary_only or min_mapq > 0:
                 mapped_reads = 0
                 for read in bam.fetch(contig=contig):
-                    if _read_passes_filters(read, primary_only=primary_only, min_mapq=min_mapq):
+                    if _read_passes_filters(
+                        read,
+                        primary_only=primary_only,
+                        min_mapq=min_mapq,
+                        allowed_reads=allowed_reads,
+                    ):
                         mapped_reads += 1
             else:
                 mapped_reads = total_mapped
@@ -250,7 +277,12 @@ def get_contig_stats(
                 continue
 
             def _coverage_read_callback(read: _AlignedSegmentProtocol) -> bool:
-                return _read_passes_filters(read, primary_only=primary_only, min_mapq=min_mapq)
+                return _read_passes_filters(
+                    read,
+                    primary_only=primary_only,
+                    min_mapq=min_mapq,
+                    allowed_reads=allowed_reads,
+                )
 
             cov_a, cov_c, cov_g, cov_t = bam.count_coverage(
                 contig=contig,
@@ -424,6 +456,7 @@ def split_bam_contig(
     primary_only: bool = True,
     min_mapq: int = 0,
     max_reads: Optional[int] = None,
+    allowed_reads: Optional[set[str]] = None,
     _validated: bool = False,
 ) -> Path:
     """Extract one contig into a sorted and indexed BAM.
@@ -440,6 +473,10 @@ def split_bam_contig(
         If ``True``, include only primary alignments.
     min_mapq : int, optional
         Minimum read mapping quality to include.
+    allowed_reads : set of str, optional
+        Restrict the slice to reads whose ``query_name`` is a member of
+        this set.  Applied *before* the ``max_reads`` subsample so the
+        downsampled read set is always a subset of the intersection.
 
     Returns
     -------
@@ -468,7 +505,12 @@ def split_bam_contig(
         # output is already sorted — no external `pysam.sort` needed.
         reads = [
             r for r in in_bam.fetch(contig=contig)
-            if _read_passes_filters(r, primary_only=primary_only, min_mapq=min_mapq)
+            if _read_passes_filters(
+                r,
+                primary_only=primary_only,
+                min_mapq=min_mapq,
+                allowed_reads=allowed_reads,
+            )
         ]
 
         if max_reads is not None and len(reads) > max_reads:
@@ -501,6 +543,7 @@ def iter_contig_bams(
     *,
     primary_only: bool = True,
     min_mapq: int = 0,
+    allowed_reads: Optional[set[str]] = None,
 ) -> Generator[tuple[str, Path], None, None]:
     """Yield temporary sorted/indexed BAMs for each contig and clean up eagerly.
 
@@ -532,6 +575,7 @@ def iter_contig_bams(
                 tmp_path,
                 primary_only=primary_only,
                 min_mapq=min_mapq,
+                allowed_reads=allowed_reads,
             )
 
             try:

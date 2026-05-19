@@ -53,6 +53,7 @@ def sample_args_run():
         legacy_scoring=False,
         mod_threshold=0.9,
         resume=False,
+        no_read_intersection=False,
     )
     return args
 
