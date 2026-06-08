@@ -37,7 +37,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import beta as _beta_dist
 from scipy.stats import fisher_exact as _fisher_exact
-from scipy.stats import mannwhitneyu as _mannwhitneyu
 
 if TYPE_CHECKING:
     from baleen.eventalign._hierarchical import ContigModificationResult
@@ -59,7 +58,7 @@ class SiteResult:
     ci_high: float
     """97.5th percentile of Beta posterior."""
     pvalue: float
-    """One-sided Mann-Whitney U p-value (native > IVT)."""
+    """One-sided Fisher's exact test p-value (native > IVT)."""
     padj: float
     """Benjamini-Hochberg FDR-adjusted p-value."""
     effect_size: float

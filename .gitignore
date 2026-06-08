@@ -24,3 +24,6 @@ benchmarks/results.jsonl
 
 # OS
 .DS_Store
+
+# MkDocs build output
+site/

@@ -4,14 +4,16 @@
 
 Baleen detects RNA modifications by comparing ionic current signals between native and IVT (in vitro transcribed) nanopore reads. It uses CUDA-accelerated Dynamic Time Warping (DTW) to compute signal distances and a three-stage hierarchical pipeline (Empirical-Bayes null estimation, anchored mixture EM, gap-aware HMM smoothing) to call per-read and per-site modification probabilities.
 
+📖 **Full documentation: <https://loganylchen.github.io/py-baleen/>**
+
 ## Key Features
 
-- **CUDA-accelerated DTW** — Batched multi-position GPU kernel processes all positions per contig in a single launch with 16 concurrent CUDA streams. Automatic CPU fallback via tslearn.
+- **CUDA-accelerated DTW** — Batched multi-position GPU kernel processes all positions per contig in a single launch with concurrent CUDA streams. Automatic CPU fallback via tslearn.
 - **Three-stage hierarchical modification calling**
   - **V1**: Robust IVT null estimation with coverage-adaptive three-level shrinkage (position → local window → global)
   - **V2**: Anchored two-component mixture EM with continuous soft gating (replaces hard binary thresholds)
   - **V3**: Gap-aware Hidden Markov Model with forward-backward spatial smoothing along read trajectories
-- **Standard mod-BAM output** — Per-read modification probabilities in `MM:Z` / `ML:B:C` tags, compatible with [modkit](https://github.com/nanoporetech/modkit), [modbamtools](https://github.com/regalab/modbamtools), and IGV
+- **Standard mod-BAM output** — Per-read modification probabilities in `MM:Z` / `ML:B:C` tags, compatible with [modkit](https://github.com/nanoporetech/modkit), [modbamtools](https://github.com/rrwick/modbamtools), and IGV
 - **Streaming architecture** — Fuses DTW → HMM → aggregation per contig, discarding distance matrices after inference to minimize memory usage
 - **Flexible HMM training** — Unsupervised (default), semi-supervised (Platt-scaling calibrator), or fully supervised (MLE transitions + KDE emissions) modes
 
@@ -140,14 +142,16 @@ All BAM files must be sorted and indexed (`.bai`). The reference FASTA must be i
 | Column | Description |
 |--------|-------------|
 | `contig` | Reference contig name |
-| `position` | 1-based genomic position (center of k-mer) |
+| `position` | 0-based genomic position (center of k-mer) |
 | `kmer` | Reference k-mer at this position |
 | `mod_ratio` | Estimated modification fraction (Beta-Binomial MAP) |
 | `ci_low`, `ci_high` | 95% credible interval |
-| `pvalue` | Mann-Whitney U test p-value (native vs IVT) |
+| `pvalue` | One-sided Fisher's exact test p-value (native vs IVT) |
 | `padj` | Benjamini-Hochberg adjusted p-value |
-| `effect_size` | Median p_mod difference (native - IVT) |
+| `effect_size` | Median `p_mod_hmm` difference (native − IVT) |
 | `n_native`, `n_ivt` | Read coverage |
+| `mean_p_mod` | Mean of native `p_mod_hmm` |
+| `stoichiometry` | Fraction of native reads with `p_mod_hmm > 0.5` |
 
 ### Read-level mod-BAM (`read_results.bam`)
 
@@ -166,19 +170,24 @@ Compatible with:
 
 ### `baleen run`
 
+Common flags (see the [full CLI reference](https://loganylchen.github.io/py-baleen/guide/cli/) for every option):
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--threads` | 8 | Parallel workers for contig processing |
 | `--padding` | 1 | Flanking positions for signal concatenation |
-| `--min-depth` | 15 | Minimum read depth per contig (both native & IVT) |
+| `--min-depth` | 15 | Minimum depth per contig (see `--depth-mode`) |
+| `--depth-mode` | read_count | How `--min-depth` is interpreted (`read_count` or `mean_coverage`) |
 | `--min-mapq` | 0 | Minimum mapping quality filter |
+| `--subsample-n` | 300 | Max reads per condition per contig |
 | `--cuda` / `--no-cuda` | auto | Force CUDA or CPU for DTW |
-| `--open-start` / `--open-end` | off | Open-boundary DTW alignment |
 | `--hmm-params` | unsupervised | Path to trained HMM parameters JSON |
 | `--no-hmm` | off | Skip HMM smoothing (output V2 scores only) |
 | `--target` | all | Contig name, comma-separated list, or file |
+| `--resume` | off | Reuse per-contig slices from a prior run |
+| `--no-read-intersection` | off | Skip BAM ∩ FASTQ ∩ BLOW5 read-id gating |
 | `--no-read-bam` | off | Skip mod-BAM output |
-| `--keep-intermediate` | off | Save per-contig DTW results |
+| `--keep-intermediate` | off | Keep per-contig intermediate directory |
 
 ### `baleen aggregate`
 
@@ -195,8 +204,8 @@ baleen aggregate -i results/pipeline_results.pkl -o sites.tsv \
 ```python
 from baleen import run_pipeline_streaming, load_read_results
 
-# Run pipeline
-hmm_results, sites, metadata = run_pipeline_streaming(
+# Run pipeline — returns (output_paths, metadata)
+output_paths, metadata = run_pipeline_streaming(
     native_bam="native.bam",
     native_fastq="native.fq.gz",
     native_blow5="native.blow5",
@@ -204,8 +213,13 @@ hmm_results, sites, metadata = run_pipeline_streaming(
     ivt_fastq="ivt.fq.gz",
     ivt_blow5="ivt.blow5",
     ref_fasta="ref.fa",
+    output_dir="results/",
     threads=8,
 )
+
+print(output_paths["site_tsv"])      # results/site_results.tsv
+print(output_paths["read_bam"])      # results/read_results.bam
+print(output_paths["n_significant"]) # number of padj < 0.05 sites
 
 # Load read-level results from mod-BAM
 df = load_read_results("results/read_results.bam", contig="chr1")
