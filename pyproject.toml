@@ -34,11 +34,19 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/loganylchen/py-baleen"
+Documentation = "https://loganylchen.github.io/py-baleen/"
 Repository = "https://github.com/loganylchen/py-baleen.git"
 Issues = "https://github.com/loganylchen/py-baleen/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+    "pymdown-extensions>=10.0",
+    "black>=24.0",
+]
 
 [project.scripts]
 baleen = "baleen.cli:main"

@@ -1,0 +1,21 @@
+# Docs build/verification image: baleen (CPU-only) + MkDocs toolchain.
+# Used to run `mkdocs build --strict` so mkdocstrings can import baleen.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV BALEEN_NO_CUDA=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential zlib1g-dev libhdf5-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g ${GID} app && useradd -m -u ${UID} -g ${GID} app
+
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir ".[docs]"
+
+USER app
+WORKDIR /work
