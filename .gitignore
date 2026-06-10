@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.so
+
+# Testing
+.pytest_cache/
+
+
+# Pipeline outputs
+*.pkl
+baleen_output/
+
+# Benchmark results
+benchmarks/results.jsonl
+
+# IDE
+.vscode/
+.idea/
+
+
+# OS
+.DS_Store
+
+# MkDocs build output
+site/

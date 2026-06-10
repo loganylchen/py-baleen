@@ -1,0 +1,1625 @@
+"""Contig-level hierarchical empirical-Bayes modification probability estimation.
+
+This module implements a **three-stage** pipeline that borrows strength across
+genomic positions within a contig and smooths modification calls along
+individual reads via a Hidden Markov Model.
+
+Stages
+------
+V1  Empirical-Bayes null scoring
+    Robust IVT null (median + MAD) per position, shrunk toward a local
+    window and global prior.  Produces z-scores and one-sided p-values.
+
+V2  Anchored two-component mixture
+    EM on native z-scores with the null component fixed to IVT; a shifted
+    alternative captures modified reads.  Produces raw P(mod).
+
+V3  HMM spatial smoothing
+    Two-state forward–backward along each read's genomic trajectory, with
+    gap-aware transition probabilities.  Produces smoothed P(mod).
+
+Public API
+----------
+compute_sequential_modification_probabilities
+    Run the full V1→V2→V3 pipeline on a :class:`ContigResult`.
+ContigModificationResult
+    Container for all per-read, per-position outputs.
+CoverageClass
+    Enum labelling IVT coverage at each position.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING, Optional, Sequence
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy.stats import norm as _norm_dist
+from tqdm.auto import tqdm
+
+if TYPE_CHECKING:
+    from baleen.eventalign._hmm_training import HMMParams
+    from baleen.eventalign._pipeline import ContigResult, PositionResult
+
+logger = logging.getLogger(__name__)
+
+# Optional numba JIT for the 2-state forward-backward hot loop.  Identical
+# IEEE-754 arithmetic (no fastmath), so results are bit-exact with the pure
+# Python fallback.
+try:
+    from numba import njit as _njit
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover - exercised only in CPU-only envs
+    _HAS_NUMBA = False
+
+    def _njit(*args, **kwargs):
+        """No-op decorator when numba is unavailable."""
+        def _decorator(fn):
+            return fn
+        if args and callable(args[0]) and not kwargs:
+            return args[0]
+        return _decorator
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_EPS = 1e-20
+_MIN_SIGMA = 1e-6
+_MAD_SCALE = 1.4826  # MAD → σ for Normal
+
+
+def _sigmoid(x: float | NDArray[np.float64]) -> float | NDArray[np.float64]:
+    """Numerically stable sigmoid."""
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+
+
+# ---------------------------------------------------------------------------
+# Data containers
+# ---------------------------------------------------------------------------
+
+
+class CoverageClass(str, Enum):
+    """IVT coverage quality at a position."""
+    HIGH = "high"        # n_ivt >= 20
+    MEDIUM = "medium"    # 5 <= n_ivt < 20
+    LOW = "low"          # 1 <= n_ivt < 5
+    ZERO = "zero"        # n_ivt == 0
+
+
+@dataclass
+class PositionStats:
+    """Per-position summary from the hierarchical pipeline."""
+
+    position: int
+    reference_kmer: str
+    coverage_class: CoverageClass
+    n_ivt: int
+    n_native: int
+
+    # Read names (carried forward for streaming BAM output without ContigResult)
+    native_read_names: list[str]
+    ivt_read_names: list[str]
+
+    # V1 — robust IVT null (before and after shrinkage)
+    mu_raw: float
+    sigma_raw: float
+    mu_shrunk: float
+    sigma_shrunk: float
+
+    # Per-read arrays (native reads first, then IVT — same ordering as
+    # PositionResult.distance_matrix)
+    scores: NDArray[np.float64]
+    """log1p(median distance to IVT), shape (n_native + n_ivt,)."""
+    z_scores: NDArray[np.float64]
+    """(score − μ_shrunk) / σ_shrunk, shape (n_native + n_ivt,)."""
+    p_null: NDArray[np.float64]
+    """One-sided tail probability under null, shape (n_native + n_ivt,)."""
+
+    # V2 — mixture posterior (may be all zeros if null gate fires)
+    p_mod_raw: NDArray[np.float64]
+    """Raw P(mod) from anchored mixture, shape (n_native + n_ivt,)."""
+    mixture_pi: float
+    """Fitted mixing proportion for alt component."""
+    mixture_null_gate: bool
+    """True if position classified as unmodified by mixture (hard gate, legacy)."""
+    gate_weight: float
+    """Continuous soft gate weight ∈ [0, 1].  1 = fully open, 0 = fully gated."""
+
+    # kNN IVT-purity scores (populated only if computed)
+    p_mod_knn: NDArray[np.float64]
+    """kNN IVT-purity P(mod), shape (n_native + n_ivt,). NaN if not computed."""
+
+    # V3 — HMM smoothed (populated only if HMM runs)
+    p_mod_hmm: NDArray[np.float64]
+    """HMM-smoothed P(mod), shape (n_native + n_ivt,).  NaN if HMM skipped."""
+
+    @property
+    def native_z_scores(self) -> NDArray[np.float64]:
+        return self.z_scores[: self.n_native]
+
+    @property
+    def ivt_z_scores(self) -> NDArray[np.float64]:
+        return self.z_scores[self.n_native :]
+
+    @property
+    def native_p_mod_raw(self) -> NDArray[np.float64]:
+        return self.p_mod_raw[: self.n_native]
+
+    @property
+    def ivt_p_mod_raw(self) -> NDArray[np.float64]:
+        return self.p_mod_raw[self.n_native :]
+
+    @property
+    def native_p_mod_knn(self) -> NDArray[np.float64]:
+        return self.p_mod_knn[: self.n_native]
+
+    @property
+    def ivt_p_mod_knn(self) -> NDArray[np.float64]:
+        return self.p_mod_knn[self.n_native :]
+
+    @property
+    def native_p_mod_hmm(self) -> NDArray[np.float64]:
+        return self.p_mod_hmm[: self.n_native]
+
+    @property
+    def ivt_p_mod_hmm(self) -> NDArray[np.float64]:
+        return self.p_mod_hmm[self.n_native :]
+
+
+@dataclass
+class ReadTrajectory:
+    """A single read's observation path across sorted genomic positions."""
+
+    read_name: str
+    positions: list[int]
+    """Sorted genomic positions where this read appears."""
+    is_native: bool
+    indices: list[int]
+    """Index of this read within each position's read ordering
+    (native-first, IVT-after)."""
+
+
+@dataclass
+class ContigModificationResult:
+    """Full output of the hierarchical pipeline for one contig."""
+
+    contig: str
+    position_stats: dict[int, PositionStats]
+    """Keyed by genomic position."""
+    native_trajectories: list[ReadTrajectory]
+    ivt_trajectories: list[ReadTrajectory]
+
+    # Global IVT prior used for shrinkage
+    global_mu: float
+    global_sigma: float
+
+
+# ---------------------------------------------------------------------------
+# V1 helpers — score extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_ivt_distances(
+    distance_matrix: NDArray[np.float64],
+    n_native: int,
+    n_ivt: int,
+) -> NDArray[np.float64]:
+    """Per-read enriched score combining IVT distance, native cohesion,
+    and IVT baseline correction.
+
+    Computes three components per read and combines them:
+      1. Median distance to IVT (log1p-transformed) — original score
+      2. Asymmetric correction: subtract IVT self-similarity baseline
+      3. Native cohesion ratio boost for native reads
+
+    Returns shape ``(n_native + n_ivt,)``.
+    """
+    n_total = n_native + n_ivt
+    dist_to_ivt = np.zeros(n_total, dtype=np.float64)
+
+    if n_ivt == 0:
+        return np.log1p(dist_to_ivt)
+
+    # Component 1: median distance to IVT per read
+    # Native reads → median to all IVT columns
+    if n_native > 0:
+        dist_to_ivt[:n_native] = np.median(
+            distance_matrix[:n_native, n_native:], axis=1,
+        )
+    # IVT reads → leave-one-out median to other IVT
+    if n_ivt > 1:
+        ivt_block = distance_matrix[n_native:, n_native:].copy()
+        np.fill_diagonal(ivt_block, np.nan)
+        dist_to_ivt[n_native:] = np.nanmedian(ivt_block, axis=1)
+
+    # Component 2: IVT self-similarity baseline
+    if n_ivt >= 2:
+        ivt_self_dists = dist_to_ivt[n_native:]  # already leave-one-out
+        ivt_baseline = float(np.median(ivt_self_dists))
+        ivt_mad = float(np.median(np.abs(ivt_self_dists - ivt_baseline)))
+        ivt_scale = max(ivt_mad * _MAD_SCALE, _MIN_SIGMA)
+    else:
+        ivt_baseline = 0.0
+        ivt_scale = 1.0
+
+    # Component 3: native within-group distances (cohesion)
+    if n_native >= 2:
+        nat_block = distance_matrix[:n_native, :n_native].copy()
+        np.fill_diagonal(nat_block, np.nan)
+        native_self_dists = np.nanmedian(nat_block, axis=1)
+        native_cohesion = float(np.median(native_self_dists))
+    else:
+        native_cohesion = 0.0
+
+    # Combine: vectorized scoring
+    scores = np.log1p(dist_to_ivt)
+
+    if n_native >= 2 and n_ivt >= 2:
+        native_base = dist_to_ivt[:n_native]
+        excess = np.maximum(native_base - ivt_baseline, 0.0)
+        cohesion_ratio = native_base / max(native_cohesion, _MIN_SIGMA)
+
+        scores[:n_native] += 0.3 * excess / ivt_scale
+        # Cohesion bonus where ratio > 1.5
+        bonus_mask = cohesion_ratio > 1.5
+        scores[:n_native] += np.where(
+            bonus_mask, 0.2 * np.log1p(cohesion_ratio - 1.0), 0.0,
+        )
+
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# V1 helpers — robust IVT null estimation
+# ---------------------------------------------------------------------------
+
+
+def _classify_coverage(n_ivt: int) -> CoverageClass:
+    """Classify IVT coverage at a position."""
+    if n_ivt >= 20:
+        return CoverageClass.HIGH
+    if n_ivt >= 5:
+        return CoverageClass.MEDIUM
+    if n_ivt >= 1:
+        return CoverageClass.LOW
+    return CoverageClass.ZERO
+
+
+def _fit_robust_ivt_null(
+    ivt_scores: NDArray[np.float64],
+) -> tuple[float, float]:
+    """Fit location and scale from IVT scores using median + MAD.
+
+    Returns (mu, sigma) where sigma = MAD * 1.4826.
+    Falls back to (0, 1) if < 2 IVT reads.
+    """
+    if len(ivt_scores) < 2:
+        return 0.0, 1.0
+
+    mu = float(np.median(ivt_scores))
+    mad = float(np.median(np.abs(ivt_scores - mu)))
+    sigma = max(mad * _MAD_SCALE, _MIN_SIGMA)
+    return mu, sigma
+
+
+# ---------------------------------------------------------------------------
+# V1 helpers — hierarchical shrinkage
+# ---------------------------------------------------------------------------
+
+
+def _shrink_parameters(
+    positions: list[int],
+    raw_params: dict[int, tuple[float, float]],
+    coverages: dict[int, int],
+    *,
+    window: int = 15,
+    kappa_high: float = 0.5,
+    kappa_medium: float = 2.0,
+    kappa_low: float = 5.0,
+) -> dict[int, tuple[float, float]]:
+    """Hierarchical shrinkage: position → local window → global prior.
+
+    For each position *j* with raw (μ_j, σ_j) and n_ivt_j IVT reads:
+
+        κ = coverage-dependent shrinkage strength
+        μ_local = weighted median of nearby raw μ values
+        σ_local = weighted median of nearby raw σ values
+
+        μ̂_j = (n_j * μ_j + κ * μ_local) / (n_j + κ)
+        σ̂_j = (n_j * σ_j + κ * σ_local) / (n_j + κ)
+
+    For ZERO-coverage positions, μ̂ = μ_local, σ̂ = σ_local entirely.
+
+    Parameters
+    ----------
+    positions : sorted list of genomic positions
+    raw_params : {pos: (mu_raw, sigma_raw)}
+    coverages : {pos: n_ivt}
+    window : half-window size in positions (not bases)
+    kappa_high, kappa_medium, kappa_low : shrinkage strengths
+
+    Returns
+    -------
+    {pos: (mu_shrunk, sigma_shrunk)}
+    """
+    sorted_pos = sorted(positions)
+    n_pos = len(sorted_pos)
+
+    # Global prior (fallback for everything)
+    all_mus = [raw_params[p][0] for p in sorted_pos if coverages[p] >= 1]
+    all_sigmas = [raw_params[p][1] for p in sorted_pos if coverages[p] >= 1]
+
+    if len(all_mus) == 0:
+        global_mu, global_sigma = 0.0, 1.0
+    else:
+        global_mu = float(np.median(all_mus))
+        global_sigma = float(np.median(all_sigmas))
+
+    result: dict[int, tuple[float, float]] = {}
+
+    for idx, pos in enumerate(sorted_pos):
+        n_j = coverages[pos]
+        mu_j, sigma_j = raw_params[pos]
+
+        # Determine κ
+        cov_cls = _classify_coverage(n_j)
+        if cov_cls == CoverageClass.HIGH:
+            kappa = kappa_high
+        elif cov_cls == CoverageClass.MEDIUM:
+            kappa = kappa_medium
+        elif cov_cls == CoverageClass.LOW:
+            kappa = kappa_low
+        else:
+            # ZERO coverage — fully rely on local/global
+            kappa = float("inf")
+
+        # Local window — gather neighbours (by position index, not base)
+        lo = max(0, idx - window)
+        hi = min(n_pos, idx + window + 1)
+        nbr_mus = []
+        nbr_sigmas = []
+        for k_idx in range(lo, hi):
+            nbr_pos = sorted_pos[k_idx]
+            if nbr_pos != pos and coverages[nbr_pos] >= 1:
+                nbr_mus.append(raw_params[nbr_pos][0])
+                nbr_sigmas.append(raw_params[nbr_pos][1])
+
+        if len(nbr_mus) > 0:
+            mu_local = float(np.median(nbr_mus))
+            sigma_local = float(np.median(nbr_sigmas))
+        else:
+            mu_local = global_mu
+            sigma_local = global_sigma
+
+        # Shrink
+        if cov_cls == CoverageClass.ZERO:
+            mu_shrunk = mu_local
+            sigma_shrunk = sigma_local
+        else:
+            mu_shrunk = (n_j * mu_j + kappa * mu_local) / (n_j + kappa)
+            sigma_shrunk = (n_j * sigma_j + kappa * sigma_local) / (n_j + kappa)
+
+        sigma_shrunk = max(sigma_shrunk, _MIN_SIGMA)
+        result[pos] = (mu_shrunk, sigma_shrunk)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# V2 — Contig-pooled mixture EM
+# ---------------------------------------------------------------------------
+
+
+def _contig_pooled_mixture_em(
+    position_stats: dict[int, PositionStats],
+    sorted_positions: list[int],
+    *,
+    max_iter: int = 200,
+    tol: float = 1e-6,
+) -> tuple[float | None, float | None]:
+    """Fit a global two-component mixture across the entire contig.
+
+    Concatenates native z-scores from all positions and fits a single
+    null + alternative EM.  Returns ``(global_mu1, global_sigma1)`` for
+    the alternative component, to be used as a prior for per-position
+    fits at low-coverage positions.
+
+    Returns ``(None, None)`` if insufficient data.
+    """
+    from baleen.eventalign._probability import _normal_pdf
+
+    # Collect all native z-scores and IVT z-scores
+    all_z_native = []
+    all_z_ivt = []
+    for pos in sorted_positions:
+        ps = position_stats[pos]
+        if ps.n_native >= 2 and ps.n_ivt >= 2:
+            all_z_native.append(ps.z_scores[: ps.n_native])
+            all_z_ivt.append(ps.z_scores[ps.n_native :])
+
+    if len(all_z_native) < 3:
+        return None, None
+
+    z_native_pool = np.concatenate(all_z_native)
+    z_ivt_pool = np.concatenate(all_z_ivt)
+
+    if len(z_native_pool) < 10:
+        return None, None
+
+    # Null from pooled IVT
+    mu0 = float(np.median(z_ivt_pool))
+    mad0 = float(np.median(np.abs(z_ivt_pool - mu0)))
+    sigma0 = max(mad0 * _MAD_SCALE, _MIN_SIGMA)
+
+    # Init alternative
+    pi = 0.1
+    mu1 = max(float(np.mean(z_native_pool)), mu0 + 0.5 * sigma0)
+    sigma1 = sigma0
+
+    for _ in range(max_iter):
+        f0 = _normal_pdf(z_native_pool, mu0, sigma0)
+        f1 = _normal_pdf(z_native_pool, mu1, sigma1)
+        denom = (1.0 - pi) * f0 + pi * f1 + _EPS
+        r = (pi * f1) / denom
+
+        pi_new = float(np.mean(r))
+        r_sum = float(np.sum(r)) + _EPS
+        mu1_new = float(np.sum(r * z_native_pool)) / r_sum
+        sigma1_new = math.sqrt(
+            max(float(np.sum(r * (z_native_pool - mu1_new) ** 2)) / r_sum,
+                _MIN_SIGMA ** 2)
+        )
+
+        if abs(pi_new - pi) < tol and abs(mu1_new - mu1) < tol:
+            pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+            break
+        pi, mu1, sigma1 = pi_new, mu1_new, sigma1_new
+
+    logger.debug(
+        "Contig-pooled EM: pi=%.3f, mu1=%.3f, sigma1=%.3f (n=%d reads from %d positions)",
+        pi, mu1, sigma1, len(z_native_pool), len(all_z_native),
+    )
+    return mu1, sigma1
+
+
+# ---------------------------------------------------------------------------
+# V2 — Anchored two-component mixture on native z-scores (with soft gating)
+# ---------------------------------------------------------------------------
+
+
+def _anchored_mixture_em(
+    z_native: NDArray[np.float64],
+    z_ivt: NDArray[np.float64],
+    z_all: NDArray[np.float64],
+    *,
+    max_iter: int = 100,
+    tol: float = 1e-6,
+    pi_threshold: float = 0.05,
+    separation_threshold: float = 0.3,
+    tau_pi: float = 0.05,
+    tau_bic: float = 10.0,
+    tau_sep: float = 1.0,
+    global_mu1: float | None = None,
+    global_sigma1: float | None = None,
+    min_reads_for_local: int = 50,
+    global_regularization: float = 10.0,
+    legacy_scoring: bool = False,
+) -> tuple[NDArray[np.float64], float, bool, float]:
+    """EM with null fixed to IVT distribution, alternative free.
+
+    Uses **soft gating** instead of hard binary gates.  Three sigmoid
+    weights (pi, BIC, separation) are multiplied into a continuous
+    gate_weight ∈ [0, 1].  The final probability is a blend of the
+    mixture posterior and a z-score-based fallback.
+
+    Parameters
+    ----------
+    z_native : z-scores of native reads at this position
+    z_ivt : z-scores of IVT reads at this position
+    z_all : z-scores of ALL reads (native + IVT, in that order)
+    tau_pi, tau_bic, tau_sep : float
+        Temperature parameters for the soft sigmoid gates.
+    global_mu1, global_sigma1 : float | None
+        If provided, used as the alternative component parameters for
+        low-coverage positions (< min_reads_for_local native reads).
+    min_reads_for_local : int
+        Minimum native reads to fit a per-position alternative.
+    global_regularization : float
+        Strength of L2 regularization pulling mu1/sigma1 toward global
+        values when use_global is True.  Acts as a pseudo-count: higher
+        values keep params closer to global; lower values allow more
+        local adaptation.  Effective weight is ``lam / (lam + n_native)``.
+
+    Returns
+    -------
+    (p_mod_all, pi, null_gate_legacy, gate_weight)
+        p_mod_all has shape matching z_all.
+        null_gate_legacy is True if the hard gate would have fired (kept
+        for backward-compatible reporting).
+        gate_weight is the continuous soft gate ∈ [0, 1].
+    """
+    from baleen.eventalign._probability import (
+        _normal_pdf, _normal_logpdf, _normal_log_likelihood,
+        _mixture_log_likelihood, _EPS as _PROB_EPS,
+    )
+
+    if len(z_ivt) < 2 or len(z_native) < 2:
+        # Insufficient data — use z-score fallback only
+        fallback = 1.0 - _norm_dist.cdf(-z_all)
+        return np.clip(fallback, 0.0, 1.0), 0.0, True, 0.0
+
+    # Null from IVT z-scores (should be centred near 0)
+    mu0 = float(np.median(z_ivt))
+    mad0 = float(np.median(np.abs(z_ivt - mu0)))
+    sigma0 = max(mad0 * _MAD_SCALE, _MIN_SIGMA)
+
+    # Init alternative — use global params when available
+    if legacy_scoring:
+        use_global = (
+            global_mu1 is not None
+            and global_sigma1 is not None
+            and len(z_native) < min_reads_for_local
+        )
+    else:
+        use_global = (global_mu1 is not None and global_sigma1 is not None)
+        # Sanity check: reject degenerate global alternative
+        if use_global:
+            global_sep = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+            if global_sigma1 > 10 * sigma0 or global_sep > 8:
+                use_global = False
+    if use_global:
+        mu1 = global_mu1
+        sigma1 = global_sigma1
+    else:
+        mu1 = max(float(np.mean(z_native)), mu0 + 0.5 * sigma0)
+        sigma1 = sigma0
+
+    pi = 0.1
+
+    # Hand the EM loop to the JIT kernel (bit-equivalent to the Python path,
+    # modulo sequential- vs pairwise-sum reduction order at ~1e-14).
+    gm1 = float(global_mu1) if use_global else 0.0
+    gs1 = float(global_sigma1) if use_global else 1.0
+    z_native_c = np.ascontiguousarray(z_native, dtype=np.float64)
+    pi, mu1, sigma1, n_iters = _anchored_em_kernel(
+        z_native_c,
+        float(mu0), float(sigma0),
+        float(mu1), float(sigma1),
+        float(pi),
+        bool(use_global),
+        gm1, gs1,
+        float(global_regularization),
+        int(max_iter), float(tol), float(_EPS),
+        float(_MIN_SIGMA),
+    )
+
+    logger.debug("EM converged in %d/%d iterations (pi=%.4f)", n_iters, max_iter, pi)
+
+    # Clamp pi to prevent degenerate posteriors (consistent with _calibrate_normal)
+    pi_post = min(max(pi, 0.01), 0.7)
+
+    # Compute gate signals
+    separation = abs(mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+    n = len(z_native)
+
+    ll_null = _normal_log_likelihood(z_native, mu0, sigma0)
+    log_f0_n = _normal_logpdf(z_native, mu0, sigma0)
+    log_f1_n = _normal_logpdf(z_native, mu1, sigma1)
+    ll_mix = _mixture_log_likelihood(log_f0_n, log_f1_n, pi_post)
+    bic_null = -2 * ll_null + 2 * math.log(max(n, 2))
+    bic_mix = -2 * ll_mix + 5 * math.log(max(n, 2))
+
+    # Legacy hard gate (for reporting / backward compat)
+    null_gate_legacy = (
+        pi_post < pi_threshold
+        or bic_mix >= bic_null
+        or separation < separation_threshold
+    )
+
+    # Soft gate: continuous weights ∈ [0, 1]
+    w_pi = float(_sigmoid((pi_post - pi_threshold) / tau_pi))
+    w_bic = float(_sigmoid((bic_null - bic_mix) / tau_bic))
+    w_sep = float(_sigmoid((separation - separation_threshold) / tau_sep))
+    gate_weight = w_pi * w_bic * w_sep
+    f0_all = _normal_pdf(z_all, mu0, sigma0)
+    f1_all = _normal_pdf(z_all, mu1, sigma1)
+    denom_all = (1.0 - pi_post) * f0_all + pi_post * f1_all + _EPS
+    raw_posterior = (pi_post * f1_all) / denom_all
+
+    # Fallback: use global-alternative posterior when available,
+    # otherwise z-score-based probability
+    if not legacy_scoring and global_mu1 is not None and global_sigma1 is not None:
+        global_sep_fb = abs(global_mu1 - mu0) / max(sigma0, _MIN_SIGMA)
+        if 0.5 < global_sep_fb < 8 and global_sigma1 < 10 * sigma0:
+            # Global alternative is meaningfully separated and not degenerate
+            f0_fb = _normal_pdf(z_all, mu0, sigma0)
+            f1_fb = _normal_pdf(z_all, global_mu1, global_sigma1)
+            fallback = f1_fb / (f0_fb + f1_fb + _EPS)
+        else:
+            # Global alternative degenerate or collapsed — use z-score fallback
+            fallback = 1.0 - _norm_dist.cdf(-z_all)
+    else:
+        fallback = 1.0 - _norm_dist.cdf(-z_all)
+
+    # Blend: high gate_weight → trust mixture; low → fall back to z-score
+    final_prob = gate_weight * raw_posterior + (1.0 - gate_weight) * fallback
+
+    return np.clip(final_prob, 0.0, 1.0), pi, null_gate_legacy, gate_weight
+
+
+# ---------------------------------------------------------------------------
+# V3 — Read trajectory construction
+# ---------------------------------------------------------------------------
+
+
+def _build_read_trajectories(
+    contig_result: ContigResult,
+    sorted_positions: list[int],
+) -> tuple[list[ReadTrajectory], list[ReadTrajectory]]:
+    """Build per-read trajectories across positions.
+
+    Returns (native_trajectories, ivt_trajectories).
+    """
+    # Map: read_name → [(position, index_in_that_position, is_native)]
+    native_map: dict[str, list[tuple[int, int]]] = {}
+    ivt_map: dict[str, list[tuple[int, int]]] = {}
+
+    for pos in sorted_positions:
+        pr = contig_result.positions[pos]
+        for idx, name in enumerate(pr.native_read_names):
+            native_map.setdefault(name, []).append((pos, idx))
+        for idx, name in enumerate(pr.ivt_read_names):
+            # Index in the combined array = n_native + idx
+            ivt_map.setdefault(name, []).append((pos, pr.n_native_reads + idx))
+
+    native_trajs = []
+    for name, entries in native_map.items():
+        entries.sort(key=lambda x: x[0])
+        native_trajs.append(ReadTrajectory(
+            read_name=name,
+            positions=[e[0] for e in entries],
+            is_native=True,
+            indices=[e[1] for e in entries],
+        ))
+
+    ivt_trajs = []
+    for name, entries in ivt_map.items():
+        entries.sort(key=lambda x: x[0])
+        ivt_trajs.append(ReadTrajectory(
+            read_name=name,
+            positions=[e[0] for e in entries],
+            is_native=False,
+            indices=[e[1] for e in entries],
+        ))
+
+    return native_trajs, ivt_trajs
+
+
+# ---------------------------------------------------------------------------
+# V3 — Forward-backward HMM (pure NumPy)
+# ---------------------------------------------------------------------------
+
+
+def _gap_transition_matrix(
+    gap_bases: int,
+    p_stay_per_base: float = 0.98,
+) -> NDArray[np.float64]:
+    """Compute 2×2 transition matrix accounting for genomic gap.
+
+    State 0 = unmodified, State 1 = modified.
+
+    For a gap of *g* bases, the probability of remaining in the same state
+    is ``p_stay_per_base ** g``, so larger gaps relax spatial correlation.
+
+    Returns shape (2, 2) row-stochastic matrix.
+    """
+    p_stay = p_stay_per_base ** max(gap_bases, 1)
+    p_stay = max(min(p_stay, 1.0 - _EPS), _EPS)
+    p_switch = 1.0 - p_stay
+    return np.array([
+        [p_stay, p_switch],
+        [p_switch, p_stay],
+    ], dtype=np.float64)
+
+
+def _gap_transition_matrix_3state(
+    gap_bases: int,
+    p_stay_per_base: float = 0.92,
+) -> NDArray[np.float64]:
+    """Compute 3×3 transition matrix with small U↔M leakage.
+
+    States: 0 = Unmodified, 1 = Flank, 2 = Modified.
+
+    Most leaving probability routes through Flank, but 5% of leaving
+    probability allows direct U→M and M→U transitions so that isolated
+    modified positions can be detected without requiring adjacent flanks.
+
+    The Flank state splits its leaving probability asymmetrically:
+    40% toward U, 60% toward M (flanking positions are slightly more
+    likely to adjoin a true modification).
+
+    ::
+
+            U              F              M
+    U  [ p_stay    .95*p_leave    .05*p_leave   ]
+    F  [ .4*p_leave   p_stay     .6*p_leave     ]
+    M  [ .05*p_leave  .95*p_leave   p_stay      ]
+
+    Returns shape (3, 3) row-stochastic matrix.
+    """
+    p_stay = p_stay_per_base ** max(gap_bases, 1)
+    p_stay = max(min(p_stay, 1.0 - _EPS), _EPS)
+    p_leave = 1.0 - p_stay
+
+    mat = np.array([
+        [p_stay,          0.95 * p_leave, 0.05 * p_leave],
+        [0.4 * p_leave,   p_stay,         0.6 * p_leave],
+        [0.05 * p_leave,  0.95 * p_leave, p_stay],
+    ], dtype=np.float64)
+
+    # Row-normalize for safety
+    row_sums = mat.sum(axis=1, keepdims=True)
+    mat /= row_sums
+
+    return mat
+
+
+def _forward_backward(
+    emissions: NDArray[np.float64],
+    positions: list[int],
+    *,
+    init_prob: NDArray[np.float64] | None = None,
+    p_stay_per_base: float = 0.98,
+) -> NDArray[np.float64]:
+    """N-state forward-backward on a read trajectory.
+
+    Parameters
+    ----------
+    emissions : shape (T, N)
+        emissions[t, k] = P(observation_t | state k).
+        N=2 for Unmodified/Modified; N=3 for Unmodified/Flank/Modified.
+    positions : length T, sorted genomic positions
+    init_prob : shape (N,), initial state distribution
+    p_stay_per_base : per-base probability of staying in the same state
+
+    Returns
+    -------
+    posteriors : shape (T,) — P(state = last state | all observations).
+        For N=2 this is P(Modified); for N=3 this is P(Modified),
+        with the Flank state absorbed.
+    """
+    T = emissions.shape[0]
+    if T == 0:
+        return np.array([], dtype=np.float64)
+
+    N = emissions.shape[1]
+    uniform = np.full(N, 1.0 / N, dtype=np.float64)
+
+    if init_prob is None:
+        init_prob = uniform.copy()
+
+    # Select transition function based on N
+    if N == 3:
+        _trans_fn = _gap_transition_matrix_3state
+    else:
+        _trans_fn = _gap_transition_matrix
+
+    # Pre-compute transition matrices for all unique gaps
+    _trans_cache: dict[int, NDArray[np.float64]] = {}
+
+    def _cached_trans(gap: int) -> NDArray[np.float64]:
+        if gap not in _trans_cache:
+            _trans_cache[gap] = _trans_fn(gap, p_stay_per_base)
+        return _trans_cache[gap]
+
+    # Forward pass
+    alpha = np.zeros((T, N), dtype=np.float64)
+    scale = np.zeros(T, dtype=np.float64)
+
+    alpha[0] = init_prob * emissions[0]
+    scale[0] = alpha[0].sum()
+    if scale[0] > 0:
+        alpha[0] /= scale[0]
+    else:
+        alpha[0] = uniform.copy()
+        scale[0] = _EPS
+
+    for t in range(1, T):
+        gap = positions[t] - positions[t - 1]
+        trans = _cached_trans(gap)
+        alpha[t] = (alpha[t - 1] @ trans) * emissions[t]
+        scale[t] = alpha[t].sum()
+        if scale[t] > 0:
+            alpha[t] /= scale[t]
+        else:
+            alpha[t] = uniform.copy()
+            scale[t] = _EPS
+
+    # Backward pass — use forward scale factors for normalization
+    # (standard scaled forward-backward algorithm)
+    beta = np.zeros((T, N), dtype=np.float64)
+    beta[T - 1] = np.ones(N, dtype=np.float64)
+
+    for t in range(T - 2, -1, -1):
+        gap = positions[t + 1] - positions[t]
+        trans = _cached_trans(gap)
+        beta_raw = trans @ (emissions[t + 1] * beta[t + 1])
+        # Normalize by forward scale factor at t+1 (standard scaled F-B)
+        if scale[t + 1] > _EPS:
+            beta[t] = beta_raw / scale[t + 1]
+        else:
+            beta[t] = np.ones(N, dtype=np.float64)
+
+    # Posterior: gamma[t] ∝ alpha[t] * beta[t] (both scaled)
+    gamma = alpha * beta
+    gamma_sum = gamma.sum(axis=1, keepdims=True)
+    gamma_sum = np.maximum(gamma_sum, _EPS)
+    gamma /= gamma_sum
+
+    return gamma[:, N - 1]  # P(state=Modified) — last column for both 2 and 3 state
+
+
+@_njit(cache=True)
+def _anchored_em_kernel(
+    z_native: NDArray[np.float64],
+    mu0: float,
+    sigma0: float,
+    mu1_init: float,
+    sigma1_init: float,
+    pi_init: float,
+    use_global: bool,
+    global_mu1: float,
+    global_sigma1: float,
+    lam: float,
+    max_iter: int,
+    tol: float,
+    eps: float,
+    min_sigma: float,
+) -> tuple:
+    """Scalar JIT kernel for anchored Normal/Normal EM.
+
+    Math equivalent of the numpy loop in ``_anchored_mixture_em``.
+    Sequential scalar reduction; no fastmath — plain IEEE-754.
+
+    When ``use_global`` is True, ``mu1`` / ``sigma1`` are shrunk toward
+    ``(global_mu1, global_sigma1)`` with weight ``lam / (lam + n)``;
+    ``lam``, ``global_mu1``, ``global_sigma1`` are ignored otherwise.
+    """
+    n = z_native.shape[0]
+    inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+
+    # Precompute invariant f0 (null params fixed)
+    s0 = sigma0 if sigma0 > min_sigma else min_sigma
+    inv_s0 = 1.0 / s0
+    norm0 = inv_sqrt_2pi * inv_s0
+    f0 = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        z = (z_native[i] - mu0) * inv_s0
+        f0[i] = norm0 * math.exp(-0.5 * z * z)
+
+    r = np.empty(n, dtype=np.float64)
+    pi = pi_init
+    mu1 = mu1_init
+    sigma1 = sigma1_init
+    min_sigma_sq = min_sigma * min_sigma
+
+    n_iters = 0
+    for it in range(1, max_iter + 1):
+        n_iters = it
+        s1 = sigma1 if sigma1 > min_sigma else min_sigma
+        inv_s1 = 1.0 / s1
+        norm1 = inv_sqrt_2pi * inv_s1
+
+        # E-step: responsibilities
+        r_sum_raw = 0.0
+        for i in range(n):
+            z = (z_native[i] - mu1) * inv_s1
+            f1_i = norm1 * math.exp(-0.5 * z * z)
+            denom = (1.0 - pi) * f0[i] + pi * f1_i + eps
+            r_i = (pi * f1_i) / denom
+            r[i] = r_i
+            r_sum_raw += r_i
+
+        pi_new = r_sum_raw / n
+        r_sum = r_sum_raw + eps
+
+        if use_global:
+            # Regularised toward global params
+            w = lam / (lam + n)
+            num_mu = 0.0
+            for i in range(n):
+                num_mu += r[i] * z_native[i]
+            mu1_mle = num_mu / r_sum
+            mu1 = w * global_mu1 + (1.0 - w) * mu1_mle
+
+            num_var = 0.0
+            for i in range(n):
+                d = z_native[i] - mu1
+                num_var += r[i] * d * d
+            var_mle = num_var / r_sum
+            var_reg = w * global_sigma1 * global_sigma1 + (1.0 - w) * var_mle
+            if var_reg < min_sigma_sq:
+                var_reg = min_sigma_sq
+            sigma1 = math.sqrt(var_reg)
+        else:
+            # Local MLE update (variance uses mu1_new)
+            num_mu = 0.0
+            for i in range(n):
+                num_mu += r[i] * z_native[i]
+            mu1_new = num_mu / r_sum
+
+            num_var = 0.0
+            for i in range(n):
+                d = z_native[i] - mu1_new
+                num_var += r[i] * d * d
+            var_new = num_var / r_sum
+            if var_new < min_sigma_sq:
+                var_new = min_sigma_sq
+            mu1 = mu1_new
+            sigma1 = math.sqrt(var_new)
+
+        if abs(pi_new - pi) < tol:
+            pi = pi_new
+            break
+        pi = pi_new
+
+    return pi, mu1, sigma1, n_iters
+
+
+@_njit(cache=True)
+def _fb_2state_kernel(
+    emissions: NDArray[np.float64],
+    positions: NDArray[np.int64],
+    ip0: float,
+    ip1: float,
+    p_stay_per_base: float,
+    eps: float,
+) -> NDArray[np.float64]:
+    """JIT-able kernel: scalar 2-state forward-backward.
+
+    All arithmetic is plain IEEE-754 (no fastmath), so the output is bit-exact
+    with the non-JIT Python version.
+    """
+    T = emissions.shape[0]
+    alpha0 = np.empty(T, dtype=np.float64)
+    alpha1 = np.empty(T, dtype=np.float64)
+    scale = np.empty(T, dtype=np.float64)
+
+    # Forward pass — carry a0,a1 as scalars
+    a0 = ip0 * emissions[0, 0]
+    a1 = ip1 * emissions[0, 1]
+    s = a0 + a1
+    if s > 0.0:
+        a0 = a0 / s
+        a1 = a1 / s
+    else:
+        a0 = 0.5
+        a1 = 0.5
+        s = eps
+    alpha0[0] = a0
+    alpha1[0] = a1
+    scale[0] = s
+
+    for t in range(1, T):
+        gap = positions[t] - positions[t - 1]
+        if gap < 1:
+            gap = 1
+        p_stay = p_stay_per_base ** gap
+        if p_stay > 1.0 - eps:
+            p_stay = 1.0 - eps
+        elif p_stay < eps:
+            p_stay = eps
+        p_switch = 1.0 - p_stay
+        raw0 = (a0 * p_stay + a1 * p_switch) * emissions[t, 0]
+        raw1 = (a0 * p_switch + a1 * p_stay) * emissions[t, 1]
+        s = raw0 + raw1
+        if s > 0.0:
+            a0 = raw0 / s
+            a1 = raw1 / s
+        else:
+            a0 = 0.5
+            a1 = 0.5
+            s = eps
+        alpha0[t] = a0
+        alpha1[t] = a1
+        scale[t] = s
+
+    # Backward pass
+    beta0 = np.empty(T, dtype=np.float64)
+    beta1 = np.empty(T, dtype=np.float64)
+    beta0[T - 1] = 1.0
+    beta1[T - 1] = 1.0
+    b0 = 1.0
+    b1 = 1.0
+
+    for t in range(T - 2, -1, -1):
+        gap = positions[t + 1] - positions[t]
+        if gap < 1:
+            gap = 1
+        p_stay = p_stay_per_base ** gap
+        if p_stay > 1.0 - eps:
+            p_stay = 1.0 - eps
+        elif p_stay < eps:
+            p_stay = eps
+        p_switch = 1.0 - p_stay
+        eb0 = emissions[t + 1, 0] * b0
+        eb1 = emissions[t + 1, 1] * b1
+        raw0 = p_stay * eb0 + p_switch * eb1
+        raw1 = p_switch * eb0 + p_stay * eb1
+        s_t1 = scale[t + 1]
+        if s_t1 > eps:
+            b0 = raw0 / s_t1
+            b1 = raw1 / s_t1
+        else:
+            b0 = 1.0
+            b1 = 1.0
+        beta0[t] = b0
+        beta1[t] = b1
+
+    # Posterior: gamma ∝ alpha * beta; return P(state=Modified)
+    out = np.empty(T, dtype=np.float64)
+    for t in range(T):
+        g0 = alpha0[t] * beta0[t]
+        g1 = alpha1[t] * beta1[t]
+        gs = g0 + g1
+        if gs < eps:
+            gs = eps
+        out[t] = g1 / gs
+    return out
+
+
+def _forward_backward_2state(
+    emissions: NDArray[np.float64],
+    positions: list[int] | NDArray[np.int64],
+    *,
+    init_prob: NDArray[np.float64] | None = None,
+    p_stay_per_base: float = 0.98,
+) -> NDArray[np.float64]:
+    """Scalar-arithmetic forward-backward specialized for the 2-state case.
+
+    Identical semantics to :func:`_forward_backward` for N=2, but avoids the
+    numpy dispatch/shape-check overhead that dominates 2×2 matmul for short
+    trajectories.  Transition matrices are row-stochastic symmetric 2×2
+    matrices of the form ``[[p_stay, p_switch], [p_switch, p_stay]]``.
+
+    When numba is installed, the inner loops run as a JIT-compiled kernel
+    (bit-exact, no fastmath).  Without numba, the same code runs in pure
+    Python.
+    """
+    T = emissions.shape[0]
+    if T == 0:
+        return np.array([], dtype=np.float64)
+
+    if init_prob is None:
+        ip0 = 0.5
+        ip1 = 0.5
+    else:
+        ip0 = float(init_prob[0])
+        ip1 = float(init_prob[1])
+
+    if isinstance(positions, np.ndarray):
+        pos_arr = positions.astype(np.int64, copy=False)
+    else:
+        pos_arr = np.asarray(positions, dtype=np.int64)
+
+    return _fb_2state_kernel(
+        emissions, pos_arr, ip0, ip1, float(p_stay_per_base), _EPS
+    )
+
+
+def _run_hmm_on_trajectories(
+    trajectories: list[ReadTrajectory],
+    position_stats: dict[int, PositionStats],
+    *,
+    min_positions: int = 3,
+    p_stay_per_base: float = 0.98,
+    hmm_params: HMMParams | None = None,
+    emission_source: str = "p_mod_raw",
+) -> None:
+    """Run forward-backward on each trajectory and write p_mod_hmm in-place.
+
+    For each read at each position, the HMM posterior replaces the
+    ``p_mod_hmm`` entry in the corresponding :class:`PositionStats`.
+
+    Reads with fewer than *min_positions* observations are skipped (their
+    p_mod_hmm remains as the V2 p_mod_raw fallback).
+
+    When *hmm_params* is provided, its ``p_stay_per_base``, ``init_prob``,
+    and ``emission_transform`` override the defaults.
+    """
+    from scipy.stats import beta as _beta_dist
+
+    # Resolve HMM parameters
+    effective_p_stay = hmm_params.p_stay_per_base if hmm_params else p_stay_per_base
+    effective_init = hmm_params.init_prob if hmm_params else None
+    emission_transform = hmm_params.emission_transform if hmm_params else None
+    n_states = hmm_params.n_states if hmm_params else 2
+
+    # Precompute Beta PDF lookup grids for all 3-state modes
+    beta_grids = None
+    if n_states == 3 and hmm_params is not None:
+        n_grid = 1000
+        grid_x = np.linspace(1e-6, 1.0 - 1e-6, n_grid)
+        a_u, b_u = hmm_params.unmod_emission_beta
+        a_f, b_f = hmm_params.flank_emission_beta
+        a_m, b_m = hmm_params.mod_emission_beta
+        grid_unmod = _beta_dist.pdf(grid_x, a_u, b_u)
+        grid_flank = _beta_dist.pdf(grid_x, a_f, b_f)
+        grid_mod = _beta_dist.pdf(grid_x, a_m, b_m)
+        beta_grids = (grid_x, grid_unmod, grid_flank, grid_mod)
+
+    # Fast path: 2-state without emission_transform. Avoids the per-scalar
+    # Python loop that dominates runtime when there is no calibrator/KDE.
+    if n_states == 2 and emission_transform is None:
+        for traj in trajectories:
+            if len(traj.positions) < min_positions:
+                continue
+
+            T = len(traj.positions)
+            # Batch-extract p_mod values in one list comprehension pass,
+            # then build the (T, 2) emissions matrix via vectorized ops.
+            p_mods = np.fromiter(
+                (
+                    getattr(position_stats[pos], emission_source)[idx]
+                    for pos, idx in zip(traj.positions, traj.indices)
+                ),
+                dtype=np.float64,
+                count=T,
+            )
+            np.clip(p_mods, 1e-10, 1.0 - 1e-10, out=p_mods)
+            emissions = np.empty((T, 2), dtype=np.float64)
+            emissions[:, 1] = p_mods
+            emissions[:, 0] = 1.0 - p_mods
+
+            # Emission floor + row re-normalization (matches general path)
+            np.maximum(emissions, 0.01, out=emissions)
+            emissions /= emissions.sum(axis=1, keepdims=True)
+
+            posteriors = _forward_backward_2state(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
+
+            for t_idx, (pos, read_idx) in enumerate(
+                zip(traj.positions, traj.indices)
+            ):
+                position_stats[pos].p_mod_hmm[read_idx] = posteriors[t_idx]
+        return
+
+    for traj in trajectories:
+        if len(traj.positions) < min_positions:
+            continue
+
+        T = len(traj.positions)
+        emissions = np.zeros((T, n_states), dtype=np.float64)
+
+        for t_idx, (pos, read_idx) in enumerate(
+            zip(traj.positions, traj.indices)
+        ):
+            ps = position_stats[pos]
+            p_mod = getattr(ps, emission_source)[read_idx]
+
+            if n_states == 3 and emission_transform is None:
+                # Unsupervised 3-state: Beta PDF emissions via lookup
+                # Clamp to [0.02, 0.98] to avoid boundary collapse where
+                # all Beta PDFs go to zero (making emissions uninformative).
+                if beta_grids is not None:
+                    gx, g_u, g_f, g_m = beta_grids
+                    p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
+                    emissions[t_idx, 0] = max(np.interp(p_mod_clamped, gx, g_u), 1e-10)
+                    emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
+                    emissions[t_idx, 2] = max(np.interp(p_mod_clamped, gx, g_m), 1e-10)
+            elif n_states == 3 and emission_transform is not None:
+                # Trained model with 3 states: use calibrator/KDE for
+                # states 0 (unmod) and 2 (mod), Beta PDF for state 1 (flank)
+                from baleen.eventalign._hmm_training import (
+                    EmissionCalibrator,
+                    EmissionKDE,
+                )
+
+                if isinstance(emission_transform, EmissionCalibrator):
+                    calibrated = emission_transform.transform(np.array([p_mod]))[0]
+                    calibrated = max(min(calibrated, 1.0 - 1e-10), 1e-10)
+                    emissions[t_idx, 0] = 1.0 - calibrated
+                    emissions[t_idx, 2] = calibrated
+                elif isinstance(emission_transform, EmissionKDE):
+                    p_unmod, p_mod_kde = emission_transform.emission_probs(
+                        np.array([p_mod])
+                    )
+                    emissions[t_idx, 0] = p_unmod[0]
+                    emissions[t_idx, 2] = p_mod_kde[0]
+
+                # Flank from Beta PDF
+                p_mod_clamped = max(min(float(p_mod), 0.98), 0.02)
+                if beta_grids is not None:
+                    gx, _, g_f, _ = beta_grids
+                    emissions[t_idx, 1] = max(np.interp(p_mod_clamped, gx, g_f), 1e-10)
+                else:
+                    a_f, b_f = hmm_params.flank_emission_beta if hmm_params else (3.0, 3.0)
+                    emissions[t_idx, 1] = max(
+                        float(_beta_dist.pdf(p_mod_clamped, a_f, b_f)), 1e-10
+                    )
+            elif emission_transform is None:
+                # Default 2-state: use raw p_mod directly
+                p_mod_safe = max(min(p_mod, 1.0 - 1e-10), 1e-10)
+                emissions[t_idx, 0] = 1.0 - p_mod_safe
+                emissions[t_idx, 1] = p_mod_safe
+            else:
+                # Trained 2-state with calibrator/KDE
+                from baleen.eventalign._hmm_training import (
+                    EmissionCalibrator,
+                    EmissionKDE,
+                )
+
+                if isinstance(emission_transform, EmissionCalibrator):
+                    calibrated = emission_transform.transform(
+                        np.array([p_mod])
+                    )[0]
+                    calibrated = max(min(calibrated, 1.0 - 1e-10), 1e-10)
+                    emissions[t_idx, 0] = 1.0 - calibrated
+                    emissions[t_idx, 1] = calibrated
+                elif isinstance(emission_transform, EmissionKDE):
+                    p_unmod, p_mod_kde = emission_transform.emission_probs(
+                        np.array([p_mod])
+                    )
+                    emissions[t_idx, 0] = p_unmod[0]
+                    emissions[t_idx, 1] = p_mod_kde[0]
+
+        # Emission floor: prevent any state from having near-zero emission,
+        # which lets transition priors completely override observation evidence.
+        emissions = np.maximum(emissions, 0.01)
+        # Re-normalize rows
+        row_sums = emissions.sum(axis=1, keepdims=True)
+        emissions /= row_sums
+
+        if n_states == 2:
+            posteriors = _forward_backward_2state(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
+        else:
+            posteriors = _forward_backward(
+                emissions,
+                traj.positions,
+                init_prob=effective_init,
+                p_stay_per_base=effective_p_stay,
+            )
+
+        # Write back
+        for t_idx, (pos, read_idx) in enumerate(
+            zip(traj.positions, traj.indices)
+        ):
+            position_stats[pos].p_mod_hmm[read_idx] = posteriors[t_idx]
+
+
+# ---------------------------------------------------------------------------
+# Top-level API
+# ---------------------------------------------------------------------------
+
+
+def compute_sequential_modification_probabilities(
+    contig_result: ContigResult,
+    *,
+    shrinkage_window: int = 15,
+    kappa_high: float = 0.5,
+    kappa_medium: float = 2.0,
+    kappa_low: float = 5.0,
+    mixture_max_iter: int = 100,
+    mixture_pi_threshold: float = 0.05,
+    mixture_separation: float = 0.8,
+    hmm_min_positions: int = 3,
+    hmm_p_stay_per_base: float = 0.92,
+    run_hmm: bool = True,
+    hmm_params: HMMParams | None = None,
+    emission_source: str = "p_mod_knn",
+    consistent_fallback: bool = True,
+    knn_weighted: bool = False,
+    legacy_scoring: bool = False,
+    show_progress: bool = True,
+) -> ContigModificationResult:
+    """Run the full V1→V2→V3 hierarchical pipeline on a contig.
+
+    Parameters
+    ----------
+    contig_result : ContigResult
+        Output of the eventalign pipeline for one contig.
+    shrinkage_window : int
+        Half-window in positions (not bases) for local shrinkage.
+    kappa_high, kappa_medium, kappa_low : float
+        Shrinkage strengths for high/medium/low coverage positions.
+    mixture_max_iter : int
+        Max EM iterations for V2 mixture.
+    mixture_pi_threshold : float
+        Null-gate threshold on mixing proportion.
+    mixture_separation : float
+        Minimum effect-size separation for V2 gate.
+    hmm_min_positions : int
+        Minimum trajectory length for HMM.
+    hmm_p_stay_per_base : float
+        Per-base state persistence for HMM transitions.
+    run_hmm : bool
+        If False, skip V3 entirely.
+    hmm_params : HMMParams | None
+        Trained HMM parameters.  When provided, overrides
+        ``hmm_p_stay_per_base`` and uses learned emission transforms
+        and initial state probabilities.
+    emission_source : str
+        Which per-read score field to use as HMM emissions. Also gates
+        whether V1 (empirical-Bayes null + shrinkage) and V2 (anchored
+        mixture EM) actually run:
+
+        - ``"p_mod_knn"`` (default): run only kNN + Beta-EM → HMM.
+          V1/V2 are skipped entirely; their fields on ``PositionStats``
+          are populated with zero/default placeholders.
+        - ``"p_mod_raw"``: run V1 → V2 → HMM (V2 posteriors are the
+          HMM emissions; kNN is still computed and stored).
+    consistent_fallback : bool
+        If True (default, Fix A), set the short-trajectory fallback to
+        *emission_source* instead of V2 ``p_mod_raw``.  Set to False
+        to reproduce old behavior.
+    knn_weighted : bool
+        If True (Fix B), use distance-weighted kNN scoring instead of
+        unweighted counting.
+
+    Returns
+    -------
+    ContigModificationResult
+    """
+    sorted_positions = sorted(contig_result.positions.keys())
+
+    if len(sorted_positions) == 0:
+        return ContigModificationResult(
+            contig=contig_result.contig,
+            position_stats={},
+            native_trajectories=[],
+            ivt_trajectories=[],
+            global_mu=0.0,
+            global_sigma=1.0,
+        )
+
+    # V1/V2 only run when explicitly needed (p_mod_raw emission source).
+    # Default pipeline uses p_mod_knn and skips V1/V2 entirely.
+    needs_v1_v2 = (emission_source == "p_mod_raw")
+
+    contig_short = contig_result.contig
+    if len(contig_short) > 20:
+        contig_short = contig_short[:17] + "..."
+    n_pos = len(sorted_positions)
+
+    # Progress bar: 3 passes (V1a + V2b + kNN) when V1/V2 active, else
+    # kNN only.
+    _n_stages = 3 if needs_v1_v2 else 1
+    _mod_pbar = tqdm(
+        total=n_pos * _n_stages,
+        desc=f"  {contig_short} mod-calling",
+        unit="step",
+        leave=False,
+        disable=not show_progress,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+    )
+
+    position_stats: dict[int, PositionStats] = {}
+
+    if needs_v1_v2:
+        # ── V1a: Extract scores and fit robust IVT null per position ──
+        raw_params: dict[int, tuple[float, float]] = {}
+        coverages: dict[int, int] = {}
+        all_scores: dict[int, NDArray[np.float64]] = {}
+
+        _mod_pbar.set_postfix_str("V1: null fitting")
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            scores = _extract_ivt_distances(
+                pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads
+            )
+            all_scores[pos] = scores
+
+            ivt_scores = scores[pr.n_native_reads:]
+            mu_raw, sigma_raw = _fit_robust_ivt_null(ivt_scores)
+            raw_params[pos] = (mu_raw, sigma_raw)
+            coverages[pos] = pr.n_ivt_reads
+            _mod_pbar.update(1)
+
+        # ── V1b: Hierarchical shrinkage ───────────────────────────────
+        shrunk_params = _shrink_parameters(
+            sorted_positions,
+            raw_params,
+            coverages,
+            window=shrinkage_window,
+            kappa_high=kappa_high,
+            kappa_medium=kappa_medium,
+            kappa_low=kappa_low,
+        )
+
+        # Global IVT prior (for reporting)
+        all_mus = [raw_params[p][0] for p in sorted_positions if coverages[p] >= 1]
+        global_mu = float(np.median(all_mus)) if all_mus else 0.0
+        all_sigmas = [raw_params[p][1] for p in sorted_positions if coverages[p] >= 1]
+        global_sigma = float(np.median(all_sigmas)) if all_sigmas else 1.0
+
+        # ── V1c: Z-scores and p-values ────────────────────────────────
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            scores = all_scores[pos]
+            mu_s, sigma_s = shrunk_params[pos]
+            mu_r, sigma_r = raw_params[pos]
+
+            z = (scores - mu_s) / max(sigma_s, _MIN_SIGMA)
+            # One-sided: P(Z ≥ z) — high z means far from IVT null
+            p_null_vals = 1.0 - _norm_dist.cdf(z)
+
+            n_total = pr.n_native_reads + pr.n_ivt_reads
+            position_stats[pos] = PositionStats(
+                position=pos,
+                reference_kmer=pr.reference_kmer,
+                coverage_class=_classify_coverage(pr.n_ivt_reads),
+                n_ivt=pr.n_ivt_reads,
+                n_native=pr.n_native_reads,
+                native_read_names=pr.native_read_names,
+                ivt_read_names=pr.ivt_read_names,
+                mu_raw=mu_r,
+                sigma_raw=sigma_r,
+                mu_shrunk=mu_s,
+                sigma_shrunk=sigma_s,
+                scores=scores,
+                z_scores=z,
+                p_null=np.asarray(p_null_vals, dtype=np.float64),
+                p_mod_raw=np.zeros(n_total, dtype=np.float64),
+                mixture_pi=0.0,
+                mixture_null_gate=True,
+                gate_weight=0.0,
+                p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
+                p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
+            )
+
+        # ── V2a: Contig-pooled EM for global alternative parameters ──
+        global_mu1, global_sigma1 = _contig_pooled_mixture_em(
+            position_stats, sorted_positions,
+        )
+
+        # ── V2b: Per-position anchored mixture with soft gating ──────
+        _mod_pbar.set_postfix_str("V2: mixture EM")
+        for pos in sorted_positions:
+            ps = position_stats[pos]
+            z_native = ps.z_scores[: ps.n_native]
+            z_ivt = ps.z_scores[ps.n_native :]
+
+            p_mod_all, pi, null_gate, gw = _anchored_mixture_em(
+                z_native,
+                z_ivt,
+                ps.z_scores,
+                max_iter=mixture_max_iter,
+                pi_threshold=mixture_pi_threshold,
+                separation_threshold=mixture_separation,
+                global_mu1=global_mu1,
+                global_sigma1=global_sigma1,
+                legacy_scoring=legacy_scoring,
+            )
+            ps.p_mod_raw[:] = p_mod_all
+            ps.mixture_pi = pi
+            ps.mixture_null_gate = null_gate
+            ps.gate_weight = gw
+
+            # Default HMM to V2 result (will be overwritten if HMM runs)
+            ps.p_mod_hmm[:] = p_mod_all
+            _mod_pbar.update(1)
+    else:
+        # V1/V2 skipped — construct PositionStats with zero/default
+        # fields so downstream code and consumers that still touch them
+        # (e.g. legacy ablation tooling) see a well-formed object.
+        global_mu, global_sigma = 0.0, 1.0
+        for pos in sorted_positions:
+            pr = contig_result.positions[pos]
+            n_total = pr.n_native_reads + pr.n_ivt_reads
+            position_stats[pos] = PositionStats(
+                position=pos,
+                reference_kmer=pr.reference_kmer,
+                coverage_class=_classify_coverage(pr.n_ivt_reads),
+                n_ivt=pr.n_ivt_reads,
+                n_native=pr.n_native_reads,
+                native_read_names=pr.native_read_names,
+                ivt_read_names=pr.ivt_read_names,
+                mu_raw=0.0,
+                sigma_raw=1.0,
+                mu_shrunk=0.0,
+                sigma_shrunk=1.0,
+                scores=np.zeros(n_total, dtype=np.float64),
+                z_scores=np.zeros(n_total, dtype=np.float64),
+                p_null=np.ones(n_total, dtype=np.float64),
+                p_mod_raw=np.zeros(n_total, dtype=np.float64),
+                mixture_pi=0.0,
+                mixture_null_gate=True,
+                gate_weight=0.0,
+                p_mod_knn=np.full(n_total, np.nan, dtype=np.float64),
+                p_mod_hmm=np.full(n_total, np.nan, dtype=np.float64),
+            )
+
+    # ── kNN IVT-purity scores ─────────────────────────────────────────────
+
+    from baleen.eventalign._probability import _score_knn_ivt_purity, _calibrate_beta
+
+    _mod_pbar.set_postfix_str("kNN scoring")
+
+    for pos in sorted_positions:
+        pr = contig_result.positions[pos]
+        ps = position_stats[pos]
+        n_total = pr.n_native_reads + pr.n_ivt_reads
+
+        if n_total < 3:
+            _mod_pbar.update(1)
+            continue
+
+        raw_knn = _score_knn_ivt_purity(
+            pr.distance_matrix, pr.n_native_reads, pr.n_ivt_reads,
+            weighted=knn_weighted,
+        )
+
+        ivt_mask = np.zeros(n_total, dtype=bool)
+        ivt_mask[pr.n_native_reads:] = True
+
+        cal = _calibrate_beta(raw_knn, ivt_mask, ~ivt_mask)
+        ps.p_mod_knn[:] = cal.probabilities
+        _mod_pbar.update(1)
+
+    # Fix A: update short-trajectory fallback to match emission_source.
+    # Without this, short-trajectory reads keep V2 p_mod_raw while long
+    # trajectories are scored against kNN — a calibration mismatch.
+    if consistent_fallback:
+        for pos in sorted_positions:
+            ps = position_stats[pos]
+            ps.p_mod_hmm[:] = getattr(ps, emission_source)[:]
+
+    _mod_pbar.set_postfix_str("V3: HMM smoothing")
+    _mod_pbar.close()
+
+    # ── V3: HMM smoothing ────────────────────────────────────────────────
+
+    native_trajs, ivt_trajs = _build_read_trajectories(
+        contig_result, sorted_positions,
+    )
+
+    if run_hmm:
+        # Default to 2-state unsupervised HMM when no params provided.
+        # The 2-state model (Unmodified/Modified) is more robust for
+        # detecting isolated modifications than the 3-state model, which
+        # requires transitions through a Flank state and uses Beta PDF
+        # emissions that collapse at boundary values.
+        effective_hmm_params = hmm_params
+        if effective_hmm_params is None:
+            from baleen.eventalign._hmm_training import create_unsupervised_params
+            effective_hmm_params = create_unsupervised_params(n_states=2)
+
+        _run_hmm_on_trajectories(
+            native_trajs,
+            position_stats,
+            min_positions=hmm_min_positions,
+            p_stay_per_base=hmm_p_stay_per_base,
+            hmm_params=effective_hmm_params,
+            emission_source=emission_source,
+        )
+        _run_hmm_on_trajectories(
+            ivt_trajs,
+            position_stats,
+            min_positions=hmm_min_positions,
+            p_stay_per_base=hmm_p_stay_per_base,
+            hmm_params=effective_hmm_params,
+            emission_source=emission_source,
+        )
+
+    return ContigModificationResult(
+        contig=contig_result.contig,
+        position_stats=position_stats,
+        native_trajectories=native_trajs,
+        ivt_trajectories=ivt_trajs,
+        global_mu=global_mu,
+        global_sigma=global_sigma,
+    )
