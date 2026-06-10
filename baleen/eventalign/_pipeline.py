@@ -17,7 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from baleen import _cuda_dtw
+from baleen import _dtw
 from baleen.eventalign import _bam
 from baleen.eventalign import _f5c
 from baleen.eventalign import _signal
@@ -306,8 +306,8 @@ class _SerializedPayload(TypedDict):
     metadata: PipelineMetadata
 
 
-_dtw_distance = cast(_DtwDistanceFn, _cuda_dtw.dtw_distance)
-_dtw_pairwise_varlen = _cuda_dtw.dtw_pairwise_varlen
+_dtw_distance = cast(_DtwDistanceFn, _dtw.dtw_distance)
+_dtw_pairwise_varlen = _dtw.dtw_pairwise_varlen
 
 
 def _compute_pairwise_distances(
@@ -324,7 +324,7 @@ def _compute_pairwise_distances(
     )
     t0 = time.perf_counter()
 
-    want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
+    want_cuda = use_cuda is True or (use_cuda is None and _dtw.CUDA_AVAILABLE)
 
     if want_cuda:
         matrix = _dtw_pairwise_varlen(
@@ -453,7 +453,7 @@ def _get_gpu_memory(cuda_devices: Optional[list[int]] = None) -> list[int]:
     list[int]
         Memory in bytes per device.  Falls back to ``[8 GB]`` on failure.
     """
-    all_mems = _cuda_dtw.get_per_device_memory()
+    all_mems = _dtw.get_per_device_memory()
     if not all_mems:
         return [8 * 1024 ** 3]
     if cuda_devices is not None:
@@ -700,7 +700,7 @@ def _process_contig(
         current_estimate = 0
 
         for i, sigs in enumerate(all_signal_lists):
-            pos_estimate = _cuda_dtw.estimate_gpu_memory([sigs])
+            pos_estimate = _dtw.estimate_gpu_memory([sigs])
             if current_chunk and current_estimate + pos_estimate > chunk_mem_limit:
                 chunks.append(current_chunk)
                 current_chunk = [i]
@@ -716,9 +716,9 @@ def _process_contig(
 
         for chunk_idx, chunk_indices in enumerate(chunks):
             chunk_signals = [all_signal_lists[i] for i in chunk_indices]
-            estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
+            estimated_bytes = _dtw.estimate_gpu_memory(chunk_signals)
 
-            chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+            chunk_matrices = _dtw.dtw_multi_position_pairwise(
                 chunk_signals,
                 use_cuda=use_cuda,
                 num_streams=num_cuda_streams,
@@ -1015,9 +1015,8 @@ def run_pipeline(
                 subsample, subsample_n, gpu_memory_limit)
     logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
                 cleanup_temp, kmer_model, extra_f5c_args)
-    logger.info("  DTW backend:  %s  (CUDA=%s, tslearn=%s)",
-                _cuda_dtw.backend(), _cuda_dtw.CUDA_AVAILABLE,
-                _cuda_dtw.TSLEARN_AVAILABLE)
+    logger.info("  DTW backend:  %s  (GPU=%s)",
+                _dtw.backend(), _dtw.CUDA_AVAILABLE)
     logger.info("=" * 60)
 
     # Validate threads parameter

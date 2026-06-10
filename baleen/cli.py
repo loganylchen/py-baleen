@@ -39,7 +39,7 @@ from baleen.eventalign._read_bam import write_mod_bam
 
 def _parse_cuda_devices(spec: str) -> list[int]:
     """Parse device spec: '0', '0,1', '0-3', 'all'."""
-    from baleen._cuda_dtw import get_device_count
+    from baleen._dtw import get_device_count
 
     spec = spec.strip().lower()
     if spec == "all":
