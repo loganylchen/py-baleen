@@ -167,13 +167,10 @@ class TestComputePairwiseDistances:
         assert matrix.shape == (3, 3)
         assert np.allclose(np.diag(matrix), 0.0)
         assert np.allclose(matrix, matrix.T)
-        from tslearn.metrics import dtw as tslearn_dtw
+        from baleen import _dtw
         for i in range(3):
             for j in range(i + 1, 3):
-                expected = tslearn_dtw(
-                    signals[i].reshape(-1, 1),
-                    signals[j].reshape(-1, 1),
-                )
+                expected = _dtw.dtw_distance(signals[i], signals[j], use_cuda=False)
                 np.testing.assert_allclose(
                     matrix[i, j], expected, rtol=1e-5,
                     err_msg=f"Mismatch at ({i},{j})",
