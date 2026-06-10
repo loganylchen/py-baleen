@@ -105,13 +105,13 @@ def _gpu_info() -> dict:
 
 
 def _env_snapshot() -> dict:
-    from baleen._dtw import CUDA_AVAILABLE
+    from baleen import _dtw
     env = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "hostname": platform.node(),
         "python_version": platform.python_version(),
-        "cuda_available": CUDA_AVAILABLE,
-        "dtw_backend": "cuda" if CUDA_AVAILABLE else "tslearn",
+        "cuda_available": _dtw.CUDA_AVAILABLE,
+        "dtw_backend": _dtw.backend(),  # 'gpu' or 'cpu' (krill)
     }
     env.update(_git_info())
     env.update(_gpu_info())
@@ -268,7 +268,7 @@ def _summarize_per_contig(values: list[float]) -> dict:
 _BUCKET_PATTERNS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # Baleen project modules — match by filename fragment, also by funcname
     # so built-ins like krill's C DTW kernel land in the right bucket.
-    ("dtw",          ("_dtw.py", "krill"),                    ("krill", "dtw")),
+    ("dtw",          ("_dtw.py", "krill"),                    ("dtw_distance", "dtw_pairwise", "dtw_pairwise_varlen", "dtw_multi_position_pairwise")),
     ("hmm_training", ("_hmm_training.py",),                   ()),
     ("hmm",          ("_hierarchical.py",),                   ()),
     ("probability",  ("_probability.py",),                    ()),

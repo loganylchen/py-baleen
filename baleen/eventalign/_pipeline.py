@@ -342,17 +342,7 @@ def _compute_pairwise_distances(
 def _compute_pairwise_batch(
     signals: list[NDArray[np.float32]],
 ) -> NDArray[np.float64]:
-    from tslearn.metrics import dtw as _tslearn_dtw
-
-    n = len(signals)
-    prepped = [s.reshape(-1, 1) for s in signals]
-    matrix = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = float(_tslearn_dtw(prepped[i], prepped[j]))
-            matrix[i, j] = d
-            matrix[j, i] = d
-    return matrix
+    return _dtw_pairwise_varlen(signals, use_cuda=False)
 
 
 def _compute_pairwise_loop(

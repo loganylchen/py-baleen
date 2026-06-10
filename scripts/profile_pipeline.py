@@ -313,8 +313,6 @@ def profile_contig(
                 chunk_t0 = time.perf_counter()
                 chunk_matrices = _dtw.dtw_multi_position_pairwise(
                     chunk_signals,
-                    use_open_start=False,
-                    use_open_end=False,
                     use_cuda=use_cuda,
                     num_streams=num_cuda_streams,
                 )
