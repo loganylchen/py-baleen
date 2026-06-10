@@ -274,7 +274,7 @@ _BUCKET_PATTERNS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     ("probability",  ("_probability.py",),                    ()),
     ("aggregation",  ("_aggregation.py",),                    ()),
     ("signal",       ("_signal.py",),                         ()),
-    ("f5c",          ("_f5c.py",),                            ()),
+    ("eventalign",   ("_eventalign.py",),                     ()),
     ("bam",          ("_bam.py", "pysam/"),                   ()),
     ("pipeline",     ("_pipeline.py",),                       ()),
     # IO / subprocess — typically f5c output reads and subprocess plumbing.

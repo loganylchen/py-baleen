@@ -167,19 +167,19 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Per-read P(mod) threshold for counting a read as modified (default: 0.9)",
     )
 
-    # f5c options
-    f5c = parser.add_argument_group("f5c options")
-    f5c.add_argument(
-        "--f5c-threads", type=int, default=None,
-        help="CPU threads per f5c eventalign call (default: auto = total_cores / threads)",
+    # eventalign options
+    eventalign = parser.add_argument_group("eventalign options")
+    eventalign.add_argument(
+        "--pore", type=str, default="rna002",
+        help="krill pore model for eventalign (default: rna002)",
     )
-    f5c.add_argument(
+    eventalign.add_argument(
         "--no-rna", action="store_true", default=False,
-        help="Disable RNA mode for f5c eventalign",
+        help="Disable RNA mode for eventalign",
     )
-    f5c.add_argument(
+    eventalign.add_argument(
         "--kmer-model", type=str, default=None,
-        help="Custom kmer model for f5c eventalign",
+        help="Custom kmer model (reserved; unused by the krill engine)",
     )
 
     # Misc
@@ -303,20 +303,6 @@ def _cmd_run(args: argparse.Namespace) -> None:
         logger.info("Loaded HMM params: %s (%d-state %s)",
                     args.hmm_params, hmm_params.n_states, hmm_params.mode)
 
-    # Auto-compute f5c threads: total_cores / pipeline_workers, clamped to [2, 16]
-    import os
-    f5c_threads = args.f5c_threads
-    if f5c_threads is None:
-        total_cores = os.cpu_count() or 4
-        f5c_threads = max(2, min(16, total_cores // max(args.threads, 1)))
-    # Inject into extra_f5c_args (f5c uses -t for threads)
-    # NOTE: --iop is only for fast5, not slow5 — omit it to avoid f5c errors
-    extra_f5c_args = []
-    if '-t' not in extra_f5c_args:
-        extra_f5c_args.extend(['-t', str(f5c_threads)])
-    logger.info("f5c threads: -t %d (pipeline workers: %d)",
-                f5c_threads, args.threads)
-
     # Run streaming pipeline (DTW → HMM → aggregation fused per contig)
     output_paths, metadata = run_pipeline_streaming(
         native_bam=args.native_bam,
@@ -334,7 +320,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         cleanup_temp=not args.keep_temp,
         rna=not args.no_rna,
         kmer_model=args.kmer_model,
-        extra_f5c_args=extra_f5c_args,
+        pore=args.pore,
         min_mapq=args.min_mapq,
         primary_only=not args.no_primary_only,
         threads=args.threads,

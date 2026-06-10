@@ -122,7 +122,7 @@ class TestContigResult:
 class TestPipelineMetadata:
     def test_creation(self) -> None:
         metadata = PipelineMetadata(
-            f5c_version="1.6",
+            eventalign_version="1.6",
             min_depth=15,
             use_cuda=None,
             padding=0,
@@ -131,7 +131,7 @@ class TestPipelineMetadata:
             n_contigs_skipped=3,
             filter_results=[],
         )
-        assert metadata.f5c_version == "1.6"
+        assert metadata.eventalign_version == "1.6"
         assert metadata.n_contigs_skipped == 3
 
 
@@ -280,10 +280,9 @@ class TestRunPipeline:
             return float(abs(len(a) - len(b)) + np.mean(np.abs(a[0] - b[0])))
 
         with (
-            patch("baleen.eventalign._pipeline._f5c.check_f5c", return_value="1.6"),
-            patch("baleen.eventalign._pipeline._f5c.index_fastq_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.index_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.run_eventalign", side_effect=fake_run_eventalign),
+            patch("baleen.eventalign._pipeline._eventalign.check_krill", return_value="1.6"),
+            patch("baleen.eventalign._pipeline._eventalign.index_blow5"),
+            patch("baleen.eventalign._pipeline._eventalign.run_eventalign", side_effect=fake_run_eventalign),
             patch("baleen.eventalign._pipeline._dtw_distance", side_effect=fake_dtw),
         ):
             results, metadata = run_pipeline(
@@ -298,7 +297,7 @@ class TestRunPipeline:
                 use_cuda=False,
             )
 
-        assert metadata.f5c_version == "1.6"
+        assert metadata.eventalign_version == "1.6"
         assert metadata.n_contigs_passed_filter == 1
         assert set(results.keys()) == {"ctg1"}
         contig_result = results["ctg1"]
@@ -323,10 +322,9 @@ class TestRunPipeline:
         )
 
         with (
-            patch("baleen.eventalign._pipeline._f5c.check_f5c", return_value="1.6"),
-            patch("baleen.eventalign._pipeline._f5c.index_fastq_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.index_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.run_eventalign") as mock_run_eventalign,
+            patch("baleen.eventalign._pipeline._eventalign.check_krill", return_value="1.6"),
+            patch("baleen.eventalign._pipeline._eventalign.index_blow5"),
+            patch("baleen.eventalign._pipeline._eventalign.run_eventalign") as mock_run_eventalign,
         ):
             results, metadata = run_pipeline(
                 native_bam=native_bam,
@@ -343,7 +341,7 @@ class TestRunPipeline:
         assert metadata.n_contigs_passed_filter == 0
         mock_run_eventalign.assert_not_called()
 
-    def test_f5c_not_found_raises_runtime_error(self, tmp_path: Path) -> None:
+    def test_krill_not_found_raises_runtime_error(self, tmp_path: Path) -> None:
         native_bam = _create_test_bam(
             tmp_path,
             "native",
@@ -357,8 +355,8 @@ class TestRunPipeline:
             [("ctg1", 20)],
         )
 
-        with patch("baleen.eventalign._pipeline._f5c.check_f5c", side_effect=RuntimeError("f5c not found")):
-            with pytest.raises(RuntimeError, match="f5c not found"):
+        with patch("baleen.eventalign._pipeline._eventalign.check_krill", side_effect=RuntimeError("krill not found")):
+            with pytest.raises(RuntimeError, match="krill not found"):
                 _ = run_pipeline(
                     native_bam=native_bam,
                     native_fastq=tmp_path / "native.fastq",
@@ -404,10 +402,9 @@ class TestRunPipeline:
 
         out_dir = tmp_path / "results"
         with (
-            patch("baleen.eventalign._pipeline._f5c.check_f5c", return_value="1.6"),
-            patch("baleen.eventalign._pipeline._f5c.index_fastq_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.index_blow5"),
-            patch("baleen.eventalign._pipeline._f5c.run_eventalign", side_effect=fake_run_eventalign),
+            patch("baleen.eventalign._pipeline._eventalign.check_krill", return_value="1.6"),
+            patch("baleen.eventalign._pipeline._eventalign.index_blow5"),
+            patch("baleen.eventalign._pipeline._eventalign.run_eventalign", side_effect=fake_run_eventalign),
             patch("baleen.eventalign._pipeline._dtw_distance", return_value=1.23),
         ):
             _ = run_pipeline(
@@ -448,7 +445,7 @@ class TestSaveLoadResults:
             )
         }
         metadata = PipelineMetadata(
-            f5c_version="1.6",
+            eventalign_version="1.6",
             min_depth=1,
             use_cuda=None,
             padding=0,
@@ -467,4 +464,4 @@ class TestSaveLoadResults:
             loaded_results["ctg1"].positions[10].distance_matrix,
             matrix,
         )
-        assert loaded_meta.f5c_version == "1.6"
+        assert loaded_meta.eventalign_version == "1.6"

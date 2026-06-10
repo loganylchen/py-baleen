@@ -19,7 +19,7 @@ from tqdm.auto import tqdm
 
 from baleen import _dtw
 from baleen.eventalign import _bam
-from baleen.eventalign import _f5c
+from baleen.eventalign import _eventalign
 from baleen.eventalign import _signal
 
 logger = logging.getLogger(__name__)
@@ -276,7 +276,7 @@ class ContigResult:
 
 @dataclass
 class PipelineMetadata:
-    f5c_version: str
+    eventalign_version: str
     min_depth: int
     use_cuda: Optional[bool]
     padding: int
@@ -495,7 +495,7 @@ def _process_contig(
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
-    extra_f5c_args: Optional[list[str]],
+    pore: str,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -589,9 +589,9 @@ def _process_contig(
     native_tsv = contig_tmp / "native.eventalign.tsv"
     ivt_tsv = contig_tmp / "ivt.eventalign.tsv"
 
-    logger.info("    Running f5c eventalign (native)...")
+    logger.info("    Running krill eventalign (native)...")
     ea_t0 = time.perf_counter()
-    _ = _f5c.run_eventalign(
+    _ = _eventalign.run_eventalign(
         native_contig_bam,
         ref_fasta,
         native_fastq,
@@ -599,11 +599,11 @@ def _process_contig(
         native_tsv,
         rna=rna,
         kmer_model=kmer_model,
-        extra_args=extra_f5c_args,
         min_mapq=min_mapq,
+        pore=pore,
     )
-    logger.info("    Running f5c eventalign (IVT)...")
-    _ = _f5c.run_eventalign(
+    logger.info("    Running krill eventalign (IVT)...")
+    _ = _eventalign.run_eventalign(
         ivt_contig_bam,
         ref_fasta,
         ivt_fastq,
@@ -611,8 +611,8 @@ def _process_contig(
         ivt_tsv,
         rna=rna,
         kmer_model=kmer_model,
-        extra_args=extra_f5c_args,
         min_mapq=min_mapq,
+        pore=pore,
     )
     logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
 
@@ -786,7 +786,7 @@ def _process_contig_streaming(
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
-    extra_f5c_args: Optional[list[str]],
+    pore: str,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -868,7 +868,7 @@ def _process_contig_streaming(
         padding=padding,
         rna=rna,
         kmer_model=kmer_model,
-        extra_f5c_args=extra_f5c_args,
+        pore=pore,
         min_mapq=min_mapq,
         primary_only=primary_only,
         cleanup_temp=cleanup_temp,
@@ -978,7 +978,7 @@ def run_pipeline(
     cleanup_temp: bool = True,
     rna: bool = True,
     kmer_model: Optional[str] = None,
-    extra_f5c_args: Optional[list[str]] = None,
+    pore: str = _eventalign.DEFAULT_PORE,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1003,8 +1003,8 @@ def run_pipeline(
                 min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
                 subsample, subsample_n, gpu_memory_limit)
-    logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
-                cleanup_temp, kmer_model, extra_f5c_args)
+    logger.info("  cleanup_temp=%s  kmer_model=%s  pore=%s",
+                cleanup_temp, kmer_model, pore)
     logger.info("  DTW backend:  %s  (GPU=%s)",
                 _dtw.backend(), _dtw.CUDA_AVAILABLE)
     logger.info("=" * 60)
@@ -1032,22 +1032,18 @@ def run_pipeline(
     ivt_blow5 = Path(ivt_blow5)
     ref_fasta = Path(ref_fasta)
 
-    # ---- Step 1: f5c version check ----
-    logger.info("[Step 1/6] Checking f5c availability...")
-    f5c_version = _f5c.check_f5c()
-    logger.info("[Step 1/6] f5c version %s OK", f5c_version)
+    # ---- Step 1: krill engine check ----
+    logger.info("[Step 1/6] Checking krill availability...")
+    eventalign_version = _eventalign.check_krill()
+    logger.info("[Step 1/6] krill version %s OK", eventalign_version)
 
     # ---- Step 2: Indexing ----
-    logger.info("[Step 2/6] Indexing FASTQ and BLOW5 files...")
+    logger.info("[Step 2/6] Indexing BLOW5 files...")
     step_t0 = time.perf_counter()
-    logger.info("  Indexing native FASTQ against BLOW5...")
-    _f5c.index_fastq_blow5(native_fastq, native_blow5)
-    logger.info("  Indexing IVT FASTQ against BLOW5...")
-    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
     logger.info("  Indexing native BLOW5...")
-    _f5c.index_blow5(native_blow5)
+    _eventalign.index_blow5(native_blow5)
     logger.info("  Indexing IVT BLOW5...")
-    _f5c.index_blow5(ivt_blow5)
+    _eventalign.index_blow5(ivt_blow5)
     logger.info("[Step 2/6] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 3: BAM validation & contig stats ----
@@ -1094,7 +1090,7 @@ def run_pipeline(
             logger.info("  SKIP: %s — %s", fr.contig, fr.reason.value)
 
     metadata = PipelineMetadata(
-        f5c_version=f5c_version,
+        eventalign_version=eventalign_version,
         min_depth=min_depth,
         use_cuda=use_cuda,
         padding=padding,
@@ -1149,7 +1145,7 @@ def run_pipeline(
                         padding=padding,
                         rna=rna,
                         kmer_model=kmer_model,
-                        extra_f5c_args=extra_f5c_args,
+                        pore=pore,
                         min_mapq=min_mapq,
                         primary_only=primary_only,
                         cleanup_temp=cleanup_temp,
@@ -1206,7 +1202,7 @@ def run_pipeline(
                     padding=padding,
                     rna=rna,
                     kmer_model=kmer_model,
-                    extra_f5c_args=extra_f5c_args,
+                    pore=pore,
                     min_mapq=min_mapq,
                     primary_only=primary_only,
                     cleanup_temp=cleanup_temp,
@@ -1256,7 +1252,7 @@ def run_pipeline_streaming(
     cleanup_temp: bool = True,
     rna: bool = True,
     kmer_model: Optional[str] = None,
-    extra_f5c_args: Optional[list[str]] = None,
+    pore: str = _eventalign.DEFAULT_PORE,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1333,7 +1329,7 @@ def run_pipeline_streaming(
                 run_hmm, legacy_scoring, mod_threshold)
     logger.info("  target_contigs=%s  keep_intermediate=%s  cleanup_temp=%s",
                 target_contigs, keep_intermediate, cleanup_temp)
-    logger.info("  kmer_model=%s  extra_f5c_args=%s", kmer_model, extra_f5c_args)
+    logger.info("  kmer_model=%s  pore=%s", kmer_model, pore)
     logger.info("=" * 60)
 
     if threads < 1:
@@ -1356,22 +1352,20 @@ def run_pipeline_streaming(
     ivt_blow5 = Path(ivt_blow5)
     ref_fasta = Path(ref_fasta)
 
-    # ---- Step 1: f5c version check ----
-    logger.info("[Step 1/5] Checking f5c availability...")
-    f5c_version = _f5c.check_f5c()
-    logger.info("[Step 1/5] f5c version %s OK", f5c_version)
+    # ---- Step 1: krill engine check ----
+    logger.info("[Step 1/5] Checking krill availability...")
+    eventalign_version = _eventalign.check_krill()
+    logger.info("[Step 1/5] krill version %s OK", eventalign_version)
 
     # ---- Step 2: Indexing ----
-    logger.info("[Step 2/5] Indexing FASTQ and BLOW5 files...")
+    logger.info("[Step 2/5] Indexing BLOW5 files...")
     step_t0 = time.perf_counter()
-    _f5c.index_fastq_blow5(native_fastq, native_blow5)
-    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
-    _f5c.index_blow5(native_blow5)
-    _f5c.index_blow5(ivt_blow5)
+    _eventalign.index_blow5(native_blow5)
+    _eventalign.index_blow5(ivt_blow5)
     logger.info("[Step 2/5] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 2.5: Read-ID intersection (BAM ∩ FASTQ ∩ BLOW5) ----
-    # f5c eventalign silently drops BAM reads whose UUIDs are not in
+    # eventalign silently drops BAM reads whose UUIDs are not in
     # the BLOW5 signal file; computing the intersection up-front keeps
     # contig stats, ``min_depth`` filtering, and subsampling all in
     # sync with the read set that will actually produce signals.
@@ -1462,7 +1456,7 @@ def run_pipeline_streaming(
                 len(passed_contigs), _fmt_elapsed(time.perf_counter() - step_t0))
 
     metadata = PipelineMetadata(
-        f5c_version=f5c_version,
+        eventalign_version=eventalign_version,
         min_depth=min_depth,
         use_cuda=use_cuda,
         padding=padding,
@@ -1619,7 +1613,7 @@ def run_pipeline_streaming(
             padding=padding,
             rna=rna,
             kmer_model=kmer_model,
-            extra_f5c_args=extra_f5c_args,
+            pore=pore,
             min_mapq=min_mapq,
             primary_only=primary_only,
             cleanup_temp=cleanup_temp,
