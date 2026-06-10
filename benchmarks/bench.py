@@ -105,7 +105,7 @@ def _gpu_info() -> dict:
 
 
 def _env_snapshot() -> dict:
-    from baleen._cuda_dtw import CUDA_AVAILABLE
+    from baleen._dtw import CUDA_AVAILABLE
     env = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "hostname": platform.node(),
@@ -264,11 +264,11 @@ def _summarize_per_contig(values: list[float]) -> dict:
 # Classification tiers. Order matters (first match wins).
 # Each tier is (bucket_name, filepath_fragments, funcname_fragments).
 # Funcname matching catches built-in C extensions where filepath is "~",
-# e.g. "{built-in method baleen._cuda_dtw._cuda_dtw.dtw_multi_position_pairwise}".
+# e.g. "{built-in method krill._krill.dtw_multi_position_pairwise}".
 _BUCKET_PATTERNS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # Baleen project modules — match by filename fragment, also by funcname
-    # so built-ins like _cuda_dtw's C kernel land in the right bucket.
-    ("dtw",          ("_cuda_dtw",),                          ("_cuda_dtw",)),
+    # so built-ins like krill's C DTW kernel land in the right bucket.
+    ("dtw",          ("_dtw.py", "krill"),                    ("krill", "dtw")),
     ("hmm_training", ("_hmm_training.py",),                   ()),
     ("hmm",          ("_hierarchical.py",),                   ()),
     ("probability",  ("_probability.py",),                    ()),

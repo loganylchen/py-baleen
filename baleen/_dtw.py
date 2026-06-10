@@ -14,7 +14,19 @@ from typing import Optional
 
 import numpy as np
 
-import krill
+try:
+    import krill
+except ModuleNotFoundError as exc:  # pragma: no cover - install-time guard
+    raise ModuleNotFoundError(
+        "baleen requires the 'krill' engine (DTW + eventalign), which is not on "
+        "PyPI. Install it from the project index, e.g.:\n"
+        "    pip install krill --no-deps "
+        "--index-url https://loganylchen.github.io/krill-dist/cu122/simple/  "
+        "(GPU/cu122)\n"
+        "    pip install krill --no-deps "
+        "--index-url https://loganylchen.github.io/krill-dist/simple/  (CPU)\n"
+        "or use a prebuilt baleen Docker image."
+    ) from exc
 
 _log = logging.getLogger(__name__)
 

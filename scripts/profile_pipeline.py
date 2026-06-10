@@ -155,7 +155,7 @@ def profile_contig(
     run_hmm: bool,
 ) -> ContigProfile:
     from baleen.eventalign import _bam, _f5c, _signal
-    from baleen import _cuda_dtw
+    from baleen import _dtw
 
     prof = ContigProfile(
         contig=contig,
@@ -285,7 +285,7 @@ def profile_contig(
             all_signal_lists = [d[4] for d in position_data]
 
             # Use the same chunking as the real pipeline
-            total_gpu = _cuda_dtw.estimate_gpu_memory(all_signal_lists) if use_cuda else 0
+            total_gpu = _dtw.estimate_gpu_memory(all_signal_lists) if use_cuda else 0
             gpu_mem = 80 * 1024**3  # assume 80GB for chunk sizing
             chunk_mem_limit = int(gpu_mem * 0.8)
 
@@ -293,7 +293,7 @@ def profile_contig(
             current_chunk: list[int] = []
             current_estimate = 0
             for i, sigs in enumerate(all_signal_lists):
-                pos_estimate = _cuda_dtw.estimate_gpu_memory([sigs])
+                pos_estimate = _dtw.estimate_gpu_memory([sigs])
                 if current_chunk and current_estimate + pos_estimate > chunk_mem_limit:
                     chunks.append(current_chunk)
                     current_chunk = [i]
@@ -311,7 +311,7 @@ def profile_contig(
             for chunk_idx, chunk_indices in enumerate(chunks):
                 chunk_signals = [all_signal_lists[i] for i in chunk_indices]
                 chunk_t0 = time.perf_counter()
-                chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+                chunk_matrices = _dtw.dtw_multi_position_pairwise(
                     chunk_signals,
                     use_open_start=False,
                     use_open_end=False,
@@ -410,15 +410,15 @@ def main():
     args = parser.parse_args()
 
     from baleen.eventalign import _bam, _f5c
-    from baleen import _cuda_dtw
+    from baleen import _dtw
     import tempfile
     from datetime import datetime
 
     report = ProfileReport(
         timestamp=datetime.now().isoformat(),
-        cuda_available=_cuda_dtw.CUDA_AVAILABLE,
+        cuda_available=_dtw.CUDA_AVAILABLE,
         cuda_used=args.use_cuda,
-        dtw_backend=_cuda_dtw.backend(),
+        dtw_backend=_dtw.backend(),
         threads=args.threads,
         subsample_n=args.subsample_n,
         padding=args.padding,
