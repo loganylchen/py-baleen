@@ -943,7 +943,8 @@ def _process_contig_streaming(
         import pysam
         bam_header = pysam.AlignmentHeader.from_dict(bam_header_dict)
         bam_path = per_contig_dir / f"{safe_name}.bam"
-        flush_contig_to_bam(cmr, native_bam, ivt_bam, bam_header, bam_path)
+        flush_contig_to_bam(cmr, native_bam, ivt_bam, bam_header, bam_path,
+                             primary_only=primary_only)
 
     n_significant = sum(1 for s in sites if s.padj < 0.05)
     n_positions = len(cmr.position_stats)

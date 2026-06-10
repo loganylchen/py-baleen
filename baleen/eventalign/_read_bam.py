@@ -62,6 +62,7 @@ def flush_contig_to_bam(
     ivt_bam: PathLike,
     header: pysam.AlignmentHeader,
     out_path: PathLike,
+    primary_only: bool = True,
 ) -> Path:
     """Write a single contig's read-level mod calls to one coordinate-sorted BAM slice.
 
@@ -127,6 +128,7 @@ def flush_contig_to_bam(
                     _scan_and_write(
                         read_iter, bam_out, read_positions,
                         is_native, rg_label, seen_reads,
+                        primary_only=primary_only,
                     )
         # Coordinate-sort the slice (single-threaded; the slice is small
         # enough that parallelism here is mostly overhead).
@@ -369,6 +371,7 @@ def _scan_and_write(
     is_native: bool,
     rg_label: str,
     seen_reads: set[str],
+    primary_only: bool = True,
 ) -> tuple[int, int]:
     """Iterate *read_iter*, copying matching reads to *bam_out* with MM/ML tags.
 
@@ -379,7 +382,9 @@ def _scan_and_write(
     n_skipped_mapping = 0
 
     for read in read_iter:
-        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+        if read.is_unmapped:
+            continue
+        if primary_only and (read.is_secondary or read.is_supplementary):
             continue
 
         name = read.query_name
