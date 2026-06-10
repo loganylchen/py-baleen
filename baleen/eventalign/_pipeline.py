@@ -59,7 +59,7 @@ def _sanitize_contig_filename(name: str) -> str:
 # using different ``--min-depth``, modified BAMs, etc.
 
 _RESUME_PARAMS_FILENAME = ".run_params.json"
-_RESUME_FINGERPRINT_SCHEMA = 1
+_RESUME_FINGERPRINT_SCHEMA = 2
 
 
 def _file_fingerprint(path: Optional[PathLike]) -> Optional[dict]:
@@ -99,6 +99,7 @@ def _compute_resume_fingerprint(
     run_hmm: bool,
     target_contigs: Optional[list[str]],
     read_intersection: bool,
+    pore: str,
 ) -> dict:
     """Build a JSON-serializable dict capturing everything that would
     invalidate a partial run.
@@ -119,6 +120,7 @@ def _compute_resume_fingerprint(
             "depth_mode": str(depth_mode),
             "padding": int(padding),
             "min_mapq": int(min_mapq),
+            "pore": str(pore),
             "primary_only": bool(primary_only),
             "subsample": bool(subsample),
             "subsample_n": int(subsample_n),
@@ -600,6 +602,7 @@ def _process_contig(
         rna=rna,
         kmer_model=kmer_model,
         min_mapq=min_mapq,
+        primary_only=primary_only,
         pore=pore,
     )
     logger.info("    Running krill eventalign (IVT)...")
@@ -612,6 +615,7 @@ def _process_contig(
         rna=rna,
         kmer_model=kmer_model,
         min_mapq=min_mapq,
+        primary_only=primary_only,
         pore=pore,
     )
     logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
@@ -1516,6 +1520,7 @@ def run_pipeline_streaming(
         run_hmm=run_hmm,
         target_contigs=target_contigs,
         read_intersection=read_intersection,
+        pore=pore,
     )
     resumed_summaries: list[ContigSummary] = []
     if resume:

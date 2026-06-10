@@ -37,6 +37,7 @@ dependencies = [
     "tqdm>=4.60",
     "pandas>=1.5",
     "pyslow5",
+    "pyfastx",
 ]
 
 [project.urls]

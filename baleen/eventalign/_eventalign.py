@@ -150,6 +150,7 @@ def run_eventalign(
     kmer_model: Optional[str] = None,  # unused
     extra_args: Optional[list[str]] = None,  # unused
     min_mapq: int = 0,
+    primary_only: bool = True,
     pore: str = DEFAULT_PORE,
 ) -> Path:
     """Align every primary, forward-mapped read in *bam* with krill.
@@ -178,7 +179,9 @@ def run_eventalign(
                 tmp_path.open("w", encoding="utf-8") as out:
             out.write(_HEADER + "\n")
             for aln in bamf.fetch(until_eof=True):
-                if aln.is_unmapped or aln.is_secondary or aln.is_supplementary:
+                if aln.is_unmapped:
+                    continue
+                if primary_only and (aln.is_secondary or aln.is_supplementary):
                     continue
                 if aln.mapping_quality < min_mapq:
                     continue
