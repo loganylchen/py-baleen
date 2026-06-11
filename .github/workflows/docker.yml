@@ -68,16 +68,18 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
-          # suffix applies to every generated tag; onlatest=true makes the
-          # implicit `latest` (from latest=auto on the default branch) become
-          # `latest-cpu`. Do NOT add an explicit type=raw value=latest — the
-          # suffix/onlatest rules only apply to the implicit latest tag.
+          # Global suffix applies to the branch/sha tags. The implicit latest
+          # is disabled (latest=false) to avoid a bare `:latest` that the two
+          # variant jobs would overwrite; instead the latest tag is declared
+          # explicitly with a PER-TAG suffix (global suffix/onlatest do not
+          # apply to an explicit raw latest) and gated to the default branch.
           flavor: |
-            latest=auto
-            suffix=-cpu,onlatest=true
+            latest=false
+            suffix=-cpu
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
+            type=raw,value=latest,suffix=-cpu,enable={{is_default_branch}}
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -120,16 +122,18 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
-          # suffix applies to every generated tag; onlatest=true makes the
-          # implicit `latest` (from latest=auto on the default branch) become
-          # `latest-gpu`. Do NOT add an explicit type=raw value=latest — the
-          # suffix/onlatest rules only apply to the implicit latest tag.
+          # Global suffix applies to the branch/sha tags. The implicit latest
+          # is disabled (latest=false) to avoid a bare `:latest` that the two
+          # variant jobs would overwrite; instead the latest tag is declared
+          # explicitly with a PER-TAG suffix (global suffix/onlatest do not
+          # apply to an explicit raw latest) and gated to the default branch.
           flavor: |
-            latest=auto
-            suffix=-gpu,onlatest=true
+            latest=false
+            suffix=-gpu
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
+            type=raw,value=latest,suffix=-gpu,enable={{is_default_branch}}
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
