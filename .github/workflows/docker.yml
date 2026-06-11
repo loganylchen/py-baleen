@@ -32,10 +32,17 @@ jobs:
             --index-url https://loganylchen.github.io/krill-dist/simple/
           pytest
 
+  # Both images live in a single repository `py-baleen`; the variant is a tag
+  # suffix, e.g. dev-cpu / dev-gpu / latest-cpu / latest-gpu / <sha>-cpu.
+  # Published to Docker Hub (${DH_USER}/py-baleen) and GHCR
+  # (ghcr.io/<owner>/py-baleen, public).
   build-cpu:
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -47,11 +54,23 @@ jobs:
           username: ${{ secrets.DH_USER }}
           password: ${{ secrets.DH_TOKEN }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DH_USER }}/${{ github.event.repository.name }}-cpu
+          images: |
+            ${{ secrets.DH_USER }}/py-baleen
+            ghcr.io/${{ github.repository_owner }}/py-baleen
+          flavor: |
+            latest=false
+            suffix=-cpu
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
@@ -70,6 +89,9 @@ jobs:
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -81,11 +103,23 @@ jobs:
           username: ${{ secrets.DH_USER }}
           password: ${{ secrets.DH_TOKEN }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DH_USER }}/${{ github.event.repository.name }}-gpu
+          images: |
+            ${{ secrets.DH_USER }}/py-baleen
+            ghcr.io/${{ github.repository_owner }}/py-baleen
+          flavor: |
+            latest=false
+            suffix=-gpu
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long

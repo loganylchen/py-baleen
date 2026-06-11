@@ -2,13 +2,13 @@
 
 **Hierarchical Bayesian framework for RNA modification detection from nanopore direct RNA sequencing**
 
-Baleen detects RNA modifications by comparing ionic current signals between native and IVT (in vitro transcribed) nanopore reads. It uses CUDA-accelerated Dynamic Time Warping (DTW) to compute signal distances and a three-stage hierarchical pipeline (Empirical-Bayes null estimation, anchored mixture EM, gap-aware HMM smoothing) to call per-read and per-site modification probabilities.
+Baleen detects RNA modifications by comparing ionic current signals between native and IVT (in vitro transcribed) nanopore reads. It uses the GPU-accelerated [krill](https://loganylchen.github.io/krill-dist/) engine for both eventalign and Dynamic Time Warping (DTW), and a three-stage hierarchical pipeline (Empirical-Bayes null estimation, anchored mixture EM, gap-aware HMM smoothing) to call per-read and per-site modification probabilities.
 
 📖 **Full documentation: <https://loganylchen.github.io/py-baleen/>**
 
 ## Key Features
 
-- **CUDA-accelerated DTW** — Batched multi-position GPU kernel processes all positions per contig in a single launch with concurrent CUDA streams. Automatic CPU fallback via tslearn.
+- **GPU-accelerated krill engine** — krill provides eventalign (HMM-free, forced-dense) and a batched multi-position DTW kernel that processes all positions per contig in a single launch. Automatic CPU fallback when no GPU is present.
 - **Three-stage hierarchical modification calling**
   - **V1**: Robust IVT null estimation with coverage-adaptive three-level shrinkage (position → local window → global)
   - **V2**: Anchored two-component mixture EM with continuous soft gating (replaces hard binary thresholds)
@@ -19,33 +19,49 @@ Baleen detects RNA modifications by comparing ionic current signals between nati
 
 ## Installation
 
+> **The Docker images are the easiest path** — they bundle baleen, the krill
+> engine, and slow5tools with nothing else to install. For a source install you
+> must add krill manually (it is not on PyPI).
+
+### Docker (recommended)
+
+Both variants share one repository, `py-baleen`, with a tag suffix
+(`-cpu` / `-gpu`). Published to Docker Hub and GHCR (public):
+
+```bash
+# Docker Hub
+docker pull btrspg/py-baleen:latest-cpu
+docker pull btrspg/py-baleen:latest-gpu      # requires NVIDIA Container Toolkit
+docker pull btrspg/py-baleen:dev-gpu         # latest dev build
+
+# GitHub Container Registry (public)
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
+```
+
+Tag scheme: `<ref>-<variant>` — `<ref>` is `latest` (from `main`), a branch
+(`dev`), or a commit SHA; `<variant>` is `cpu` or `gpu`.
+
 ### From source
 
 ```bash
-# With CUDA (auto-detected if nvcc is available)
+git clone https://github.com/loganylchen/py-baleen.git
+cd py-baleen
+
+# baleen is pure Python — no C extension to build.
 pip install .
 
-# CPU only (skip CUDA compilation)
-BALEEN_NO_CUDA=1 pip install .
-```
-
-### Docker
-
-Pre-built images are available on Docker Hub:
-
-```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
-
-# GPU (requires NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# Then install the krill engine (NOT on PyPI) from the project index:
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/cu122/simple/   # GPU
+# ...or the CPU index: https://loganylchen.github.io/krill-dist/simple/
 ```
 
 ### Prerequisites
 
-- Python >= 3.9
-- [f5c](https://github.com/hasindu2008/f5c) (>= v1.4) on `PATH` for event alignment
-- CUDA toolkit (optional, for GPU-accelerated DTW)
+- Python >= 3.10 (krill ships cp310+ wheels)
+- [krill](https://loganylchen.github.io/krill-dist/) — DTW + eventalign engine (required; install from the project index)
+- [slow5tools](https://github.com/hasindu2008/slow5tools) on `PATH` (indexes BLOW5 signal files)
+- NVIDIA GPU + driver (optional; the krill cu122 wheel runs DTW on the GPU)
 
 ## Quick Start
 
@@ -82,7 +98,7 @@ baleen aggregate \
 ### Docker usage
 
 ```bash
-docker run --rm -v $(pwd):/data loganylchen/py-baleen-cpu:latest run \
+docker run --rm -v $(pwd):/data btrspg/py-baleen:latest-cpu run \
     --native-bam /data/native.bam \
     --native-fastq /data/native.fq.gz \
     --native-blow5 /data/native.blow5 \
@@ -97,11 +113,11 @@ docker run --rm -v $(pwd):/data loganylchen/py-baleen-cpu:latest run \
 
 ```
 Native reads ──┐                                              ┌── site_results.tsv
-               ├── f5c eventalign ── Signal grouping ──┐      │   (per-site mod calls)
+               ├── krill eventalign ─ Signal grouping ──┐      │   (per-site mod calls)
 IVT reads ─────┘                                       │      │
                                                         ▼      │
 Reference ──────────────────────────── Pairwise DTW ──────┐    │
-                                       (CUDA / CPU)       │    │
+                                       (krill GPU/CPU)    │    │
                                                           ▼    │
                                                      ┌─────────┤
                                                      │ V1: Empirical-Bayes null
