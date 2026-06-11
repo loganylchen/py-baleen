@@ -113,7 +113,7 @@ def flush_contig_to_bam(
     sorted_tmp = out.with_suffix(out.suffix + ".tmp")
     success = False
     try:
-        seen_reads: set[str] = set()
+        seen_reads: set = set()
         with pysam.AlignmentFile(str(unsorted_path), "wb", header=header) as bam_out:
             for bam_path, is_native, rg_label in [
                 (native_bam, True, "native"),
@@ -370,7 +370,7 @@ def _scan_and_write(
     read_positions: dict[str, list[tuple[str, int, float, bool]]],
     is_native: bool,
     rg_label: str,
-    seen_reads: set[str],
+    seen_reads: set,
     primary_only: bool = True,
 ) -> tuple[int, int]:
     """Iterate *read_iter*, copying matching reads to *bam_out* with MM/ML tags.
@@ -390,9 +390,17 @@ def _scan_and_write(
         name = read.query_name
         if name not in read_positions:
             continue
-        if name in seen_reads:
+        # In primary-only mode there is one alignment per read, so dedup by
+        # name. With non-primary alignments included, dedup by alignment
+        # identity instead so secondary/supplementary records are not dropped
+        # as duplicates of the primary.
+        dedup_key = (
+            name if primary_only
+            else (name, read.flag, read.reference_start)
+        )
+        if dedup_key in seen_reads:
             continue
-        seen_reads.add(name)
+        seen_reads.add(dedup_key)
 
         # Collect HMM positions for this read (matching native/ivt)
         entries = [
