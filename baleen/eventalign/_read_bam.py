@@ -62,7 +62,6 @@ def flush_contig_to_bam(
     ivt_bam: PathLike,
     header: pysam.AlignmentHeader,
     out_path: PathLike,
-    primary_only: bool = True,
 ) -> Path:
     """Write a single contig's read-level mod calls to one coordinate-sorted BAM slice.
 
@@ -113,7 +112,7 @@ def flush_contig_to_bam(
     sorted_tmp = out.with_suffix(out.suffix + ".tmp")
     success = False
     try:
-        seen_reads: set = set()
+        seen_reads: set[str] = set()
         with pysam.AlignmentFile(str(unsorted_path), "wb", header=header) as bam_out:
             for bam_path, is_native, rg_label in [
                 (native_bam, True, "native"),
@@ -128,7 +127,6 @@ def flush_contig_to_bam(
                     _scan_and_write(
                         read_iter, bam_out, read_positions,
                         is_native, rg_label, seen_reads,
-                        primary_only=primary_only,
                     )
         # Coordinate-sort the slice (single-threaded; the slice is small
         # enough that parallelism here is mostly overhead).
@@ -370,8 +368,7 @@ def _scan_and_write(
     read_positions: dict[str, list[tuple[str, int, float, bool]]],
     is_native: bool,
     rg_label: str,
-    seen_reads: set,
-    primary_only: bool = True,
+    seen_reads: set[str],
 ) -> tuple[int, int]:
     """Iterate *read_iter*, copying matching reads to *bam_out* with MM/ML tags.
 
@@ -382,25 +379,15 @@ def _scan_and_write(
     n_skipped_mapping = 0
 
     for read in read_iter:
-        if read.is_unmapped:
-            continue
-        if primary_only and (read.is_secondary or read.is_supplementary):
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
 
         name = read.query_name
         if name not in read_positions:
             continue
-        # In primary-only mode there is one alignment per read, so dedup by
-        # name. With non-primary alignments included, dedup by alignment
-        # identity instead so secondary/supplementary records are not dropped
-        # as duplicates of the primary.
-        dedup_key = (
-            name if primary_only
-            else (name, read.flag, read.reference_start)
-        )
-        if dedup_key in seen_reads:
+        if name in seen_reads:
             continue
-        seen_reads.add(dedup_key)
+        seen_reads.add(name)
 
         # Collect HMM positions for this read (matching native/ivt)
         entries = [
