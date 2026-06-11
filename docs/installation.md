@@ -54,16 +54,25 @@ pip install ".[docs]"
 
 ## Docker
 
-Pre-built images bundle baleen + krill + slow5tools and are published on
-Docker Hub:
+Pre-built images bundle **baleen + krill + slow5tools** — nothing else to
+install. Both variants live in a single repository, `py-baleen`, distinguished
+by a tag **suffix** (`-cpu` / `-gpu`). Images are published to Docker Hub and
+GitHub Container Registry (GHCR).
 
 ```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
+# --- Docker Hub ---
+docker pull btrspg/py-baleen:latest-cpu          # CPU (released, from main)
+docker pull btrspg/py-baleen:latest-gpu          # GPU (requires NVIDIA Container Toolkit)
+docker pull btrspg/py-baleen:dev-cpu             # latest dev build (CPU)
+docker pull btrspg/py-baleen:dev-gpu             # latest dev build (GPU)
 
-# GPU (requires the NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# --- GitHub Container Registry (public) ---
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
+docker pull ghcr.io/loganylchen/py-baleen:dev-gpu
 ```
+
+Tag scheme: `<ref>-<variant>`, where `<ref>` is `latest` (on `main`), the
+branch name (e.g. `dev`), or a commit SHA, and `<variant>` is `cpu` or `gpu`.
 
 See the [Docker guide](guide/docker.md) for mounting data and running the
 pipeline inside a container.

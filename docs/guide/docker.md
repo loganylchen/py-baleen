@@ -1,26 +1,34 @@
 # Docker
 
 Baleen ships two Dockerfiles and a CI workflow that builds and pushes both
-images to Docker Hub on every push to `main`/`dev`:
+images on every push to `main`/`dev`. Both variants live in a **single
+repository** `py-baleen`; the variant is a tag **suffix** (`-cpu` / `-gpu`):
 
-| Dockerfile | Image | Base |
-|------------|-------|------|
-| `Dockerfile.cpu` | `<namespace>/py-baleen-cpu` | `python:3.11-slim`, krill CPU wheel. |
-| `Dockerfile.gpu` | `<namespace>/py-baleen-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, krill cu122 GPU wheel. |
+| Dockerfile | Tag suffix | Base |
+|------------|-----------|------|
+| `Dockerfile.cpu` | `-cpu` | `python:3.11-slim`, krill CPU wheel. |
+| `Dockerfile.gpu` | `-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, krill cu122 GPU wheel. |
 
-The `latest` tag is published only from `main`; branch and long-SHA tags are
-published for every build. Both images bundle the **krill** engine and
-**slow5tools**, and set `ENTRYPOINT ["baleen"]` with a `/data` working
-directory.
+Tags follow `<ref>-<variant>`: `latest-*` is published only from `main`;
+branch (`dev-*`) and long-SHA tags are published for every build. Both images
+bundle the **krill** engine and **slow5tools**, and set
+`ENTRYPOINT ["baleen"]` with a `/data` working directory.
+
+Published to two registries:
+
+- **Docker Hub** — `btrspg/py-baleen`
+- **GHCR (public)** — `ghcr.io/loganylchen/py-baleen`
 
 ## Pull a published image
 
 ```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
+# Docker Hub
+docker pull btrspg/py-baleen:latest-cpu
+docker pull btrspg/py-baleen:latest-gpu      # requires the NVIDIA Container Toolkit
+docker pull btrspg/py-baleen:dev-gpu         # latest dev build
 
-# GPU (requires the NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# GHCR (public)
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
 ```
 
 ## Build locally
@@ -30,10 +38,10 @@ Dockerfile directly:
 
 ```bash
 # CPU
-docker build -f Dockerfile.cpu -t py-baleen-cpu .
+docker build -f Dockerfile.cpu -t py-baleen:cpu .
 
 # GPU
-docker build -f Dockerfile.gpu -t py-baleen-gpu .
+docker build -f Dockerfile.gpu -t py-baleen:gpu .
 ```
 
 Both builds are pure Python (no C-extension compilation): they `pip install`
@@ -50,7 +58,7 @@ data into the container's `/data` working directory:
 # CPU
 docker run --rm \
     -v "$PWD":/data \
-    py-baleen-cpu run \
+    py-baleen:cpu run \
         --native-bam native.bam --native-fastq native.fq.gz --native-blow5 native.blow5 \
         --ivt-bam ivt.bam --ivt-fastq ivt.fq.gz --ivt-blow5 ivt.blow5 \
         --ref ref.fa -o results/
@@ -60,7 +68,7 @@ docker run --rm \
 # GPU — add --gpus all
 docker run --rm --gpus all \
     -v "$PWD":/data \
-    py-baleen-gpu run \
+    py-baleen:gpu run \
         --native-bam native.bam --native-fastq native.fq.gz --native-blow5 native.blow5 \
         --ivt-bam ivt.bam --ivt-fastq ivt.fq.gz --ivt-blow5 ivt.blow5 \
         --ref ref.fa -o results/
@@ -73,7 +81,7 @@ docker run --rm --gpus all \
 ## Verify the GPU image sees the device
 
 ```bash
-docker run --rm --gpus all --entrypoint python3 py-baleen-gpu \
+docker run --rm --gpus all --entrypoint python3 py-baleen:gpu \
     -c "from baleen._dtw import backend, is_available; \
 print('backend:', backend(), 'gpu:', is_available())"
 # Expected: backend: gpu gpu: True
