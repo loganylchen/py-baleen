@@ -9,9 +9,20 @@ commit conventions.
 git clone https://github.com/loganylchen/py-baleen.git
 cd py-baleen
 
-# Editable install with test deps (CPU-only build is fastest for iterating)
-BALEEN_NO_CUDA=1 pip install -e ".[test]"
+# Editable install with test deps
+pip install -e ".[test]"
 ```
+
+!!! note "krill is a required non-PyPI dependency"
+    The DTW + eventalign engine ships from a project index, not PyPI. Install
+    it separately (CPU or GPU `cu122` wheel):
+
+    ```bash
+    # CPU
+    pip install krill --no-deps --index-url https://loganylchen.github.io/krill-dist/simple/
+    # GPU (CUDA 12.2)
+    pip install krill --no-deps --index-url https://loganylchen.github.io/krill-dist/cu122/simple/
+    ```
 
 For docs work, add the docs extra:
 
@@ -31,8 +42,8 @@ pytest tests/test_dtw.py
 pytest tests/test_dtw.py::test_dtw_distance_basic -v
 ```
 
-CI runs the suite on Python 3.9, 3.10, and 3.11 with a CPU-only build
-(`BALEEN_NO_CUDA=1`). Make sure `pytest` passes locally before opening a PR.
+CI runs the suite on Python 3.10, 3.11, and 3.12. Make sure `pytest` passes
+locally before opening a PR.
 
 ## Benchmarks
 
@@ -66,19 +77,18 @@ Baleen uses [Conventional Commits](https://www.conventionalcommits.org/):
 
 A `!` after the type (e.g. `feat(filter)!:`) marks a breaking change.
 
-## CUDA notes
+## DTW engine
 
-The CUDA kernel is **FP32-only** by design (FP16 cripples Pascal consumer GPUs).
-If you touch the DTW kernel, verify any "skip work" optimisation actually reduces
-thread count or diagonal count — setting cells to infinity in place is pure
-overhead. See [Performance & Scaling](guide/performance.md#cuda-kernel-characteristics).
+The DTW kernels (GPU + CPU) live in the external **krill** package, not in this
+repo; `baleen/_dtw.py` is a thin shim over them. There is no in-tree CUDA code
+to build or maintain.
 
 ## Project layout
 
 ```
 baleen/
-├── _cuda_dtw/        # CUDA DTW + CPU fallback
-└── eventalign/       # pipeline, BAM/signal/f5c IO, hierarchical model, HMM training
+├── _dtw.py          # DTW shim over krill
+└── eventalign/       # pipeline, BAM/signal/eventalign IO, hierarchical model, HMM training
 tests/                # pytest suite
 benchmarks/           # bench.py harness
 docs/                 # this site (MkDocs Material)

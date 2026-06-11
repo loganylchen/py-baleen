@@ -1,12 +1,12 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "numpy"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "baleen"
-version = "0.3.0"
+version = "0.4.0"
 description = "Hierarchical Bayesian framework for RNA modification detection from nanopore direct RNA sequencing"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     {name = "Logan Chen"},
@@ -17,19 +17,27 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+# NOTE: the DTW + eventalign engine 'krill' is a required runtime dependency
+# but is NOT on PyPI — install it from the project index, e.g.
+#   pip install krill --no-deps \
+#     --index-url https://loganylchen.github.io/krill-dist/cu122/simple/   (GPU)
+#   pip install krill --no-deps \
+#     --index-url https://loganylchen.github.io/krill-dist/simple/         (CPU)
+# or use a prebuilt baleen Docker image. It is intentionally omitted below so a
+# plain `pip install .` does not fail looking for it on PyPI.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.9",
-    "tslearn>=0.6",
     "pysam>=0.21",
     "tqdm>=4.60",
     "pandas>=1.5",
     "pyslow5",
+    "pyfastx",
 ]
 
 [project.urls]

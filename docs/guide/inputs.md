@@ -28,26 +28,23 @@ samtools index native.bam
 # Reference FASTA
 samtools faidx ref.fa
 
-# BLOW5 signal index (slow5tools)
+# BLOW5 signal index (slow5tools) — produces nanopore.blow5.idx
 slow5tools index native.blow5
-
-# FASTQ read index for f5c (produces .fq.gz.index, .index.fai, .index.gzi, .index.readdb)
-f5c index --slow5 native.blow5 native.fq.gz
 ```
 
-!!! note "f5c read database"
-    `f5c index` writes a `.readdb` mapping read IDs to signal records. When
-    present, Baleen reads read IDs from this cheap index instead of decompressing
-    the whole FASTQ — see below.
+!!! note "No event-alignment index step"
+    The krill engine reads the BLOW5 signal directly via pyslow5, so it only
+    needs the `slow5tools index` above. There is no separate FASTQ read-index
+    step — FASTQ read IDs are parsed straight from the FASTQ headers.
 
 ## Read-ID intersection
 
-`f5c eventalign` **silently drops** any BAM read whose UUID is absent from the
+eventalign **silently drops** any BAM read whose UUID is absent from the
 BLOW5 signal file. If your BAM contains reads that have no corresponding raw
 signal (a common result of separate basecalling/alignment and signal-export
 steps), those reads survive BAM parsing but vanish during event alignment.
 
-Without correction this biases everything computed before `f5c` runs:
+Without correction this biases everything computed before eventalign runs:
 
 - **depth statistics** count reads that will never produce signal,
 - **`--min-depth` filtering** keeps or drops contigs against the wrong count,
@@ -63,14 +60,14 @@ reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)
 
 Every downstream stage — contig statistics, the `--min-depth` filter,
 subsampling, and the per-contig BAM split — is gated on this intersection, so
-the read set Baleen reasons about is exactly the one `f5c` will align.
+the read set Baleen reasons about is exactly the one eventalign will align.
 
 ### How read IDs are enumerated
 
 | Source | Method |
 |--------|--------|
 | BAM | Iterate alignments, collect `query_name`. |
-| FASTQ | Prefer the f5c `.index.readdb` (read-id column) when present; otherwise parse FASTQ headers. |
+| FASTQ | Parse read IDs from the FASTQ headers. (If a legacy `<fastq>.index.readdb` file is present it is used instead — krill no longer creates one, so this only affects directories left over from an old f5c run.) |
 | BLOW5 | `pyslow5.Open(path).get_read_ids()`. |
 
 The intersection runs by default. Disable it with `--no-read-intersection` if

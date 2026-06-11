@@ -4,14 +4,16 @@
 
 | Requirement | Notes |
 |-------------|-------|
-| Python ≥ 3.9 | 3.9 – 3.11 are tested. |
-| [f5c](https://github.com/hasindu2008/f5c) ≥ 1.4 | Must be on `PATH`. Used for nanopore event alignment. |
-| CUDA toolkit | **Optional.** Enables GPU-accelerated DTW. Without it, Baleen falls back to a CPU (`tslearn`) backend automatically. |
+| Python ≥ 3.10 | 3.10 – 3.12 are tested. (krill ships cp310+ wheels.) |
+| [krill](https://loganylchen.github.io/krill-dist/) | DTW + eventalign engine. **Required.** Not on PyPI — install from the project index (see below). |
+| [slow5tools](https://github.com/hasindu2008/slow5tools) | Must be on `PATH`. Used to index BLOW5 signal files (`slow5tools index`). |
+| NVIDIA GPU + driver | **Optional.** The krill cu122 wheel runs DTW on the GPU. Without a GPU, install the plain krill wheel for a CPU backend. |
 
-!!! note "f5c is an external tool"
-    Baleen shells out to the `f5c` binary; it is not installed by `pip`.
-    Install it separately and make sure `f5c --version` works from your shell
-    before running the pipeline.
+!!! note "krill is not on PyPI"
+    Baleen's DTW and eventalign run through the `krill` package, which is
+    published on a project index rather than PyPI. A plain `pip install baleen`
+    will **not** pull it — install krill explicitly (below) or use a Docker
+    image, which bundles krill and slow5tools for you.
 
 ## Install from source
 
@@ -19,37 +21,26 @@
 git clone https://github.com/loganylchen/py-baleen.git
 cd py-baleen
 
-# With CUDA (auto-detected if `nvcc` is available)
+# baleen is pure Python — no C extension to build.
 pip install .
 ```
 
-### CPU-only build
-
-Skip CUDA compilation entirely:
+Then install the krill engine from the project index:
 
 ```bash
-BALEEN_NO_CUDA=1 pip install .
+# GPU (CUDA 12.2 wheel) — recommended when a GPU is available
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/cu122/simple/
+
+# CPU-only
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/simple/
 ```
 
-### Targeting specific GPU architectures
-
-By default the build compiles for a broad set of compute capabilities. To
-restrict (faster builds) or target a specific GPU, set `BALEEN_CUDA_ARCHS` to a
-comma-separated list of compute capabilities **without dots**:
-
-```bash
-# Ampere (8.6) + Hopper (9.0)
-BALEEN_CUDA_ARCHS=86,90 pip install .
-
-# Auto-detect the GPU currently installed
-BALEEN_CUDA_ARCHS=native pip install .
-```
-
-| Environment variable | Effect |
-|----------------------|--------|
-| `BALEEN_NO_CUDA=1` | Skip CUDA compilation; CPU backend only. |
-| `BALEEN_CUDA_ARCHS=86,90` | Compile only for the listed compute capabilities. |
-| `BALEEN_CUDA_ARCHS=native` | Auto-detect and target the installed GPU. |
+!!! warning "krill install rules"
+    Install krill's runtime deps (`numpy scipy pyslow5 pyfastx`) from PyPI
+    first, then install krill itself with `--no-deps` from the project index.
+    Do **not** use `krill[...]` extras or `--extra-index-url`.
 
 ## Install with extras
 
@@ -63,7 +54,8 @@ pip install ".[docs]"
 
 ## Docker
 
-Pre-built images are published on Docker Hub:
+Pre-built images bundle baleen + krill + slow5tools and are published on
+Docker Hub:
 
 ```bash
 # CPU
@@ -87,7 +79,7 @@ python -c "import baleen; print('baleen', baleen.__name__, 'import OK')"
 To confirm which DTW backend was selected:
 
 ```python
-from baleen._cuda_dtw import backend, is_available
-print("DTW backend:", backend())        # "cuda" or "cpu"
-print("CUDA available:", is_available())
+from baleen._dtw import backend, is_available
+print("DTW backend:", backend())        # "gpu" or "cpu"
+print("GPU available:", is_available())
 ```

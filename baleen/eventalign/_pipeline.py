@@ -17,9 +17,9 @@ import numpy as np
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from baleen import _cuda_dtw
+from baleen import _dtw
 from baleen.eventalign import _bam
-from baleen.eventalign import _f5c
+from baleen.eventalign import _eventalign
 from baleen.eventalign import _signal
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def _sanitize_contig_filename(name: str) -> str:
 # using different ``--min-depth``, modified BAMs, etc.
 
 _RESUME_PARAMS_FILENAME = ".run_params.json"
-_RESUME_FINGERPRINT_SCHEMA = 1
+_RESUME_FINGERPRINT_SCHEMA = 2
 
 
 def _file_fingerprint(path: Optional[PathLike]) -> Optional[dict]:
@@ -99,6 +99,7 @@ def _compute_resume_fingerprint(
     run_hmm: bool,
     target_contigs: Optional[list[str]],
     read_intersection: bool,
+    pore: str,
 ) -> dict:
     """Build a JSON-serializable dict capturing everything that would
     invalidate a partial run.
@@ -119,6 +120,7 @@ def _compute_resume_fingerprint(
             "depth_mode": str(depth_mode),
             "padding": int(padding),
             "min_mapq": int(min_mapq),
+            "pore": str(pore),
             "primary_only": bool(primary_only),
             "subsample": bool(subsample),
             "subsample_n": int(subsample_n),
@@ -157,6 +159,19 @@ def _validate_resume_compatibility(
         raise RuntimeError(
             f"Cannot resume: failed to read {fp_path}: {exc}"
         ) from exc
+
+    # A schema bump signals an incompatible fingerprint/output format (e.g. a
+    # new param or a change in how slices are written); reject outright so old
+    # partial outputs are never silently mixed with new ones.
+    prior_schema = prior.get("schema_version")
+    curr_schema = current.get("schema_version")
+    if prior_schema != curr_schema:
+        raise RuntimeError(
+            "Cannot resume: fingerprint schema mismatch "
+            f"(prior={prior_schema!r} now={curr_schema!r}).  The run was "
+            f"produced by an incompatible baleen version.  "
+            f"Delete {per_contig_dir} or run without --resume."
+        )
 
     mismatches: list[str] = []
     for section in ("inputs", "params"):
@@ -276,7 +291,7 @@ class ContigResult:
 
 @dataclass
 class PipelineMetadata:
-    f5c_version: str
+    eventalign_version: str
     min_depth: int
     use_cuda: Optional[bool]
     padding: int
@@ -306,8 +321,8 @@ class _SerializedPayload(TypedDict):
     metadata: PipelineMetadata
 
 
-_dtw_distance = cast(_DtwDistanceFn, _cuda_dtw.dtw_distance)
-_dtw_pairwise_varlen = _cuda_dtw.dtw_pairwise_varlen
+_dtw_distance = cast(_DtwDistanceFn, _dtw.dtw_distance)
+_dtw_pairwise_varlen = _dtw.dtw_pairwise_varlen
 
 
 def _compute_pairwise_distances(
@@ -324,7 +339,7 @@ def _compute_pairwise_distances(
     )
     t0 = time.perf_counter()
 
-    want_cuda = use_cuda is True or (use_cuda is None and _cuda_dtw.CUDA_AVAILABLE)
+    want_cuda = use_cuda is True or (use_cuda is None and _dtw.CUDA_AVAILABLE)
 
     if want_cuda:
         matrix = _dtw_pairwise_varlen(
@@ -342,17 +357,7 @@ def _compute_pairwise_distances(
 def _compute_pairwise_batch(
     signals: list[NDArray[np.float32]],
 ) -> NDArray[np.float64]:
-    from tslearn.metrics import dtw as _tslearn_dtw
-
-    n = len(signals)
-    prepped = [s.reshape(-1, 1) for s in signals]
-    matrix = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = float(_tslearn_dtw(prepped[i], prepped[j]))
-            matrix[i, j] = d
-            matrix[j, i] = d
-    return matrix
+    return _dtw_pairwise_varlen(signals, use_cuda=False)
 
 
 def _compute_pairwise_loop(
@@ -453,7 +458,7 @@ def _get_gpu_memory(cuda_devices: Optional[list[int]] = None) -> list[int]:
     list[int]
         Memory in bytes per device.  Falls back to ``[8 GB]`` on failure.
     """
-    all_mems = _cuda_dtw.get_per_device_memory()
+    all_mems = _dtw.get_per_device_memory()
     if not all_mems:
         return [8 * 1024 ** 3]
     if cuda_devices is not None:
@@ -505,7 +510,7 @@ def _process_contig(
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
-    extra_f5c_args: Optional[list[str]],
+    pore: str,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -599,9 +604,9 @@ def _process_contig(
     native_tsv = contig_tmp / "native.eventalign.tsv"
     ivt_tsv = contig_tmp / "ivt.eventalign.tsv"
 
-    logger.info("    Running f5c eventalign (native)...")
+    logger.info("    Running krill eventalign (native)...")
     ea_t0 = time.perf_counter()
-    _ = _f5c.run_eventalign(
+    _ = _eventalign.run_eventalign(
         native_contig_bam,
         ref_fasta,
         native_fastq,
@@ -609,11 +614,12 @@ def _process_contig(
         native_tsv,
         rna=rna,
         kmer_model=kmer_model,
-        extra_args=extra_f5c_args,
         min_mapq=min_mapq,
+        primary_only=primary_only,
+        pore=pore,
     )
-    logger.info("    Running f5c eventalign (IVT)...")
-    _ = _f5c.run_eventalign(
+    logger.info("    Running krill eventalign (IVT)...")
+    _ = _eventalign.run_eventalign(
         ivt_contig_bam,
         ref_fasta,
         ivt_fastq,
@@ -621,8 +627,9 @@ def _process_contig(
         ivt_tsv,
         rna=rna,
         kmer_model=kmer_model,
-        extra_args=extra_f5c_args,
         min_mapq=min_mapq,
+        primary_only=primary_only,
+        pore=pore,
     )
     logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
 
@@ -700,7 +707,7 @@ def _process_contig(
         current_estimate = 0
 
         for i, sigs in enumerate(all_signal_lists):
-            pos_estimate = _cuda_dtw.estimate_gpu_memory([sigs])
+            pos_estimate = _dtw.estimate_gpu_memory([sigs])
             if current_chunk and current_estimate + pos_estimate > chunk_mem_limit:
                 chunks.append(current_chunk)
                 current_chunk = [i]
@@ -716,9 +723,9 @@ def _process_contig(
 
         for chunk_idx, chunk_indices in enumerate(chunks):
             chunk_signals = [all_signal_lists[i] for i in chunk_indices]
-            estimated_bytes = _cuda_dtw.estimate_gpu_memory(chunk_signals)
+            estimated_bytes = _dtw.estimate_gpu_memory(chunk_signals)
 
-            chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+            chunk_matrices = _dtw.dtw_multi_position_pairwise(
                 chunk_signals,
                 use_cuda=use_cuda,
                 num_streams=num_cuda_streams,
@@ -796,7 +803,7 @@ def _process_contig_streaming(
     padding: int,
     rna: bool,
     kmer_model: Optional[str],
-    extra_f5c_args: Optional[list[str]],
+    pore: str,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -878,7 +885,7 @@ def _process_contig_streaming(
         padding=padding,
         rna=rna,
         kmer_model=kmer_model,
-        extra_f5c_args=extra_f5c_args,
+        pore=pore,
         min_mapq=min_mapq,
         primary_only=primary_only,
         cleanup_temp=cleanup_temp,
@@ -988,7 +995,7 @@ def run_pipeline(
     cleanup_temp: bool = True,
     rna: bool = True,
     kmer_model: Optional[str] = None,
-    extra_f5c_args: Optional[list[str]] = None,
+    pore: str = _eventalign.DEFAULT_PORE,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1013,11 +1020,10 @@ def run_pipeline(
                 min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
                 subsample, subsample_n, gpu_memory_limit)
-    logger.info("  cleanup_temp=%s  kmer_model=%s  extra_f5c_args=%s",
-                cleanup_temp, kmer_model, extra_f5c_args)
-    logger.info("  DTW backend:  %s  (CUDA=%s, tslearn=%s)",
-                _cuda_dtw.backend(), _cuda_dtw.CUDA_AVAILABLE,
-                _cuda_dtw.TSLEARN_AVAILABLE)
+    logger.info("  cleanup_temp=%s  kmer_model=%s  pore=%s",
+                cleanup_temp, kmer_model, pore)
+    logger.info("  DTW backend:  %s  (GPU=%s)",
+                _dtw.backend(), _dtw.CUDA_AVAILABLE)
     logger.info("=" * 60)
 
     # Validate threads parameter
@@ -1043,22 +1049,18 @@ def run_pipeline(
     ivt_blow5 = Path(ivt_blow5)
     ref_fasta = Path(ref_fasta)
 
-    # ---- Step 1: f5c version check ----
-    logger.info("[Step 1/6] Checking f5c availability...")
-    f5c_version = _f5c.check_f5c()
-    logger.info("[Step 1/6] f5c version %s OK", f5c_version)
+    # ---- Step 1: krill engine check ----
+    logger.info("[Step 1/6] Checking krill availability...")
+    eventalign_version = _eventalign.check_krill()
+    logger.info("[Step 1/6] krill version %s OK", eventalign_version)
 
     # ---- Step 2: Indexing ----
-    logger.info("[Step 2/6] Indexing FASTQ and BLOW5 files...")
+    logger.info("[Step 2/6] Indexing BLOW5 files...")
     step_t0 = time.perf_counter()
-    logger.info("  Indexing native FASTQ against BLOW5...")
-    _f5c.index_fastq_blow5(native_fastq, native_blow5)
-    logger.info("  Indexing IVT FASTQ against BLOW5...")
-    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
     logger.info("  Indexing native BLOW5...")
-    _f5c.index_blow5(native_blow5)
+    _eventalign.index_blow5(native_blow5)
     logger.info("  Indexing IVT BLOW5...")
-    _f5c.index_blow5(ivt_blow5)
+    _eventalign.index_blow5(ivt_blow5)
     logger.info("[Step 2/6] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 3: BAM validation & contig stats ----
@@ -1105,7 +1107,7 @@ def run_pipeline(
             logger.info("  SKIP: %s — %s", fr.contig, fr.reason.value)
 
     metadata = PipelineMetadata(
-        f5c_version=f5c_version,
+        eventalign_version=eventalign_version,
         min_depth=min_depth,
         use_cuda=use_cuda,
         padding=padding,
@@ -1160,7 +1162,7 @@ def run_pipeline(
                         padding=padding,
                         rna=rna,
                         kmer_model=kmer_model,
-                        extra_f5c_args=extra_f5c_args,
+                        pore=pore,
                         min_mapq=min_mapq,
                         primary_only=primary_only,
                         cleanup_temp=cleanup_temp,
@@ -1217,7 +1219,7 @@ def run_pipeline(
                     padding=padding,
                     rna=rna,
                     kmer_model=kmer_model,
-                    extra_f5c_args=extra_f5c_args,
+                    pore=pore,
                     min_mapq=min_mapq,
                     primary_only=primary_only,
                     cleanup_temp=cleanup_temp,
@@ -1267,7 +1269,7 @@ def run_pipeline_streaming(
     cleanup_temp: bool = True,
     rna: bool = True,
     kmer_model: Optional[str] = None,
-    extra_f5c_args: Optional[list[str]] = None,
+    pore: str = _eventalign.DEFAULT_PORE,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1344,7 +1346,7 @@ def run_pipeline_streaming(
                 run_hmm, legacy_scoring, mod_threshold)
     logger.info("  target_contigs=%s  keep_intermediate=%s  cleanup_temp=%s",
                 target_contigs, keep_intermediate, cleanup_temp)
-    logger.info("  kmer_model=%s  extra_f5c_args=%s", kmer_model, extra_f5c_args)
+    logger.info("  kmer_model=%s  pore=%s", kmer_model, pore)
     logger.info("=" * 60)
 
     if threads < 1:
@@ -1367,22 +1369,20 @@ def run_pipeline_streaming(
     ivt_blow5 = Path(ivt_blow5)
     ref_fasta = Path(ref_fasta)
 
-    # ---- Step 1: f5c version check ----
-    logger.info("[Step 1/5] Checking f5c availability...")
-    f5c_version = _f5c.check_f5c()
-    logger.info("[Step 1/5] f5c version %s OK", f5c_version)
+    # ---- Step 1: krill engine check ----
+    logger.info("[Step 1/5] Checking krill availability...")
+    eventalign_version = _eventalign.check_krill()
+    logger.info("[Step 1/5] krill version %s OK", eventalign_version)
 
     # ---- Step 2: Indexing ----
-    logger.info("[Step 2/5] Indexing FASTQ and BLOW5 files...")
+    logger.info("[Step 2/5] Indexing BLOW5 files...")
     step_t0 = time.perf_counter()
-    _f5c.index_fastq_blow5(native_fastq, native_blow5)
-    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
-    _f5c.index_blow5(native_blow5)
-    _f5c.index_blow5(ivt_blow5)
+    _eventalign.index_blow5(native_blow5)
+    _eventalign.index_blow5(ivt_blow5)
     logger.info("[Step 2/5] Indexing complete (%s)", _fmt_elapsed(time.perf_counter() - step_t0))
 
     # ---- Step 2.5: Read-ID intersection (BAM ∩ FASTQ ∩ BLOW5) ----
-    # f5c eventalign silently drops BAM reads whose UUIDs are not in
+    # eventalign silently drops BAM reads whose UUIDs are not in
     # the BLOW5 signal file; computing the intersection up-front keeps
     # contig stats, ``min_depth`` filtering, and subsampling all in
     # sync with the read set that will actually produce signals.
@@ -1473,7 +1473,7 @@ def run_pipeline_streaming(
                 len(passed_contigs), _fmt_elapsed(time.perf_counter() - step_t0))
 
     metadata = PipelineMetadata(
-        f5c_version=f5c_version,
+        eventalign_version=eventalign_version,
         min_depth=min_depth,
         use_cuda=use_cuda,
         padding=padding,
@@ -1533,6 +1533,7 @@ def run_pipeline_streaming(
         run_hmm=run_hmm,
         target_contigs=target_contigs,
         read_intersection=read_intersection,
+        pore=pore,
     )
     resumed_summaries: list[ContigSummary] = []
     if resume:
@@ -1630,7 +1631,7 @@ def run_pipeline_streaming(
             padding=padding,
             rna=rna,
             kmer_model=kmer_model,
-            extra_f5c_args=extra_f5c_args,
+            pore=pore,
             min_mapq=min_mapq,
             primary_only=primary_only,
             cleanup_temp=cleanup_temp,

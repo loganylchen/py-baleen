@@ -33,7 +33,13 @@ jobs:
           python-version: "3.11"
 
       - name: Install docs dependencies
-        run: BALEEN_NO_CUDA=1 pip install ".[docs]"
+        run: |
+          pip install ".[docs]"
+          # krill (engine) is not on PyPI; mkdocstrings imports baleen, which
+          # imports it. Install the CPU wheel from the project index.
+          pip install numpy scipy pyslow5 pyfastx
+          pip install krill --no-deps \
+            --index-url https://loganylchen.github.io/krill-dist/simple/
 
       - name: Build site (strict)
         run: mkdocs build --strict

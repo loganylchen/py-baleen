@@ -6,17 +6,20 @@ behaviour, and the knobs that control throughput.
 
 ## DTW backend
 
-The `_cuda_dtw` module selects a backend **at import time**:
+The `baleen._dtw` module is a thin shim over the
+[krill](https://loganylchen.github.io/krill-dist/) engine. The backend is
+selected by **which krill wheel is installed** plus device presence — not by a
+compile-time flag:
 
-- **CUDA (GPU)** if the `_cuda_dtw` C extension compiled with CUDA support.
-- **CPU (`tslearn`)** fallback otherwise.
+- **GPU** when krill's `cu122` wheel is installed and a CUDA device is present.
+- **CPU** otherwise (krill's plain wheel, or no device).
 
 Check which one is active:
 
 ```python
-from baleen._cuda_dtw import backend, is_available
-print("DTW backend:", backend())     # "cuda" or "cpu"
-print("CUDA available:", is_available())
+from baleen._dtw import backend, is_available
+print("DTW backend:", backend())     # "gpu" or "cpu"
+print("GPU available:", is_available())
 ```
 
 Force a backend per run:
@@ -54,18 +57,16 @@ without OOM.
 
 | Flag | Effect on performance |
 |------|-----------------------|
-| `--threads N` | Parallel contig workers (`ProcessPoolExecutor`). More workers = more concurrency, but each f5c call then gets fewer CPU threads. |
-| `--f5c-threads N` | CPU threads per `f5c eventalign` call. Default auto = `total_cores / threads`. |
+| `--threads N` | Parallel contig workers (`ProcessPoolExecutor`). More workers = more concurrency. |
 | `--subsample-n N` | Caps reads per condition per contig (default 300). Fewer reads → fewer DTW pairs → faster, at some statistical cost. |
 | `--no-subsample` | Disables the cap — slower, more memory, on deep data. |
 | `--min-depth` / `--depth-mode` | Skip shallow contigs entirely. |
 | `--target` | Restrict to specific contigs. |
 
-!!! tip "Balancing `--threads` and `--f5c-threads`"
-    `f5c` is itself multithreaded. If you set `--threads 16` on a 16-core
-    machine, the auto rule gives each f5c call only 1 thread. For
-    f5c-bound workloads, fewer pipeline workers with more f5c threads each can
-    be faster — profile both.
+!!! tip "`--threads` controls contig parallelism"
+    krill eventalign runs in-process, not as a separate multithreaded
+    subprocess, so there is no per-call thread budget to balance. `--threads`
+    simply sets how many contig workers run in parallel.
 
 ## Resuming long runs
 

@@ -204,6 +204,7 @@ class TestResumeFingerprintIncludesIntersection:
             padding=10, min_mapq=0, primary_only=True, subsample=True,
             subsample_n=300, legacy_scoring=False, mod_threshold=0.9,
             write_bam=True, run_hmm=True, target_contigs=None,
+            pore="rna002",
         )
         fp_on = _compute_resume_fingerprint(read_intersection=True, **kwargs)
         fp_off = _compute_resume_fingerprint(read_intersection=False, **kwargs)

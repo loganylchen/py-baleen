@@ -5,6 +5,31 @@ changes by theme; see the
 [full commit history](https://github.com/loganylchen/py-baleen/commits/dev) for
 detail.
 
+## v0.4.0
+
+### Changed
+
+- **krill engine replaces f5c + the in-tree CUDA DTW extension.** Both event
+  alignment and DTW now run through the
+  [krill](https://loganylchen.github.io/krill-dist/) package. GPU DTW is
+  bit-identical to the old in-tree kernel; eventalign is HMM-free forced-dense
+  and emits an f5c-format TSV, so every downstream stage is unchanged. krill
+  reads BLOW5 directly via pyslow5 — the old `f5c index` FASTQ-index step is
+  gone (you still need `slow5tools index` for the `.blow5.idx`).
+- **baleen is now pure Python** — no C extension, no `nvcc` build. krill installs
+  from a project index (cu122 GPU wheel or plain CPU wheel), not PyPI.
+
+### Added
+
+- **`--pore`** — select the krill pore model for eventalign (default `rna002`).
+
+### Removed
+
+- **`--f5c-threads`** — krill eventalign runs in-process, not as a separate
+  multithreaded subprocess.
+- **`BALEEN_NO_CUDA` / `BALEEN_CUDA_ARCHS`** build-time flags — the GPU/CPU split
+  is now decided by which krill wheel is installed.
+
 ## Unreleased (dev)
 
 ### Features

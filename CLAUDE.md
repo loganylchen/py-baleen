@@ -5,16 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build and Test Commands
 
 ```bash
-# Install package (CUDA auto-detected if nvcc available)
+# Install package (pure Python — no C extension to build)
 pip install .
 
-# Install CPU-only (skip CUDA compilation)
-BALEEN_NO_CUDA=1 pip install .
-
-# Target specific GPU archs (comma-separated compute capabilities without dot)
-BALEEN_CUDA_ARCHS=86,90 pip install .
-# Or auto-detect installed GPU
-BALEEN_CUDA_ARCHS=native pip install .
+# The DTW + eventalign engine 'krill' is a required runtime dependency that is
+# NOT on PyPI. Install it from the project index (GPU cu122 wheel, or CPU):
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/cu122/simple/   # GPU
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/simple/         # CPU
+# (Or use a prebuilt baleen Docker image, which bundles krill + slow5tools.)
 
 # Run all tests
 pytest
@@ -49,20 +49,19 @@ Conventional commits: `feat:`, `fix:`, `perf:`, `build:`, `bench:`, `ci:`, `refa
 
 ## Architecture Overview
 
-Baleen is a CUDA-accelerated DTW (Dynamic Time Warping) and nanopore signal analysis pipeline for detecting RNA modifications by comparing native and IVT (in vitro transcribed) nanopore signals.
+Baleen is a GPU-accelerated DTW (Dynamic Time Warping) and nanopore signal analysis pipeline for detecting RNA modifications by comparing native and IVT (in vitro transcribed) nanopore signals. The DTW and eventalign engine is provided by **krill**.
 
 ### Package Structure
 
 ```
 baleen/
 ├── __init__.py              # Re-exports public API from eventalign
-├── _cuda_dtw/               # CUDA DTW implementation with CPU fallback
-│   └── __init__.py          # Python wrapper (dtw_distance, dtw_pairwise, etc.)
+├── _dtw.py                  # DTW shim delegating to krill (+ GPU memory helpers)
 └── eventalign/              # Main analysis pipeline
     ├── __init__.py          # Public API exports
     ├── _pipeline.py         # run_pipeline(), save/load_results()
     ├── _bam.py              # BAM parsing, contig stats, filtering
-    ├── _f5c.py              # f5c eventalign CLI wrapper
+    ├── _eventalign.py       # krill eventalign wrapper (f5c-format TSV output)
     ├── _signal.py           # Signal extraction and grouping by position
     ├── _probability.py      # Modification probability algorithms
     ├── _hierarchical.py     # Hierarchical Bayesian + HMM pipeline (V1→V2→V3)
@@ -72,9 +71,9 @@ baleen/
 ### Data Flow
 
 1. **Input**: Native + IVT BAM/FASTQ/BLOW5 files + reference FASTA
-2. **Event alignment**: f5c eventalign produces per-read signal tables per position
+2. **Event alignment**: krill aligns each read's signal to its mapped reference subsequence (HMM-free, forced-dense) and emits an f5c-format per-position signal table
 3. **Signal grouping**: Group signals by genomic position, find common positions
-4. **DTW computation**: Pairwise DTW distance matrices per position (CUDA or tslearn fallback)
+4. **DTW computation**: Pairwise DTW distance matrices per position (krill GPU kernel, CPU fallback)
 5. **Modification calling**: Three-stage hierarchical pipeline:
    - V1: Empirical-Bayes null scoring with hierarchical shrinkage
    - V2: Anchored two-component mixture EM
@@ -90,11 +89,14 @@ baleen/
 
 ### DTW Backend Selection
 
-The `_cuda_dtw` module auto-selects backend at import time:
-- CUDA (GPU) if `_cuda_dtw` C extension compiled successfully
-- CPU (tslearn) fallback otherwise
+`baleen/_dtw.py` is a thin shim over krill's bundled DTW (same cuDTW++ kernel
+the project previously vendored as the `_cuda_dtw` C extension). krill
+auto-selects GPU when a device + GPU wheel are present, else CPU.
 
-Use `use_cuda=True/False` to force backend, or `None` for auto-select.
+Use `use_cuda=True/False` to force backend, or `None` for auto-select (mapped
+to krill's `use_gpu`). The pure-Python GPU memory-planning helpers
+(`estimate_gpu_memory`, `get_device_count`, `get_per_device_memory`) live in
+the shim since krill does not expose them.
 
 ### Modification Probability Algorithms
 
@@ -110,22 +112,27 @@ Three modes in `_hmm_training.py`:
 - **Semi-supervised**: Platt-scaling calibrator from labeled positions
 - **Supervised**: MLE transitions + KDE emissions from labeled trajectories
 
-## CUDA Kernel Architecture
+## DTW Engine (krill)
 
-- **FP32 only** — `DTWDistance<float>` template, always float. FP16 would break Pascal consumer GPUs (1/64 FP32 throughput).
-- **Wavefront parallelism**: one thread per row of cost matrix, diagonal sweep. `blockDim.x = 1024` (max threads per block). Three rolling diagonals in shared memory (~12 KB).
-- **One block per pair** for pairwise mode; grid.x = num_comparisons. Outer loop over reference sequences is serial.
-- **Cost function**: squared Euclidean distance, `sqrt` only at the end. Path matrix = nullptr for pairwise (no memory waste).
-- **No Sakoe-Chiba band** — a soft-band variant was tried and reverted because setting out-of-band cells to INF without reducing thread count/diagonals is pure overhead. A real band optimization requires skipping diagonals and sizing `blockDim.x` to `min(1024, 2*band_width+1)`.
-- Source files: `dtw.hpp` (kernel), `dtw_api.cpp` (Python-C bridge), `multithreading.cpp` (CPU thread pool).
+The DTW kernels (GPU + CPU) live in the **krill** package, not in this repo.
+krill ships the same cuDTW++ warp-shuffle kernel baleen previously vendored.
+The GPU path is bit-identical to that legacy kernel (verified during the swap);
+krill's CPU path resamples long signals to fixed buckets (GPU-consistent),
+which differs from the old tslearn fallback only on CPU-only installs.
+
+GPU vs CPU is decided by which krill wheel is installed (cu122 vs plain) plus
+device presence. krill exposes `dtw_distance`, `dtw_pairwise`,
+`dtw_pairwise_varlen`, `dtw_multi_position_pairwise`, `dtw_backend`,
+`dtw_available`.
 
 ## External Dependencies
 
-- **f5c**: External CLI tool for nanopore event alignment. Must be on PATH.
-- **pysam**: BAM file parsing
-- **tslearn**: CPU DTW fallback
-- **scipy**: Statistical functions, optimization
-- **numba** (optional): JIT-compiled HMM forward-backward kernel (`@njit(cache=True)`), kicks in when installed
+- **krill**: DTW + eventalign engine (not on PyPI; install from the project
+  index — cu122 GPU wheel or plain CPU wheel). Required.
+- **slow5tools**: CLI used to index BLOW5 (`slow5tools index`); must be on PATH.
+- **pyslow5 / pyfastx / pysam**: BLOW5 signal, reference FASTA, and BAM access.
+- **scipy**: Statistical functions, optimization.
+- **numba** (optional): JIT-compiled HMM forward-backward kernel (`@njit(cache=True)`), kicks in when installed.
 
 
 # CLAUDE.md

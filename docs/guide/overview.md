@@ -15,7 +15,7 @@ flowchart TD
     end
     N --> X[Read-ID intersection<br/>BAM ∩ FASTQ ∩ BLOW5]
     I --> X
-    X --> EA[f5c eventalign]
+    X --> EA[krill eventalign]
     R --> EA
     EA --> SG[Signal grouping by<br/>genomic position]
     SG --> DTW[Pairwise DTW distance<br/>matrices per position]
@@ -33,18 +33,23 @@ flowchart TD
 
 Before any signal work, Baleen computes
 `reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)` independently for each condition.
-`f5c` silently drops BAM reads whose UUIDs are absent from the BLOW5 signal
+eventalign silently drops BAM reads whose UUIDs are absent from the BLOW5 signal
 file; without the intersection, depth statistics, subsampling, and the
 `--min-depth` filter would all be computed against a read set larger than the
 one that actually yields signals. Every downstream stage is gated on this
 intersection. Disable with `--no-read-intersection`. See
 [Inputs › Read-ID intersection](inputs.md#read-id-intersection).
 
-### 1. Event alignment (`f5c eventalign`)
+### 1. Event alignment (`krill eventalign`)
 
-Each read's raw signal is aligned to its reference sequence, producing a table
-that maps reference positions to segments of the current signal. Baleen invokes
-the external `f5c` binary (RNA mode by default).
+Each read's raw signal is aligned to its mapped reference subsequence, producing
+a table that maps reference positions to segments of the current signal. Baleen
+uses the [krill](https://loganylchen.github.io/krill-dist/) engine (RNA mode by
+default). The alignment is HMM-free and forced-dense — every signal sample is
+assigned to a reference position with no read-vs-reference skips — and krill
+emits an f5c-format TSV, so every downstream stage is unchanged. krill reads the
+BLOW5 signal directly via pyslow5, so no separate event-alignment index step is
+required.
 
 ### 2. Signal grouping
 
@@ -58,8 +63,8 @@ more context.
 For every retained position, Baleen computes a **pairwise DTW distance matrix**
 between native and IVT signal segments. DTW (Dynamic Time Warping) is robust to
 the local time-warping inherent in nanopore translocation. The computation runs
-on a [CUDA backend](performance.md#dtw-backend) when available, with an
-automatic `tslearn` CPU fallback.
+on krill's [GPU backend](performance.md#dtw-backend) when available, with an
+automatic CPU fallback.
 
 ### 4. Three-stage hierarchical modification calling
 

@@ -1,44 +1,34 @@
-# --- Build stage ---
-FROM python:3.11-slim AS builder
+# CPU production image: baleen + krill (CPU wheel) + slow5tools.
+# No f5c, no CUDA build — krill is the DTW + eventalign engine and is pure
+# Python to install (a prebuilt wheel from the project index).
+FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget build-essential zlib1g-dev libhdf5-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install f5c v1.6 from pre-built binaries (CPU)
-RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
-    && tar xf f5c-v1.6-binaries.tar.gz \
-    && cp f5c-v1.6/f5c_x86_64_linux /usr/local/bin/f5c \
-    && chmod +x /usr/local/bin/f5c \
-    && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
-
-# Install baleen (CPU only); copy console_script to a known path
-WORKDIR /app
-COPY . .
-ENV BALEEN_NO_CUDA=1
-RUN pip install --no-cache-dir . \
-    && BALEEN_BIN="$(which baleen 2>/dev/null)" \
-    && if [ -z "$BALEEN_BIN" ]; then \
-         printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \
-       elif [ "$BALEEN_BIN" != "/usr/local/bin/baleen" ]; then \
-         cp "$BALEEN_BIN" /usr/local/bin/baleen; \
-       fi \
-    && chmod +x /usr/local/bin/baleen
-
-# --- Runtime stage ---
-FROM python:3.11-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends zlib1g \
+    wget ca-certificates zlib1g \
     && apt-cache search '^libhdf5-[0-9]' | head -1 | awk '{print $1}' \
        | xargs apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin/baleen /usr/local/bin/baleen
+# slow5tools — baleen indexes BLOW5 via `slow5tools index` (pyslow5 needs .idx).
+RUN wget -q "https://github.com/hasindu2008/slow5tools/releases/download/v1.3.0/slow5tools-v1.3.0-x86_64-linux-binaries.tar.gz" \
+    && tar xf slow5tools-v1.3.0-x86_64-linux-binaries.tar.gz \
+    && cp slow5tools-v1.3.0/slow5tools /usr/local/bin/slow5tools \
+    && chmod +x /usr/local/bin/slow5tools \
+    && rm -rf slow5tools-v1.3.0 slow5tools-v1.3.0-x86_64-linux-binaries.tar.gz
+
+# baleen (pure Python now — no C extension to build).
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir .
+
+# krill engine — follow the package's strict rules:
+#   1. runtime deps from PyPI first (NEVER `krill[...]`, NEVER --extra-index-url)
+#   2. krill itself ONLY from the project index, --no-deps. CPU wheel here.
+RUN pip install --no-cache-dir numpy scipy pyslow5 pyfastx \
+    && pip install --no-cache-dir krill --no-deps \
+        --index-url https://loganylchen.github.io/krill-dist/simple/
 
 WORKDIR /data
 ENTRYPOINT ["baleen"]

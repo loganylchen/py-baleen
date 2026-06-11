@@ -32,7 +32,8 @@ per-site modification probabilities.
 
 - **CUDA-accelerated DTW** — a batched multi-position GPU kernel processes all
   positions of a contig in a single launch with concurrent CUDA streams.
-  Automatic CPU fallback via `tslearn` when no GPU is available.
+  Automatic CPU fallback when no GPU is available. DTW is provided by the
+  [krill](https://loganylchen.github.io/krill-dist/) engine.
 - **Three-stage hierarchical modification calling**
     - **V1** — robust IVT null estimation with coverage-adaptive three-level
       shrinkage (position → local window → global).
@@ -46,8 +47,9 @@ per-site modification probabilities.
 - **Streaming architecture** — DTW → HMM → aggregation are fused per contig and
   flushed to disk, so peak memory stays bounded regardless of transcriptome size.
 - **Read-ID intersection** — every stage is gated on
-  `reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)` per condition, so `f5c` silently
-  dropping reads absent from the signal file never biases subsampling.
+  `reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)` per condition, so eventalign
+  silently dropping BAM reads whose UUIDs are absent from the BLOW5 signal file
+  never biases subsampling.
 - **Resumable** — interrupted runs can be continued with `--resume`, reusing
   per-contig slices already on disk.
 
@@ -55,7 +57,7 @@ per-site modification probabilities.
 
 ```mermaid
 flowchart LR
-    NB[Native BAM/FASTQ/BLOW5] --> F5C[f5c eventalign]
+    NB[Native BAM/FASTQ/BLOW5] --> F5C[krill eventalign]
     IB[IVT BAM/FASTQ/BLOW5] --> F5C
     REF[Reference FASTA] --> F5C
     F5C --> SG[Signal grouping<br/>by position]

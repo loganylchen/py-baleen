@@ -79,8 +79,8 @@ class ContigProfile:
     # Per-stage wall-clock seconds
     bam_split_native: float = 0.0
     bam_split_ivt: float = 0.0
-    f5c_native: float = 0.0
-    f5c_ivt: float = 0.0
+    eventalign_native: float = 0.0
+    eventalign_ivt: float = 0.0
     signal_parse_native: float = 0.0
     signal_parse_ivt: float = 0.0
     signal_extract: float = 0.0
@@ -116,7 +116,7 @@ class ProfileReport:
     # Aggregated
     total_wall_clock: float = 0.0
     total_bam_split: float = 0.0
-    total_f5c: float = 0.0
+    total_eventalign: float = 0.0
     total_signal_parse: float = 0.0
     total_signal_extract: float = 0.0
     total_dtw: float = 0.0
@@ -154,8 +154,8 @@ def profile_contig(
     num_cuda_streams: int,
     run_hmm: bool,
 ) -> ContigProfile:
-    from baleen.eventalign import _bam, _f5c, _signal
-    from baleen import _cuda_dtw
+    from baleen.eventalign import _bam, _eventalign, _signal
+    from baleen import _dtw
 
     prof = ContigProfile(
         contig=contig,
@@ -191,28 +191,28 @@ def profile_contig(
             _fmt(prof.bam_split_native), _fmt(prof.bam_split_ivt),
         )
 
-        # --- f5c eventalign ---
+        # --- krill eventalign ---
         native_tsv = contig_tmp / "native.eventalign.tsv"
         ivt_tsv = contig_tmp / "ivt.eventalign.tsv"
 
-        with StageTimer("f5c_native") as t:
-            _f5c.run_eventalign(
+        with StageTimer("eventalign_native") as t:
+            _eventalign.run_eventalign(
                 native_contig_bam, ref_fasta, native_fastq, native_blow5,
                 native_tsv, rna=True,
             )
-        prof.f5c_native = t.elapsed
+        prof.eventalign_native = t.elapsed
 
-        with StageTimer("f5c_ivt") as t:
-            _f5c.run_eventalign(
+        with StageTimer("eventalign_ivt") as t:
+            _eventalign.run_eventalign(
                 ivt_contig_bam, ref_fasta, ivt_fastq, ivt_blow5,
                 ivt_tsv, rna=True,
             )
-        prof.f5c_ivt = t.elapsed
+        prof.eventalign_ivt = t.elapsed
 
         logger.info(
-            "  [%d/%d] %s  f5c: native=%s ivt=%s",
+            "  [%d/%d] %s  eventalign: native=%s ivt=%s",
             contig_idx, total_contigs, contig,
-            _fmt(prof.f5c_native), _fmt(prof.f5c_ivt),
+            _fmt(prof.eventalign_native), _fmt(prof.eventalign_ivt),
         )
 
         # --- Signal parsing ---
@@ -285,7 +285,7 @@ def profile_contig(
             all_signal_lists = [d[4] for d in position_data]
 
             # Use the same chunking as the real pipeline
-            total_gpu = _cuda_dtw.estimate_gpu_memory(all_signal_lists) if use_cuda else 0
+            total_gpu = _dtw.estimate_gpu_memory(all_signal_lists) if use_cuda else 0
             gpu_mem = 80 * 1024**3  # assume 80GB for chunk sizing
             chunk_mem_limit = int(gpu_mem * 0.8)
 
@@ -293,7 +293,7 @@ def profile_contig(
             current_chunk: list[int] = []
             current_estimate = 0
             for i, sigs in enumerate(all_signal_lists):
-                pos_estimate = _cuda_dtw.estimate_gpu_memory([sigs])
+                pos_estimate = _dtw.estimate_gpu_memory([sigs])
                 if current_chunk and current_estimate + pos_estimate > chunk_mem_limit:
                     chunks.append(current_chunk)
                     current_chunk = [i]
@@ -311,10 +311,8 @@ def profile_contig(
             for chunk_idx, chunk_indices in enumerate(chunks):
                 chunk_signals = [all_signal_lists[i] for i in chunk_indices]
                 chunk_t0 = time.perf_counter()
-                chunk_matrices = _cuda_dtw.dtw_multi_position_pairwise(
+                chunk_matrices = _dtw.dtw_multi_position_pairwise(
                     chunk_signals,
-                    use_open_start=False,
-                    use_open_end=False,
                     use_cuda=use_cuda,
                     num_streams=num_cuda_streams,
                 )
@@ -409,16 +407,16 @@ def main():
                         help="Output JSON path (default: profile_report.json)")
     args = parser.parse_args()
 
-    from baleen.eventalign import _bam, _f5c
-    from baleen import _cuda_dtw
+    from baleen.eventalign import _bam, _eventalign
+    from baleen import _dtw
     import tempfile
     from datetime import datetime
 
     report = ProfileReport(
         timestamp=datetime.now().isoformat(),
-        cuda_available=_cuda_dtw.CUDA_AVAILABLE,
+        cuda_available=_dtw.CUDA_AVAILABLE,
         cuda_used=args.use_cuda,
-        dtw_backend=_cuda_dtw.backend(),
+        dtw_backend=_dtw.backend(),
         threads=args.threads,
         subsample_n=args.subsample_n,
         padding=args.padding,
@@ -434,10 +432,8 @@ def main():
 
     # Index (idempotent)
     logger.info("Indexing...")
-    _f5c.index_fastq_blow5(native_fastq, native_blow5)
-    _f5c.index_fastq_blow5(ivt_fastq, ivt_blow5)
-    _f5c.index_blow5(native_blow5)
-    _f5c.index_blow5(ivt_blow5)
+    _eventalign.index_blow5(native_blow5)
+    _eventalign.index_blow5(ivt_blow5)
 
     # BAM stats
     logger.info("Computing BAM stats...")
@@ -507,7 +503,7 @@ def main():
         if c.error:
             continue
         report.total_bam_split += c.bam_split_native + c.bam_split_ivt
-        report.total_f5c += c.f5c_native + c.f5c_ivt
+        report.total_eventalign += c.eventalign_native + c.eventalign_ivt
         report.total_signal_parse += c.signal_parse_native + c.signal_parse_ivt
         report.total_signal_extract += c.signal_extract
         report.total_dtw += c.dtw_total
@@ -525,7 +521,7 @@ def main():
 
     stages = [
         ("BAM split",       report.total_bam_split),
-        ("f5c eventalign",  report.total_f5c),
+        ("eventalign",       report.total_eventalign),
         ("Signal parsing",  report.total_signal_parse),
         ("Signal extract",  report.total_signal_extract),
         ("DTW computation", report.total_dtw),
@@ -553,7 +549,7 @@ def main():
             print(f"    ERROR: {c.error}")
         else:
             print(f"    bam_split={_fmt(c.bam_split_native + c.bam_split_ivt)}  "
-                  f"f5c={_fmt(c.f5c_native + c.f5c_ivt)}  "
+                  f"eventalign={_fmt(c.eventalign_native + c.eventalign_ivt)}  "
                   f"signals={_fmt(c.signal_parse_native + c.signal_parse_ivt + c.signal_extract)}  "
                   f"dtw={_fmt(c.dtw_total)}  "
                   f"hier={_fmt(c.hierarchical_total)}  "
@@ -570,8 +566,8 @@ def main():
             "n_positions_computed": prof.n_positions_computed,
             "bam_split_native_s": round(prof.bam_split_native, 3),
             "bam_split_ivt_s": round(prof.bam_split_ivt, 3),
-            "f5c_native_s": round(prof.f5c_native, 3),
-            "f5c_ivt_s": round(prof.f5c_ivt, 3),
+            "eventalign_native_s": round(prof.eventalign_native, 3),
+            "eventalign_ivt_s": round(prof.eventalign_ivt, 3),
             "signal_parse_native_s": round(prof.signal_parse_native, 3),
             "signal_parse_ivt_s": round(prof.signal_parse_ivt, 3),
             "signal_extract_s": round(prof.signal_extract, 3),
@@ -609,7 +605,7 @@ def main():
         "total_wall_clock_s": round(report.total_wall_clock, 3),
         "stage_totals_s": {
             "bam_split": round(report.total_bam_split, 3),
-            "f5c": round(report.total_f5c, 3),
+            "eventalign": round(report.total_eventalign, 3),
             "signal_parse": round(report.total_signal_parse, 3),
             "signal_extract": round(report.total_signal_extract, 3),
             "dtw": round(report.total_dtw, 3),

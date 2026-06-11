@@ -105,13 +105,13 @@ def _gpu_info() -> dict:
 
 
 def _env_snapshot() -> dict:
-    from baleen._cuda_dtw import CUDA_AVAILABLE
+    from baleen import _dtw
     env = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "hostname": platform.node(),
         "python_version": platform.python_version(),
-        "cuda_available": CUDA_AVAILABLE,
-        "dtw_backend": "cuda" if CUDA_AVAILABLE else "tslearn",
+        "cuda_available": _dtw.CUDA_AVAILABLE,
+        "dtw_backend": _dtw.backend(),  # 'gpu' or 'cpu' (krill)
     }
     env.update(_git_info())
     env.update(_gpu_info())
@@ -264,17 +264,17 @@ def _summarize_per_contig(values: list[float]) -> dict:
 # Classification tiers. Order matters (first match wins).
 # Each tier is (bucket_name, filepath_fragments, funcname_fragments).
 # Funcname matching catches built-in C extensions where filepath is "~",
-# e.g. "{built-in method baleen._cuda_dtw._cuda_dtw.dtw_multi_position_pairwise}".
+# e.g. "{built-in method krill._krill.dtw_multi_position_pairwise}".
 _BUCKET_PATTERNS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # Baleen project modules — match by filename fragment, also by funcname
-    # so built-ins like _cuda_dtw's C kernel land in the right bucket.
-    ("dtw",          ("_cuda_dtw",),                          ("_cuda_dtw",)),
+    # so built-ins like krill's C DTW kernel land in the right bucket.
+    ("dtw",          ("_dtw.py", "krill"),                    ("dtw_distance", "dtw_pairwise", "dtw_pairwise_varlen", "dtw_multi_position_pairwise")),
     ("hmm_training", ("_hmm_training.py",),                   ()),
     ("hmm",          ("_hierarchical.py",),                   ()),
     ("probability",  ("_probability.py",),                    ()),
     ("aggregation",  ("_aggregation.py",),                    ()),
     ("signal",       ("_signal.py",),                         ()),
-    ("f5c",          ("_f5c.py",),                            ()),
+    ("eventalign",   ("_eventalign.py",),                     ()),
     ("bam",          ("_bam.py", "pysam/"),                   ()),
     ("pipeline",     ("_pipeline.py",),                       ()),
     # IO / subprocess — typically f5c output reads and subprocess plumbing.

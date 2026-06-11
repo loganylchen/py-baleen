@@ -46,7 +46,7 @@ def sample_args_run():
         no_read_bam=True,
         target=None,
         keep_intermediate=False,
-        f5c_threads=None,
+        pore="rna002",
         gpu_memory_limit=None,
         no_subsample=False,
         subsample_n=300,

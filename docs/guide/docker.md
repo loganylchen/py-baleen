@@ -5,12 +5,13 @@ images to Docker Hub on every push to `main`/`dev`:
 
 | Dockerfile | Image | Base |
 |------------|-------|------|
-| `Dockerfile.cpu` | `<namespace>/py-baleen-cpu` | CPU-only (`tslearn` DTW backend). |
-| `Dockerfile.gpu` | `<namespace>/py-baleen-gpu` | `nvidia/cuda:12.6.3-runtime-ubuntu22.04`, CUDA DTW backend. |
+| `Dockerfile.cpu` | `<namespace>/py-baleen-cpu` | `python:3.11-slim`, krill CPU wheel. |
+| `Dockerfile.gpu` | `<namespace>/py-baleen-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, krill cu122 GPU wheel. |
 
 The `latest` tag is published only from `main`; branch and long-SHA tags are
-published for every build. Both images bundle **f5c v1.6** and set
-`ENTRYPOINT ["baleen"]` with a `/data` working directory.
+published for every build. Both images bundle the **krill** engine and
+**slow5tools**, and set `ENTRYPOINT ["baleen"]` with a `/data` working
+directory.
 
 ## Pull a published image
 
@@ -31,13 +32,14 @@ Dockerfile directly:
 # CPU
 docker build -f Dockerfile.cpu -t py-baleen-cpu .
 
-# GPU (needs nvcc/CUDA toolkit during build)
+# GPU
 docker build -f Dockerfile.gpu -t py-baleen-gpu .
 ```
 
-The GPU build **fails loudly** if the `_cuda_dtw` C extension did not compile, so
-a successful image is guaranteed to have a working CUDA backend rather than a
-silent CPU fallback.
+Both builds are pure Python (no C-extension compilation): they `pip install`
+baleen, then install the appropriate krill wheel (CPU vs cu122) from the
+project index. The GPU image's krill is GPU-capable only at run time when a
+device is visible — see the verification step below.
 
 ## Run the pipeline in a container
 
@@ -71,10 +73,10 @@ docker run --rm --gpus all \
 ## Verify the GPU image sees the device
 
 ```bash
-docker run --rm --gpus all py-baleen-gpu \
-    python3 -c "from baleen._cuda_dtw import backend, is_available; \
-print('backend:', backend(), 'cuda:', is_available())"
-# Expected: backend: cuda cuda: True
+docker run --rm --gpus all --entrypoint python3 py-baleen-gpu \
+    -c "from baleen._dtw import backend, is_available; \
+print('backend:', backend(), 'gpu:', is_available())"
+# Expected: backend: gpu gpu: True
 ```
 
 If it prints `backend: cpu`, the container cannot see the GPU — check the
