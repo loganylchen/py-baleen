@@ -167,6 +167,16 @@ class TestValidateResumeCompatibility:
         with pytest.raises(RuntimeError, match="mod_threshold"):
             _validate_resume_compatibility(per, fp_new)
 
+    def test_schema_version_mismatch_rejected(self, tmp_path: Path) -> None:
+        paths = _make_inputs(tmp_path)
+        per = tmp_path / "per_contig"
+        per.mkdir()
+        fp_old = _baseline_fingerprint(paths)
+        fp_old["schema_version"] = fp_old["schema_version"] - 1  # simulate older run
+        _write_resume_fingerprint(per, fp_old)
+        with pytest.raises(RuntimeError, match="schema"):
+            _validate_resume_compatibility(per, _baseline_fingerprint(paths))
+
     def test_write_is_atomic(self, tmp_path: Path) -> None:
         paths = _make_inputs(tmp_path)
         per = tmp_path / "per_contig"

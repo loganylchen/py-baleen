@@ -160,6 +160,19 @@ def _validate_resume_compatibility(
             f"Cannot resume: failed to read {fp_path}: {exc}"
         ) from exc
 
+    # A schema bump signals an incompatible fingerprint/output format (e.g. a
+    # new param or a change in how slices are written); reject outright so old
+    # partial outputs are never silently mixed with new ones.
+    prior_schema = prior.get("schema_version")
+    curr_schema = current.get("schema_version")
+    if prior_schema != curr_schema:
+        raise RuntimeError(
+            "Cannot resume: fingerprint schema mismatch "
+            f"(prior={prior_schema!r} now={curr_schema!r}).  The run was "
+            f"produced by an incompatible baleen version.  "
+            f"Delete {per_contig_dir} or run without --resume."
+        )
+
     mismatches: list[str] = []
     for section in ("inputs", "params"):
         prior_section = prior.get(section, {}) or {}
