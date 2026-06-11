@@ -68,13 +68,16 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
+          # suffix applies to every generated tag; onlatest=true makes the
+          # implicit `latest` (from latest=auto on the default branch) become
+          # `latest-cpu`. Do NOT add an explicit type=raw value=latest — the
+          # suffix/onlatest rules only apply to the implicit latest tag.
           flavor: |
-            latest=false
-            suffix=-cpu
+            latest=auto
+            suffix=-cpu,onlatest=true
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -117,13 +120,16 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
+          # suffix applies to every generated tag; onlatest=true makes the
+          # implicit `latest` (from latest=auto on the default branch) become
+          # `latest-gpu`. Do NOT add an explicit type=raw value=latest — the
+          # suffix/onlatest rules only apply to the implicit latest tag.
           flavor: |
-            latest=false
-            suffix=-gpu
+            latest=auto
+            suffix=-gpu,onlatest=true
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
