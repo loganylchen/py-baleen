@@ -1,9 +1,8 @@
-# Docs build/verification image: baleen (CPU-only) + MkDocs toolchain.
+# Docs build/verification image: baleen + krill (CPU) + MkDocs toolchain.
 # Used to run `mkdocs build --strict` so mkdocstrings can import baleen.
 FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV BALEEN_NO_CUDA=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential zlib1g-dev libhdf5-dev \
@@ -15,7 +14,11 @@ RUN groupadd -g ${GID} app && useradd -m -u ${UID} -g ${GID} app
 
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir ".[docs]"
+# krill (engine) is imported by baleen at import time; mkdocstrings needs it.
+RUN pip install --no-cache-dir ".[docs]" \
+    && pip install --no-cache-dir numpy scipy pyslow5 pyfastx \
+    && pip install --no-cache-dir krill --no-deps \
+        --index-url https://loganylchen.github.io/krill-dist/simple/
 
 USER app
 WORKDIR /work

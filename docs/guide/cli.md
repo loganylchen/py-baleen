@@ -4,7 +4,7 @@ Baleen exposes two sub-commands:
 
 | Command | Purpose |
 |---------|---------|
-| [`baleen run`](#baleen-run) | Full pipeline: read-ID intersection → f5c eventalign → DTW → HMM → site aggregation. |
+| [`baleen run`](#baleen-run) | Full pipeline: read-ID intersection → krill eventalign → DTW → HMM → site aggregation. |
 | [`baleen aggregate`](#baleen-aggregate) | Re-run HMM and/or site aggregation from a saved `.pkl`, skipping DTW. |
 
 ```bash
@@ -55,7 +55,7 @@ baleen aggregate --help
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cuda [DEVICES]` | auto-detect | CUDA device(s): `0`, `0,1`, `0-3`, or `all`. |
-| `--no-cuda` | off | Force the CPU (`tslearn`) backend. |
+| `--no-cuda` | off | Force the CPU backend. |
 | `--gpu-memory-limit BYTES` | auto-detect | GPU memory budget for concurrent DTW workers. |
 
 ### HMM options
@@ -65,13 +65,13 @@ baleen aggregate --help
 | `--hmm-params` | 3-state unsupervised | Path to a trained HMM parameters JSON. See [HMM Training Modes](hmm-training.md). |
 | `--no-hmm` | off | Skip HMM smoothing; output V2 scores only. |
 
-### f5c options
+### eventalign options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--f5c-threads` | auto (`cores / threads`) | CPU threads per `f5c eventalign` call. |
-| `--no-rna` | off | Disable RNA mode for f5c. |
-| `--kmer-model` | — | Custom k-mer model for f5c. |
+| `--pore` | `rna002` | krill pore model for eventalign. |
+| `--no-rna` | off | Disable RNA mode for eventalign. |
+| `--kmer-model` | — | Reserved; currently unused by the krill engine. |
 
 ### Miscellaneous
 

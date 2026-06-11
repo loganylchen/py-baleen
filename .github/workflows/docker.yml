@@ -24,7 +24,12 @@ jobs:
 
       - name: Install and test
         run: |
-          BALEEN_NO_CUDA=1 pip install ".[test]"
+          pip install ".[test]"
+          # krill (DTW + eventalign engine) is not on PyPI — install the CPU
+          # wheel from the project index. Its runtime deps come from PyPI first.
+          pip install numpy scipy pyslow5 pyfastx
+          pip install krill --no-deps \
+            --index-url https://loganylchen.github.io/krill-dist/simple/
           pytest
 
   build-cpu:
