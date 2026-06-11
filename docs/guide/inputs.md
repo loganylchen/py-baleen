@@ -67,7 +67,7 @@ the read set Baleen reasons about is exactly the one eventalign will align.
 | Source | Method |
 |--------|--------|
 | BAM | Iterate alignments, collect `query_name`. |
-| FASTQ | Parse read IDs from the FASTQ headers (no `.readdb` dependency). |
+| FASTQ | Parse read IDs from the FASTQ headers. (If a legacy `<fastq>.index.readdb` file is present it is used instead — krill no longer creates one, so this only affects directories left over from an old f5c run.) |
 | BLOW5 | `pyslow5.Open(path).get_read_ids()`. |
 
 The intersection runs by default. Disable it with `--no-read-intersection` if

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "baleen"
 version = "0.4.0"
 description = "Hierarchical Bayesian framework for RNA modification detection from nanopore direct RNA sequencing"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     {name = "Logan Chen"},
@@ -17,9 +17,9 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 # NOTE: the DTW + eventalign engine 'krill' is a required runtime dependency

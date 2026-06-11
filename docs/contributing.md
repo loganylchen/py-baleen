@@ -42,7 +42,7 @@ pytest tests/test_dtw.py
 pytest tests/test_dtw.py::test_dtw_distance_basic -v
 ```
 
-CI runs the suite on Python 3.9, 3.10, and 3.11. Make sure `pytest` passes
+CI runs the suite on Python 3.10, 3.11, and 3.12. Make sure `pytest` passes
 locally before opening a PR.
 
 ## Benchmarks

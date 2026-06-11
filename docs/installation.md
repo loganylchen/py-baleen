@@ -4,7 +4,7 @@
 
 | Requirement | Notes |
 |-------------|-------|
-| Python ≥ 3.9 | 3.9 – 3.11 are tested. |
+| Python ≥ 3.10 | 3.10 – 3.12 are tested. (krill ships cp310+ wheels.) |
 | [krill](https://loganylchen.github.io/krill-dist/) | DTW + eventalign engine. **Required.** Not on PyPI — install from the project index (see below). |
 | [slow5tools](https://github.com/hasindu2008/slow5tools) | Must be on `PATH`. Used to index BLOW5 signal files (`slow5tools index`). |
 | NVIDIA GPU + driver | **Optional.** The krill cu122 wheel runs DTW on the GPU. Without a GPU, install the plain krill wheel for a CPU backend. |
