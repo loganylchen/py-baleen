@@ -9,14 +9,11 @@ from pathlib import Path
 import pytest
 
 from baleen.eventalign._read_ids import (
-    _readdb_path_for,
     compute_condition_intersection,
     load_read_ids,
     read_ids_from_bam,
     read_ids_from_blow5,
     read_ids_from_fastq,
-    read_ids_from_fastq_with_readdb,
-    read_ids_from_readdb,
     write_read_ids,
 )
 
@@ -33,15 +30,7 @@ def _write_fastq(path: Path, ids: list[str], *, gzipped: bool = False) -> Path:
     return path
 
 
-def _write_readdb(path: Path, ids: list[str]) -> Path:
-    """Write an f5c-style ``.index.readdb`` (read_id<TAB>path per line)."""
-    with path.open("w") as fh:
-        for rid in ids:
-            fh.write(f"{rid}\t/dummy/{rid}.fast5\n")
-    return path
-
-
-class TestFastqAndReaddb:
+class TestFastq:
     def test_read_ids_from_fastq_plain(self, tmp_path: Path):
         fq = _write_fastq(tmp_path / "x.fq", ["r1", "r2", "r3"])
         assert read_ids_from_fastq(fq) == {"r1", "r2", "r3"}
@@ -50,24 +39,14 @@ class TestFastqAndReaddb:
         fq = _write_fastq(tmp_path / "x.fq.gz", ["g1", "g2"], gzipped=True)
         assert read_ids_from_fastq(fq) == {"g1", "g2"}
 
-    def test_readdb_path_helper(self, tmp_path: Path):
-        fq = tmp_path / "sample.fq.gz"
-        assert _readdb_path_for(fq) == tmp_path / "sample.fq.gz.index.readdb"
-
-    def test_read_ids_from_readdb(self, tmp_path: Path):
-        rdb = _write_readdb(tmp_path / "y.fq.index.readdb", ["a", "b", "c"])
-        assert read_ids_from_readdb(rdb) == {"a", "b", "c"}
-
-    def test_with_readdb_prefers_readdb(self, tmp_path: Path):
-        fq = _write_fastq(tmp_path / "z.fq", ["from_fastq"])
-        _write_readdb(tmp_path / "z.fq.index.readdb", ["from_readdb"])
-        # The readdb is present, so the cheap path must win.
-        assert read_ids_from_fastq_with_readdb(fq) == {"from_readdb"}
-
-    def test_with_readdb_falls_back_to_fastq(self, tmp_path: Path):
-        fq = _write_fastq(tmp_path / "w.fq", ["only_fastq"])
-        # No readdb adjacent → parse the FASTQ.
-        assert read_ids_from_fastq_with_readdb(fq) == {"only_fastq"}
+    def test_read_ids_from_fastq_header_first_token(self, tmp_path: Path):
+        # Standard dorado/guppy header: '@<uuid> runid=... ch=...'. The read id
+        # is the first whitespace-delimited token only.
+        path = tmp_path / "h.fq"
+        with path.open("w") as fh:
+            fh.write("@uuid-1 runid=abc ch=1\nACGTA\n+\nIIIII\n")
+            fh.write("@uuid-2 runid=abc ch=2\nACGTA\n+\nIIIII\n")
+        assert read_ids_from_fastq(path) == {"uuid-1", "uuid-2"}
 
 
 class TestRoundTrip:
@@ -188,6 +167,38 @@ class TestIntersection:
             )
         assert inter == set()
         assert any("empty" in rec.message for rec in caplog.records)
+
+    def test_ignores_legacy_f5c_single_blow5_readdb(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A residual f5c '*<TAB>blow5_path' readdb must NOT hijack the FASTQ.
+
+        Regression: the old code preferred '<fastq>.index.readdb' and parsed
+        its first column as a read id. f5c's single-BLOW5 readdb form is
+        ``*<TAB>/path/x.blow5`` (no read ids at all), which collapsed the
+        FASTQ side of the intersection to a single id ('*') and produced an
+        empty intersection. The intersection must now parse the FASTQ directly
+        and ignore the readdb entirely.
+        """
+        bam = create_test_bam(
+            tmp_path,
+            {"ctg1": [(0, "AAAAAAAAAA"), (10, "AAAAAAAAAA")]},
+            [("ctg1", 200)],
+        )
+        fq = _write_fastq(tmp_path / "x.fq", ["ctg1_read_0", "ctg1_read_1"])
+        # Drop a poisoned f5c single-BLOW5 readdb next to the FASTQ.
+        (tmp_path / "x.fq.index.readdb").write_text("*\t/some/path/native.blow5\n")
+
+        monkeypatch.setattr(
+            "baleen.eventalign._read_ids.read_ids_from_blow5",
+            lambda _: {"ctg1_read_0", "ctg1_read_1"},
+        )
+
+        inter = compute_condition_intersection(
+            bam=bam, fastq=fq, blow5="/dummy.blow5", label="readdb-ignored",
+        )
+        # Readdb ignored → intersection comes from the FASTQ ids, not '*'.
+        assert inter == {"ctg1_read_0", "ctg1_read_1"}
 
 
 class TestResumeFingerprintIncludesIntersection:
