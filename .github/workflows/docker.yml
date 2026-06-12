@@ -61,18 +61,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      # New single repo `py-baleen`: variant is a tag SUFFIX (-cpu). latest=false
+      # avoids a bare `:latest`; the explicit raw latest carries a per-tag suffix
+      # and is gated to the default branch (main) -> latest-cpu.
+      - name: Extract metadata (py-baleen, suffix -cpu)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
-          # Global suffix applies to the branch/sha tags. The implicit latest
-          # is disabled (latest=false) to avoid a bare `:latest` that the two
-          # variant jobs would overwrite; instead the latest tag is declared
-          # explicitly with a PER-TAG suffix (global suffix/onlatest do not
-          # apply to an explicit raw latest) and gated to the default branch.
           flavor: |
             latest=false
             suffix=-cpu
@@ -81,13 +79,32 @@ jobs:
             type=sha,prefix=,format=long
             type=raw,value=latest,suffix=-cpu,enable={{is_default_branch}}
 
+      # Legacy repo `py-baleen-cpu`: the variant is the REPO name, so NO suffix.
+      # latest=auto does not synthesize `latest` for branch/sha generators, so
+      # declare it explicitly and gate to the default branch (refreshes the
+      # legacy :latest on main pushes for back-compat pulls).
+      - name: Extract metadata (legacy py-baleen-cpu)
+        id: meta_legacy
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DH_USER }}/py-baleen-cpu
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.cpu
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ steps.meta_legacy.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
   build-gpu:
@@ -115,18 +132,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      # New single repo `py-baleen`: variant is a tag SUFFIX (-gpu). latest=false
+      # avoids a bare `:latest`; the explicit raw latest carries a per-tag suffix
+      # and is gated to the default branch (main) -> latest-gpu.
+      - name: Extract metadata (py-baleen, suffix -gpu)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ secrets.DH_USER }}/py-baleen
             ghcr.io/${{ github.repository_owner }}/py-baleen
-          # Global suffix applies to the branch/sha tags. The implicit latest
-          # is disabled (latest=false) to avoid a bare `:latest` that the two
-          # variant jobs would overwrite; instead the latest tag is declared
-          # explicitly with a PER-TAG suffix (global suffix/onlatest do not
-          # apply to an explicit raw latest) and gated to the default branch.
           flavor: |
             latest=false
             suffix=-gpu
@@ -135,11 +150,30 @@ jobs:
             type=sha,prefix=,format=long
             type=raw,value=latest,suffix=-gpu,enable={{is_default_branch}}
 
+      # Legacy repo `py-baleen-gpu`: the variant is the REPO name, so NO suffix.
+      # latest=auto does not synthesize `latest` for branch/sha generators, so
+      # declare it explicitly and gate to the default branch (refreshes the
+      # legacy :latest on main pushes for back-compat pulls).
+      - name: Extract metadata (legacy py-baleen-gpu)
+        id: meta_legacy
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DH_USER }}/py-baleen-gpu
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.gpu
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ steps.meta_legacy.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
