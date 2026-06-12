@@ -15,10 +15,6 @@ rationale see [Inputs › Read-ID intersection](../guide/inputs.md#read-id-inter
 
 ::: baleen.eventalign._read_ids.read_ids_from_fastq
 
-::: baleen.eventalign._read_ids.read_ids_from_readdb
-
-::: baleen.eventalign._read_ids.read_ids_from_fastq_with_readdb
-
 ::: baleen.eventalign._read_ids.read_ids_from_blow5
 
 ## Intersection & persistence
