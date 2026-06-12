@@ -79,8 +79,10 @@ jobs:
             type=sha,prefix=,format=long
             type=raw,value=latest,suffix=-cpu,enable={{is_default_branch}}
 
-      # Legacy repo `py-baleen-cpu`: the variant is the REPO name, so NO suffix;
-      # latest=auto gives the normal `latest` on the default branch.
+      # Legacy repo `py-baleen-cpu`: the variant is the REPO name, so NO suffix.
+      # latest=auto does not synthesize `latest` for branch/sha generators, so
+      # declare it explicitly and gate to the default branch (refreshes the
+      # legacy :latest on main pushes for back-compat pulls).
       - name: Extract metadata (legacy py-baleen-cpu)
         id: meta_legacy
         uses: docker/metadata-action@v5
@@ -88,10 +90,11 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen-cpu
           flavor: |
-            latest=auto
+            latest=false
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -147,8 +150,10 @@ jobs:
             type=sha,prefix=,format=long
             type=raw,value=latest,suffix=-gpu,enable={{is_default_branch}}
 
-      # Legacy repo `py-baleen-gpu`: the variant is the REPO name, so NO suffix;
-      # latest=auto gives the normal `latest` on the default branch.
+      # Legacy repo `py-baleen-gpu`: the variant is the REPO name, so NO suffix.
+      # latest=auto does not synthesize `latest` for branch/sha generators, so
+      # declare it explicitly and gate to the default branch (refreshes the
+      # legacy :latest on main pushes for back-compat pulls).
       - name: Extract metadata (legacy py-baleen-gpu)
         id: meta_legacy
         uses: docker/metadata-action@v5
@@ -156,10 +161,11 @@ jobs:
           images: |
             ${{ secrets.DH_USER }}/py-baleen-gpu
           flavor: |
-            latest=auto
+            latest=false
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
