@@ -47,6 +47,7 @@ def sample_args_run():
         target=None,
         keep_intermediate=False,
         pore="rna002",
+        krill_hmm=False,
         gpu_memory_limit=None,
         no_subsample=False,
         subsample_n=300,

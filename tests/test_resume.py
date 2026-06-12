@@ -65,6 +65,7 @@ def _baseline_fingerprint(paths: dict[str, Path]) -> dict:
         target_contigs=None,
         read_intersection=True,
         pore="rna002",
+        krill_hmm=False,
     )
 
 
@@ -74,7 +75,7 @@ class TestComputeFingerprint:
         # Must be json-serializable.
         s = json.dumps(fp, sort_keys=True)
         assert json.loads(s) == fp
-        assert fp["schema_version"] == 2
+        assert fp["schema_version"] == 3
         assert set(fp["inputs"]) == {
             "native_bam", "native_fastq", "native_blow5",
             "ivt_bam", "ivt_fastq", "ivt_blow5", "ref_fasta",
@@ -106,6 +107,7 @@ class TestComputeFingerprint:
             target_contigs=None,
             read_intersection=True,
             pore="rna002",
+            krill_hmm=False,
         )
         assert fp1 != fp2
 
@@ -163,6 +165,7 @@ class TestValidateResumeCompatibility:
             target_contigs=None,
             read_intersection=True,
             pore="rna002",
+            krill_hmm=False,
         )
         with pytest.raises(RuntimeError, match="mod_threshold"):
             _validate_resume_compatibility(per, fp_new)

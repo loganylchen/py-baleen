@@ -174,6 +174,12 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="krill pore model for eventalign (default: rna002)",
     )
     eventalign.add_argument(
+        "--krill-hmm", action="store_true", default=False,
+        help="Enable krill's alignment-confidence HMM (skips read-vs-ref "
+             "deletions like f5c). Default off = dense, skip-free. For A/B "
+             "comparisons.",
+    )
+    eventalign.add_argument(
         "--no-rna", action="store_true", default=False,
         help="Disable RNA mode for eventalign",
     )
@@ -321,6 +327,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         rna=not args.no_rna,
         kmer_model=args.kmer_model,
         pore=args.pore,
+        krill_hmm=args.krill_hmm,
         min_mapq=args.min_mapq,
         primary_only=not args.no_primary_only,
         threads=args.threads,

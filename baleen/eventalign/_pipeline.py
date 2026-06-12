@@ -59,7 +59,7 @@ def _sanitize_contig_filename(name: str) -> str:
 # using different ``--min-depth``, modified BAMs, etc.
 
 _RESUME_PARAMS_FILENAME = ".run_params.json"
-_RESUME_FINGERPRINT_SCHEMA = 2
+_RESUME_FINGERPRINT_SCHEMA = 3
 
 
 def _file_fingerprint(path: Optional[PathLike]) -> Optional[dict]:
@@ -100,6 +100,7 @@ def _compute_resume_fingerprint(
     target_contigs: Optional[list[str]],
     read_intersection: bool,
     pore: str,
+    krill_hmm: bool,
 ) -> dict:
     """Build a JSON-serializable dict capturing everything that would
     invalidate a partial run.
@@ -121,6 +122,7 @@ def _compute_resume_fingerprint(
             "padding": int(padding),
             "min_mapq": int(min_mapq),
             "pore": str(pore),
+            "krill_hmm": bool(krill_hmm),
             "primary_only": bool(primary_only),
             "subsample": bool(subsample),
             "subsample_n": int(subsample_n),
@@ -511,6 +513,7 @@ def _process_contig(
     rna: bool,
     kmer_model: Optional[str],
     pore: str,
+    krill_hmm: bool,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -617,6 +620,7 @@ def _process_contig(
         min_mapq=min_mapq,
         primary_only=primary_only,
         pore=pore,
+        krill_hmm=krill_hmm,
     )
     logger.info("    Running krill eventalign (IVT)...")
     _ = _eventalign.run_eventalign(
@@ -630,6 +634,7 @@ def _process_contig(
         min_mapq=min_mapq,
         primary_only=primary_only,
         pore=pore,
+        krill_hmm=krill_hmm,
     )
     logger.info("    Eventalign done (%s)", _fmt_elapsed(time.perf_counter() - ea_t0))
 
@@ -804,6 +809,7 @@ def _process_contig_streaming(
     rna: bool,
     kmer_model: Optional[str],
     pore: str,
+    krill_hmm: bool,
     min_mapq: int,
     primary_only: bool,
     cleanup_temp: bool,
@@ -886,6 +892,7 @@ def _process_contig_streaming(
         rna=rna,
         kmer_model=kmer_model,
         pore=pore,
+        krill_hmm=krill_hmm,
         min_mapq=min_mapq,
         primary_only=primary_only,
         cleanup_temp=cleanup_temp,
@@ -996,6 +1003,7 @@ def run_pipeline(
     rna: bool = True,
     kmer_model: Optional[str] = None,
     pore: str = _eventalign.DEFAULT_PORE,
+    krill_hmm: bool = False,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1020,8 +1028,8 @@ def run_pipeline(
                 min_mapq, primary_only, num_cuda_streams)
     logger.info("  subsample=%s  subsample_n=%d  gpu_memory_limit=%s",
                 subsample, subsample_n, gpu_memory_limit)
-    logger.info("  cleanup_temp=%s  kmer_model=%s  pore=%s",
-                cleanup_temp, kmer_model, pore)
+    logger.info("  cleanup_temp=%s  kmer_model=%s  pore=%s  krill_hmm=%s",
+                cleanup_temp, kmer_model, pore, krill_hmm)
     logger.info("  DTW backend:  %s  (GPU=%s)",
                 _dtw.backend(), _dtw.CUDA_AVAILABLE)
     logger.info("=" * 60)
@@ -1163,6 +1171,7 @@ def run_pipeline(
                         rna=rna,
                         kmer_model=kmer_model,
                         pore=pore,
+                        krill_hmm=krill_hmm,
                         min_mapq=min_mapq,
                         primary_only=primary_only,
                         cleanup_temp=cleanup_temp,
@@ -1220,6 +1229,7 @@ def run_pipeline(
                     rna=rna,
                     kmer_model=kmer_model,
                     pore=pore,
+                    krill_hmm=krill_hmm,
                     min_mapq=min_mapq,
                     primary_only=primary_only,
                     cleanup_temp=cleanup_temp,
@@ -1270,6 +1280,7 @@ def run_pipeline_streaming(
     rna: bool = True,
     kmer_model: Optional[str] = None,
     pore: str = _eventalign.DEFAULT_PORE,
+    krill_hmm: bool = False,
     min_mapq: int = 20,
     primary_only: bool = True,
     threads: int = 1,
@@ -1346,7 +1357,7 @@ def run_pipeline_streaming(
                 run_hmm, legacy_scoring, mod_threshold)
     logger.info("  target_contigs=%s  keep_intermediate=%s  cleanup_temp=%s",
                 target_contigs, keep_intermediate, cleanup_temp)
-    logger.info("  kmer_model=%s  pore=%s", kmer_model, pore)
+    logger.info("  kmer_model=%s  pore=%s  krill_hmm=%s", kmer_model, pore, krill_hmm)
     logger.info("=" * 60)
 
     if threads < 1:
@@ -1534,6 +1545,7 @@ def run_pipeline_streaming(
         target_contigs=target_contigs,
         read_intersection=read_intersection,
         pore=pore,
+        krill_hmm=krill_hmm,
     )
     resumed_summaries: list[ContigSummary] = []
     if resume:
@@ -1632,6 +1644,7 @@ def run_pipeline_streaming(
             rna=rna,
             kmer_model=kmer_model,
             pore=pore,
+            krill_hmm=krill_hmm,
             min_mapq=min_mapq,
             primary_only=primary_only,
             cleanup_temp=cleanup_temp,
