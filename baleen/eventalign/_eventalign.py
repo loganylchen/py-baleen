@@ -48,8 +48,9 @@ _HEADER = (
 )
 
 _krill_version: Optional[str] = None
-# Aligner construction loads the pore model; cache per (pore) within a process.
-_ALIGNER_CACHE: dict[str, object] = {}
+# Aligner construction loads the pore model; cache per (pore, hmm_confidence)
+# within a process so both regimes can coexist (e.g. A/B comparisons).
+_ALIGNER_CACHE: dict[tuple, object] = {}
 _REF_CACHE: dict[str, object] = {}
 
 
@@ -90,18 +91,20 @@ def check_krill() -> str:
     return _krill_version
 
 
-def _get_aligner(pore: str):
+def _get_aligner(pore: str, hmm_confidence: bool = False):
     import krill
 
-    if pore not in _ALIGNER_CACHE:
-        _ALIGNER_CACHE[pore] = krill.Aligner(
+    key = (pore, hmm_confidence)
+    if key not in _ALIGNER_CACHE:
+        _ALIGNER_CACHE[key] = krill.Aligner(
             pore=pore,
             use_gpu=False,
-            hmm_confidence=False,
+            hmm_confidence=hmm_confidence,
             keep_kmer_skips=False,
         )
-        logger.info("krill Aligner(pore=%s) constructed", pore)
-    return _ALIGNER_CACHE[pore]
+        logger.info("krill Aligner(pore=%s, hmm_confidence=%s) constructed",
+                    pore, hmm_confidence)
+    return _ALIGNER_CACHE[key]
 
 
 def _get_ref(ref_fasta: PathLike):
@@ -152,20 +155,21 @@ def run_eventalign(
     min_mapq: int = 0,
     primary_only: bool = True,
     pore: str = DEFAULT_PORE,
+    krill_hmm: bool = False,
 ) -> Path:
     """Align every primary, forward-mapped read in *bam* with krill.
 
     Drop-in replacement for the former ``_f5c.run_eventalign``: writes an
-    f5c-format eventalign TSV with HMM confidence disabled (dense, skip-free).
+    f5c-format eventalign TSV.
 
-    Returns
-    -------
-    pathlib.Path
-        Output TSV path.
+    By default krill's alignment-confidence HMM is disabled, forcing every
+    event onto the mapped reference (dense, skip-free).  Set *krill_hmm* to
+    ``True`` to enable it (krill then skips read-vs-ref deletions like f5c),
+    mainly for A/B comparisons.
     """
     bam_path = Path(bam)
     out_path = Path(output_tsv)
-    aligner = _get_aligner(pore)
+    aligner = _get_aligner(pore, hmm_confidence=krill_hmm)
     kmer_center = int(aligner.kmer_center)
     ref = _get_ref(ref_fasta)
 
