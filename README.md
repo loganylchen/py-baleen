@@ -31,14 +31,17 @@ BALEEN_NO_CUDA=1 pip install .
 
 ### Docker
 
-Pre-built images are available on Docker Hub:
+Pre-built images bundle **f5c** (CPU build in the CPU image, CUDA build in the
+GPU image so eventalign also runs on the GPU). One repository `py-baleen` with a
+tag suffix (`-cpu` / `-gpu`), published to Docker Hub and GHCR (public):
 
 ```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
+# Docker Hub
+docker pull btrspg/py-baleen:latest-cpu
+docker pull btrspg/py-baleen:latest-gpu      # requires NVIDIA Container Toolkit
 
-# GPU (requires NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# GitHub Container Registry (public)
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
 ```
 
 ### Prerequisites
@@ -82,7 +85,7 @@ baleen aggregate \
 ### Docker usage
 
 ```bash
-docker run --rm -v $(pwd):/data loganylchen/py-baleen-cpu:latest run \
+docker run --rm -v $(pwd):/data btrspg/py-baleen:latest-cpu run \
     --native-bam /data/native.bam \
     --native-fastq /data/native.fq.gz \
     --native-blow5 /data/native.blow5 \

@@ -1,5 +1,5 @@
 # --- Build stage ---
-FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -14,10 +14,14 @@ RUN sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; \
     wget build-essential zlib1g-dev libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install f5c v1.6 from pre-built binaries (CPU)
+# Install f5c v1.6 — use the CUDA build so eventalign also runs on the GPU.
+# The CUDA binary enables GPU by default (`--disable-cuda` defaults to `no`):
+# it dispatches longer reads to the GPU and the rest to CPU automatically, with
+# no extra flags from baleen's wrapper. It also falls back to CPU when no GPU is
+# visible or GPU memory is insufficient, so it is safe as the sole f5c here.
 RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
     && tar xf f5c-v1.6-binaries.tar.gz \
-    && cp f5c-v1.6/f5c_x86_64_linux /usr/local/bin/f5c \
+    && cp f5c-v1.6/f5c_x86_64_linux_cuda /usr/local/bin/f5c \
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
@@ -53,7 +57,7 @@ RUN python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.m
 
 # --- Runtime stage ---
 # NOTE: must use the same Ubuntu version as the builder so Python versions match
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 

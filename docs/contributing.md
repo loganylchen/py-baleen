@@ -34,6 +34,20 @@ pytest tests/test_dtw.py::test_dtw_distance_basic -v
 CI runs the suite on Python 3.9, 3.10, and 3.11 with a CPU-only build
 (`BALEEN_NO_CUDA=1`). Make sure `pytest` passes locally before opening a PR.
 
+## Benchmarks
+
+The benchmark harness requires `testdata/` with mixing stoichiometries:
+
+```bash
+python benchmarks/bench.py run --threads 2 --repeat 5
+python benchmarks/bench.py compare   # tabulate recent runs
+```
+
+!!! note "Per-contig timers"
+    `bench.py` per-contig timing breakdowns are only populated with
+    `--threads 1`; with more workers the child-process logs are not forwarded to
+    the parent. Use `--threads 1` when you need a per-stage breakdown.
+
 ## Commit style
 
 Baleen uses [Conventional Commits](https://www.conventionalcommits.org/):
@@ -66,6 +80,7 @@ baleen/
 ├── _cuda_dtw/        # CUDA DTW + CPU fallback
 └── eventalign/       # pipeline, BAM/signal/f5c IO, hierarchical model, HMM training
 tests/                # pytest suite
+benchmarks/           # bench.py harness
 docs/                 # this site (MkDocs Material)
 ```
 

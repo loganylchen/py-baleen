@@ -74,7 +74,7 @@ At high coverage, controlling false positives needs more than `padj`:
   read counts; this prevents power inflation from a few ultra-deep positions.
 - **Calibrate a threshold against ground truth.** If you have known modified
   sites, sweep `effect_size`/`mod_ratio` cutoffs and pick the one at your target
-  precision against a known-mods file.
+  precision. `benchmarks/bench.py` computes AUPRC/AUROC against a known-mods file.
 - **Run an IVT-vs-IVT negative control.** Feed two IVT replicates as
   native/IVT; every call is a false positive, giving an empirical FPR to
   calibrate against.

@@ -1,25 +1,36 @@
 # Docker
 
 Baleen ships two Dockerfiles and a CI workflow that builds and pushes both
-images to Docker Hub on every push to `main`/`dev`:
+images on every push to `main`/`dev`. Both variants live in a **single
+repository** `py-baleen`; the variant is a tag **suffix** (`-cpu` / `-gpu`):
 
-| Dockerfile | Image | Base |
-|------------|-------|------|
-| `Dockerfile.cpu` | `<namespace>/py-baleen-cpu` | CPU-only (`tslearn` DTW backend). |
-| `Dockerfile.gpu` | `<namespace>/py-baleen-gpu` | `nvidia/cuda:12.6.3-runtime-ubuntu22.04`, CUDA DTW backend. |
+| Dockerfile | Tag suffix | Base / f5c build |
+|------------|-----------|------------------|
+| `Dockerfile.cpu` | `-cpu` | `python:3.11-slim`, **CPU** f5c, CUDA DTW disabled (CPU `tslearn` backend). |
+| `Dockerfile.gpu` | `-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, **CUDA** f5c + GPU CUDA DTW. |
 
-The `latest` tag is published only from `main`; branch and long-SHA tags are
-published for every build. Both images bundle **f5c v1.6** and set
-`ENTRYPOINT ["baleen"]` with a `/data` working directory.
+Tags follow `<ref>-<variant>`: `latest-*` is published only from `main`;
+branch and long-SHA tags are published for every build. Both images bundle
+**f5c v1.6** and set `ENTRYPOINT ["baleen"]` with a `/data` working directory.
+The GPU image ships f5c's **CUDA build**, which uses the GPU by default
+(`--disable-cuda` defaults to `no`) — longer reads go to the GPU and the rest
+to CPU automatically, no extra flags needed — and falls back to CPU when no GPU
+is visible.
+
+Published to two registries:
+
+- **Docker Hub** — `btrspg/py-baleen`
+- **GHCR (public)** — `ghcr.io/loganylchen/py-baleen`
 
 ## Pull a published image
 
 ```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
+# Docker Hub
+docker pull btrspg/py-baleen:latest-cpu
+docker pull btrspg/py-baleen:latest-gpu      # requires the NVIDIA Container Toolkit
 
-# GPU (requires the NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# GHCR (public)
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
 ```
 
 ## Build locally
@@ -29,10 +40,10 @@ Dockerfile directly:
 
 ```bash
 # CPU
-docker build -f Dockerfile.cpu -t py-baleen-cpu .
+docker build -f Dockerfile.cpu -t py-baleen:cpu .
 
 # GPU (needs nvcc/CUDA toolkit during build)
-docker build -f Dockerfile.gpu -t py-baleen-gpu .
+docker build -f Dockerfile.gpu -t py-baleen:gpu .
 ```
 
 The GPU build **fails loudly** if the `_cuda_dtw` C extension did not compile, so
@@ -48,7 +59,7 @@ data into the container's `/data` working directory:
 # CPU
 docker run --rm \
     -v "$PWD":/data \
-    py-baleen-cpu run \
+    py-baleen:cpu run \
         --native-bam native.bam --native-fastq native.fq.gz --native-blow5 native.blow5 \
         --ivt-bam ivt.bam --ivt-fastq ivt.fq.gz --ivt-blow5 ivt.blow5 \
         --ref ref.fa -o results/
@@ -58,7 +69,7 @@ docker run --rm \
 # GPU — add --gpus all
 docker run --rm --gpus all \
     -v "$PWD":/data \
-    py-baleen-gpu run \
+    py-baleen:gpu run \
         --native-bam native.bam --native-fastq native.fq.gz --native-blow5 native.blow5 \
         --ivt-bam ivt.bam --ivt-fastq ivt.fq.gz --ivt-blow5 ivt.blow5 \
         --ref ref.fa -o results/
@@ -71,7 +82,7 @@ docker run --rm --gpus all \
 ## Verify the GPU image sees the device
 
 ```bash
-docker run --rm --gpus all py-baleen-gpu \
+docker run --rm --gpus all py-baleen:gpu \
     python3 -c "from baleen._cuda_dtw import backend, is_available; \
 print('backend:', backend(), 'cuda:', is_available())"
 # Expected: backend: cuda cuda: True
