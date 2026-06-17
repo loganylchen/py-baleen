@@ -15,8 +15,10 @@ RUN sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; \
     && rm -rf /var/lib/apt/lists/*
 
 # Install f5c v1.6 — use the CUDA build so eventalign also runs on the GPU.
-# The CUDA binary auto-falls back to CPU when no GPU is visible or GPU memory
-# is insufficient, so it is safe as the sole f5c in the GPU image.
+# The CUDA binary enables GPU by default (`--disable-cuda` defaults to `no`):
+# it dispatches longer reads to the GPU and the rest to CPU automatically, with
+# no extra flags from baleen's wrapper. It also falls back to CPU when no GPU is
+# visible or GPU memory is insufficient, so it is safe as the sole f5c here.
 RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
     && tar xf f5c-v1.6-binaries.tar.gz \
     && cp f5c-v1.6/f5c_x86_64_linux_cuda /usr/local/bin/f5c \

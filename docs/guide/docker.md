@@ -11,9 +11,11 @@ repository** `py-baleen`; the variant is a tag **suffix** (`-cpu` / `-gpu`):
 
 Tags follow `<ref>-<variant>`: `latest-*` is published only from `main`;
 branch and long-SHA tags are published for every build. Both images bundle
-**f5c v1.6** (the GPU image uses the CUDA build so eventalign also runs on the
-GPU, with automatic CPU fallback) and set `ENTRYPOINT ["baleen"]` with a
-`/data` working directory.
+**f5c v1.6** and set `ENTRYPOINT ["baleen"]` with a `/data` working directory.
+The GPU image ships f5c's **CUDA build**, which uses the GPU by default
+(`--disable-cuda` defaults to `no`) — longer reads go to the GPU and the rest
+to CPU automatically, no extra flags needed — and falls back to CPU when no GPU
+is visible.
 
 Published to two registries:
 

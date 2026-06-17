@@ -74,11 +74,11 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,suffix=-cpu,enable={{is_default_branch}}
+            type=raw,value=latest,suffix=-cpu,enable=${{ github.ref == 'refs/heads/main' }}
 
       # Legacy repo `py-baleen-cpu`: the variant is the REPO name, so NO suffix.
       # latest=auto does not synthesize `latest` for branch/sha generators, so
-      # declare it explicitly and gate to the default branch (refreshes the
+      # declare it explicitly and gate to main (refreshes the
       # legacy :latest on main pushes for back-compat pulls).
       - name: Extract metadata (legacy py-baleen-cpu)
         id: meta_legacy
@@ -91,7 +91,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -145,11 +145,11 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,suffix=-gpu,enable={{is_default_branch}}
+            type=raw,value=latest,suffix=-gpu,enable=${{ github.ref == 'refs/heads/main' }}
 
       # Legacy repo `py-baleen-gpu`: the variant is the REPO name, so NO suffix.
       # latest=auto does not synthesize `latest` for branch/sha generators, so
-      # declare it explicitly and gate to the default branch (refreshes the
+      # declare it explicitly and gate to main (refreshes the
       # legacy :latest on main pushes for back-compat pulls).
       - name: Extract metadata (legacy py-baleen-gpu)
         id: meta_legacy
@@ -162,7 +162,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
