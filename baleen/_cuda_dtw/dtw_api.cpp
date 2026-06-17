@@ -1264,9 +1264,9 @@ PyMODINIT_FUNC PyInit__cuda_dtw(void)
     }
 
     // Add module-level constants
-    PyModule_AddIntConstant(module, "__version_major__", 0);
-    PyModule_AddIntConstant(module, "__version_minor__", 1);
-    PyModule_AddStringConstant(module, "__version__", "0.1.0");
+    PyModule_AddIntConstant(module, "__version_major__", 1);
+    PyModule_AddIntConstant(module, "__version_minor__", 0);
+    PyModule_AddStringConstant(module, "__version__", "1.0.0");
 
     return module;
 }
