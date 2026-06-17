@@ -65,10 +65,6 @@ nav:
   - Contributing: contributing.md
   - Changelog: changelog.md
 
-# Internal authoring notes not meant for the published site.
-exclude_docs: |
-  workflow_figure_prompt.md
-
 plugins:
   - search
   - autorefs

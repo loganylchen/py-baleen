@@ -1,11 +1,15 @@
 # Changelog
 
-Baleen is pre-1.0 (Development Status: Alpha). This page summarises notable
-changes by theme; see the
-[full commit history](https://github.com/loganylchen/py-baleen/commits/dev) for
+This page summarises notable changes by theme; see the
+[full commit history](https://github.com/loganylchen/py-baleen/commits/main) for
 detail.
 
-## Unreleased (dev)
+## v1.0.0 — first stable release
+
+First public release. Baleen detects RNA modifications by comparing native vs
+IVT nanopore signals with CUDA-accelerated DTW and a three-stage hierarchical
+Bayesian / HMM pipeline. Event alignment is performed by **f5c** (the GPU
+Docker image uses f5c's CUDA build so eventalign also runs on the GPU).
 
 ### Features
 

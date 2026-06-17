@@ -63,15 +63,22 @@ pip install ".[docs]"
 
 ## Docker
 
-Pre-built images are published on Docker Hub:
+Pre-built images bundle **f5c** (the CPU build in the CPU image, the CUDA build
+in the GPU image) and ship `baleen` as the entrypoint. Both variants live in a
+single repository `py-baleen`, distinguished by a tag **suffix** (`-cpu` /
+`-gpu`), and are published to Docker Hub and GitHub Container Registry (GHCR).
 
 ```bash
-# CPU
-docker pull loganylchen/py-baleen-cpu:latest
+# --- Docker Hub ---
+docker pull btrspg/py-baleen:latest-cpu
+docker pull btrspg/py-baleen:latest-gpu          # requires the NVIDIA Container Toolkit
 
-# GPU (requires the NVIDIA Container Toolkit)
-docker pull loganylchen/py-baleen-gpu:latest
+# --- GitHub Container Registry (public) ---
+docker pull ghcr.io/loganylchen/py-baleen:latest-gpu
 ```
+
+Tag scheme: `<ref>-<variant>` — `<ref>` is `latest` (on `main`), the branch
+name, or a commit SHA; `<variant>` is `cpu` or `gpu`.
 
 See the [Docker guide](guide/docker.md) for mounting data and running the
 pipeline inside a container.
