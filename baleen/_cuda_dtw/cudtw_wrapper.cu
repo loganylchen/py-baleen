@@ -754,9 +754,9 @@ PyMODINIT_FUNC PyInit__cuda_dtw(void) {
     PyObject *m = PyModule_Create(&dtwmodule);
     if (!m) return NULL;
 
-    PyModule_AddIntConstant(m, "__version_major__", 0);
-    PyModule_AddIntConstant(m, "__version_minor__", 3);
-    PyModule_AddStringConstant(m, "__version__", "0.3.1-cudtw");
+    PyModule_AddIntConstant(m, "__version_major__", 1);
+    PyModule_AddIntConstant(m, "__version_minor__", 0);
+    PyModule_AddStringConstant(m, "__version__", "1.0.0-cudtw");
 
     return m;
 }
