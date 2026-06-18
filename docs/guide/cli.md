@@ -48,7 +48,7 @@ baleen aggregate --help
 | `--no-subsample` | off | Disable per-condition, per-contig read subsampling. |
 | `--subsample-n` | `300` | Max reads per condition per contig. |
 | `--legacy-scoring` | off | Per-position EM calibration (less sensitive at low stoichiometry). |
-| `--mod-threshold` | `0.9` | Per-read `P(mod)` above which a read is counted modified. |
+| `--mod-threshold` | `0.75` | Per-read `P(mod)` above which a read is counted modified. |
 
 ### DTW options
 
@@ -109,7 +109,7 @@ parameters.
 | `--native-bam` | — | Native BAM (required for mod-BAM output). |
 | `--ivt-bam` | — | IVT BAM (required for mod-BAM output). |
 | `--legacy-scoring` | off | Per-position EM calibration (legacy). |
-| `--mod-threshold` | `0.9` | Per-read `P(mod)` modified-call threshold. |
+| `--mod-threshold` | `0.75` | Per-read `P(mod)` modified-call threshold. |
 
 ### Example
 

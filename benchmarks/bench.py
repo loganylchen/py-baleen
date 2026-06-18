@@ -900,8 +900,8 @@ def main() -> None:
     p_run = sub.add_parser("run", help="Run pipeline and profile")
     p_run.add_argument("--stoich", default=",".join(ALL_STOICH),
                        help="Comma-separated stoich levels (default: all 11)")
-    p_run.add_argument("--threshold", type=float, default=0.9,
-                       help="Modification threshold (default: 0.9)")
+    p_run.add_argument("--threshold", type=float, default=0.75,
+                       help="Modification threshold (default: 0.75)")
     p_run.add_argument("--threads", type=int, default=4,
                        help="Pipeline threads (default: 4)")
     cuda_grp = p_run.add_mutually_exclusive_group()
