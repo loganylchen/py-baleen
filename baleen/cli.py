@@ -163,8 +163,8 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Use per-position EM calibration (legacy behavior, less sensitive at low stoichiometry)",
     )
     pipe.add_argument(
-        "--mod-threshold", type=float, default=0.75,
-        help="Per-read P(mod) threshold for counting a read as modified (default: 0.75)",
+        "--mod-threshold", type=float, default=0.65,
+        help="Per-read P(mod) threshold for counting a read as modified (default: 0.65)",
     )
 
     # eventalign options
@@ -254,8 +254,8 @@ def _add_aggregate_args(parser: argparse.ArgumentParser) -> None:
         help="Use per-position EM calibration (legacy behavior)",
     )
     parser.add_argument(
-        "--mod-threshold", type=float, default=0.75,
-        help="Per-read P(mod) threshold for counting a read as modified (default: 0.75)",
+        "--mod-threshold", type=float, default=0.65,
+        help="Per-read P(mod) threshold for counting a read as modified (default: 0.65)",
     )
 
 

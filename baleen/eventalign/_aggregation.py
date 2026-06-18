@@ -73,7 +73,7 @@ class SiteResult:
 
 def _threshold_aggregate(
     p_mod: NDArray[np.float64],
-    threshold: float = 0.75,
+    threshold: float = 0.65,
 ) -> tuple[float, float, float]:
     """Compute modification ratio as fraction of reads exceeding threshold.
 
@@ -108,7 +108,7 @@ def _threshold_aggregate(
 def _fisher_pvalue(
     native_p_mod: NDArray[np.float64],
     ivt_p_mod: NDArray[np.float64],
-    threshold: float = 0.75,
+    threshold: float = 0.65,
 ) -> float:
     """One-sided Fisher's exact test on binary modification calls.
 
@@ -164,7 +164,7 @@ def aggregate_contig(
     cmr: ContigModificationResult,
     *,
     score_field: str = "p_mod_hmm",
-    mod_threshold: float = 0.75,
+    mod_threshold: float = 0.65,
 ) -> list[SiteResult]:
     """Aggregate per-read results into site-level calls for one contig.
 
@@ -241,7 +241,7 @@ def aggregate_all(
     results: dict[str, ContigModificationResult],
     *,
     score_field: str = "p_mod_hmm",
-    mod_threshold: float = 0.75,
+    mod_threshold: float = 0.65,
 ) -> list[SiteResult]:
     """Aggregate all contigs and apply per-transcript FDR correction.
 
