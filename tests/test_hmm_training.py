@@ -487,6 +487,7 @@ def test_create_unsupervised_params_3state():
 def test_create_unsupervised_params_2state():
     params = hmm.create_unsupervised_params(n_states=2)
     assert params.n_states == 2
+    assert params.p_stay_per_base == 0.85
     np.testing.assert_allclose(params.init_prob, np.array([0.5, 0.5]))
 
 

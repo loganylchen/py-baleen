@@ -205,6 +205,7 @@ def create_unsupervised_params(n_states: int = 3) -> HMMParams:
         return HMMParams(
             mode="unsupervised",
             n_states=2,
+            p_stay_per_base=0.85,
             init_prob=np.array([0.5, 0.5], dtype=np.float64),
         )
     return HMMParams(mode="unsupervised", n_states=3)
