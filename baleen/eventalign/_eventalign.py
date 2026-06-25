@@ -156,6 +156,7 @@ def run_eventalign(
     primary_only: bool = True,
     pore: str = DEFAULT_PORE,
     krill_hmm: bool = False,
+    batch_reads: int = 4096,
 ) -> Path:
     """Align every primary, forward-mapped read in *bam* with krill.
 
@@ -166,6 +167,14 @@ def run_eventalign(
     event onto the mapped reference (dense, skip-free).  Set *krill_hmm* to
     ``True`` to enable it (krill then skips read-vs-ref deletions like f5c),
     mainly for A/B comparisons.
+
+    Reads are submitted to krill in batches of *batch_reads* (one
+    ``aligner.align(list)`` call per batch) rather than one call per read, so
+    the engine's worker threads and double-buffered chunk pipeline stay fed.
+    The TSV output is byte-identical to the per-read path (results map back to
+    inputs in order).  *batch_reads* only bounds how many reads' signals are
+    held in memory per ``align()`` call; the engine still re-chunks internally
+    by the Aligner's own ``batch_size``.
     """
     bam_path = Path(bam)
     out_path = Path(output_tsv)
@@ -178,6 +187,59 @@ def run_eventalign(
 
     tmp_path = out_path.with_suffix(".tmp")
     t0 = time.perf_counter()
+
+    # One batch's pending inputs/metadata.  `inputs` feeds aligner.align();
+    # `meta` runs parallel to it carrying what the write-out loop needs (the
+    # contig, read id, and the read's pA-scaled signal for slicing).
+    inputs: list[dict] = []
+    meta: list[tuple] = []
+
+    def flush(out) -> None:
+        nonlocal n_reads, n_rows, n_failed
+        if not inputs:
+            return
+        results = aligner.align(inputs)
+        for (contig, rid, pA), res in zip(meta, results):
+            n_reads += 1
+            if res["status"] != 0:
+                n_failed += 1
+                continue
+
+            P = res["position"]
+            RK = res["reference_kmer"]
+            EI = res["event_index"]
+            ELM = res["event_level_mean"]
+            ESD = res["event_stdv"]
+            ELN = res["event_length"]
+            MK = res["model_kmer"]
+            MM = res["model_mean"]
+            MSD = res["model_stdv"]
+            SL = res["standardized_level"]
+            SI = res["start_idx"]
+            END = res["end_idx"]
+
+            for i in range(int(P.size)):
+                si = int(SI[i])
+                ei = int(END[i])
+                seg = pA[si:ei]
+                if seg.size == 0:
+                    continue
+                f5c_pos = int(P[i]) - kmer_center
+                if f5c_pos < 0:
+                    continue
+                samples = ",".join(np.char.mod("%.3f", seg))
+                sl = SL[i]
+                sl_str = "" if (sl != sl) else f"{float(sl):.2f}"  # NaN -> ""
+                out.write(
+                    f"{contig}\t{f5c_pos}\t{RK[i]}\t{rid}\tt\t{int(EI[i])}\t"
+                    f"{float(ELM[i]):.2f}\t{float(ESD[i]):.3f}\t{float(ELN[i]):.5f}\t"
+                    f"{MK[i]}\t{float(MM[i]):.2f}\t{float(MSD[i]):.2f}\t{sl_str}\t"
+                    f"{si}\t{ei}\t{samples}\n"
+                )
+                n_rows += 1
+        inputs.clear()
+        meta.clear()
+
     try:
         with pysam.AlignmentFile(str(bam_path), "rb") as bamf, \
                 tmp_path.open("w", encoding="utf-8") as out:
@@ -217,48 +279,15 @@ def run_eventalign(
                 sr = float(rd["sampling_rate"])
                 pA = (raw + offset) * (rng / digit)
 
-                res = aligner.align({
+                inputs.append({
                     "read_id": rid, "sequence": ref_sub, "signal": raw,
                     "digitisation": digit, "offset": offset, "range": rng,
                     "sample_rate": sr, "start": rs,
-                })[0]
-                n_reads += 1
-                if res["status"] != 0:
-                    n_failed += 1
-                    continue
-
-                P = res["position"]
-                RK = res["reference_kmer"]
-                EI = res["event_index"]
-                ELM = res["event_level_mean"]
-                ESD = res["event_stdv"]
-                ELN = res["event_length"]
-                MK = res["model_kmer"]
-                MM = res["model_mean"]
-                MSD = res["model_stdv"]
-                SL = res["standardized_level"]
-                SI = res["start_idx"]
-                END = res["end_idx"]
-
-                for i in range(int(P.size)):
-                    si = int(SI[i])
-                    ei = int(END[i])
-                    seg = pA[si:ei]
-                    if seg.size == 0:
-                        continue
-                    f5c_pos = int(P[i]) - kmer_center
-                    if f5c_pos < 0:
-                        continue
-                    samples = ",".join(np.char.mod("%.3f", seg))
-                    sl = SL[i]
-                    sl_str = "" if (sl != sl) else f"{float(sl):.2f}"  # NaN -> ""
-                    out.write(
-                        f"{contig}\t{f5c_pos}\t{RK[i]}\t{rid}\tt\t{int(EI[i])}\t"
-                        f"{float(ELM[i]):.2f}\t{float(ESD[i]):.3f}\t{float(ELN[i]):.5f}\t"
-                        f"{MK[i]}\t{float(MM[i]):.2f}\t{float(MSD[i]):.2f}\t{sl_str}\t"
-                        f"{si}\t{ei}\t{samples}\n"
-                    )
-                    n_rows += 1
+                })
+                meta.append((contig, rid, pA))
+                if len(inputs) >= batch_reads:
+                    flush(out)
+            flush(out)
         tmp_path.replace(out_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
