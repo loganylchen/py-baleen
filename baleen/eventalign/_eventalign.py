@@ -91,19 +91,19 @@ def check_krill() -> str:
     return _krill_version
 
 
-def _get_aligner(pore: str, hmm_confidence: bool = False):
+def _get_aligner(pore: str, hmm_confidence: bool = False, use_gpu: bool = False):
     import krill
 
-    key = (pore, hmm_confidence)
+    key = (pore, hmm_confidence, use_gpu)
     if key not in _ALIGNER_CACHE:
         _ALIGNER_CACHE[key] = krill.Aligner(
             pore=pore,
-            use_gpu=False,
+            use_gpu=use_gpu,
             hmm_confidence=hmm_confidence,
             keep_kmer_skips=False,
         )
-        logger.info("krill Aligner(pore=%s, hmm_confidence=%s) constructed",
-                    pore, hmm_confidence)
+        logger.info("krill Aligner(pore=%s, hmm_confidence=%s, use_gpu=%s) constructed",
+                    pore, hmm_confidence, use_gpu)
     return _ALIGNER_CACHE[key]
 
 
@@ -157,6 +157,7 @@ def run_eventalign(
     pore: str = DEFAULT_PORE,
     krill_hmm: bool = False,
     batch_reads: int = 4096,
+    use_gpu: bool = False,
 ) -> Path:
     """Align every primary, forward-mapped read in *bam* with krill.
 
@@ -175,10 +176,18 @@ def run_eventalign(
     inputs in order).  *batch_reads* only bounds how many reads' signals are
     held in memory per ``align()`` call; the engine still re-chunks internally
     by the Aligner's own ``batch_size``.
+
+    *use_gpu* (default ``False``) runs krill's eventalign on the GPU.  This is
+    most effective combined with large batches (many reads per ``align()``).
+    Note that the GPU eventalign aligner contends for the same device as the
+    GPU DTW stage; when the pipeline already fans GPU DTW across worker
+    processes, leave this ``False`` (CPU eventalign + GPU DTW) to avoid
+    oversubscribing one card.  Prefer GPU eventalign in single-process /
+    eventalign-only workflows (e.g. standalone scripts).
     """
     bam_path = Path(bam)
     out_path = Path(output_tsv)
-    aligner = _get_aligner(pore, hmm_confidence=krill_hmm)
+    aligner = _get_aligner(pore, hmm_confidence=krill_hmm, use_gpu=use_gpu)
     kmer_center = int(aligner.kmer_center)
     ref = _get_ref(ref_fasta)
 
