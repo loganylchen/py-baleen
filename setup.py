@@ -311,6 +311,10 @@ setup(
     author="Logan",
     python_requires=">=3.9",
     packages=find_packages(),
+    # Keep in sync with pyproject.toml [project.dependencies]. setuptools uses
+    # this list (not pyproject) when building from setup.py, so a dependency
+    # missing here ships a broken wheel/image — pyslow5 was absent, which left
+    # the GPU image without it and crashed the read-ID intersection at runtime.
     install_requires=[
         "numpy",
         "tslearn",
@@ -318,6 +322,7 @@ setup(
         "scipy",
         "tqdm",
         "pandas",
+        "pyslow5",
     ],
     entry_points={
         "console_scripts": ["baleen=baleen.cli:main"],
