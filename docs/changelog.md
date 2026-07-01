@@ -4,6 +4,26 @@ This page summarises notable changes by theme; see the
 [full commit history](https://github.com/loganylchen/py-baleen/commits/main) for
 detail.
 
+## v1.0.1 — read-ID intersection fix
+
+Patch release fixing a silent-empty-output bug in the default pipeline.
+
+### Fixes
+
+- **Read-ID intersection no longer trusts f5c's `.index.readdb`.** The FASTQ
+  side of `reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)` now comes solely from the
+  FASTQ headers. Previously a leftover f5c single-BLOW5 readdb (`*<TAB>blow5`,
+  whose first column is a wildcard, not a read id) collapsed the FASTQ side to
+  `{"*"}` (count = 1), silently emptying the intersection and producing **no
+  output** under the documented default flags. The empty-intersection warning
+  now prints each source's count and an example id so an id-format mismatch is
+  diagnosable from the log alone.
+- **GPU image now fails the build if `pyslow5` is missing.** The builder's
+  `pip install … | tee` masked dependency-install failures, so the published
+  v1.0.0 GPU image shipped without `pyslow5` and crashed the read-ID
+  intersection at runtime. An explicit import check now fails the build loudly,
+  matching the existing CUDA-extension check.
+
 ## v1.0.0 — first stable release
 
 First public release. Baleen detects RNA modifications by comparing native vs

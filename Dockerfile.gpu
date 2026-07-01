@@ -43,6 +43,14 @@ RUN pip3 install pytest \
          exit 1; \
        fi \
     && echo "OK: _cuda_dtw $(ls $SO_PATH/_cuda_dtw*.so)" \
+    && if ! python3 -c "import pyslow5" >/dev/null 2>&1; then \
+         echo "ERROR: pyslow5 not importable — a dependency install was masked by the" >&2; \
+         echo "pip '| tee' pipe and read-id intersection would crash at runtime." >&2; \
+         echo "pip install log tail:" >&2; \
+         tail -80 /tmp/pip-install.log >&2; \
+         exit 1; \
+       fi \
+    && echo "OK: pyslow5 importable" \
     && BALEEN_BIN="$(which baleen 2>/dev/null)" \
     && if [ -z "$BALEEN_BIN" ]; then \
          printf '#!/bin/sh\nexec python3 -m baleen "$@"\n' > /usr/local/bin/baleen; \

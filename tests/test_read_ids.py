@@ -9,14 +9,11 @@ from pathlib import Path
 import pytest
 
 from baleen.eventalign._read_ids import (
-    _readdb_path_for,
     compute_condition_intersection,
     load_read_ids,
     read_ids_from_bam,
     read_ids_from_blow5,
     read_ids_from_fastq,
-    read_ids_from_fastq_with_readdb,
-    read_ids_from_readdb,
     write_read_ids,
 )
 
@@ -33,15 +30,7 @@ def _write_fastq(path: Path, ids: list[str], *, gzipped: bool = False) -> Path:
     return path
 
 
-def _write_readdb(path: Path, ids: list[str]) -> Path:
-    """Write an f5c-style ``.index.readdb`` (read_id<TAB>path per line)."""
-    with path.open("w") as fh:
-        for rid in ids:
-            fh.write(f"{rid}\t/dummy/{rid}.fast5\n")
-    return path
-
-
-class TestFastqAndReaddb:
+class TestFastqReadIds:
     def test_read_ids_from_fastq_plain(self, tmp_path: Path):
         fq = _write_fastq(tmp_path / "x.fq", ["r1", "r2", "r3"])
         assert read_ids_from_fastq(fq) == {"r1", "r2", "r3"}
@@ -50,24 +39,15 @@ class TestFastqAndReaddb:
         fq = _write_fastq(tmp_path / "x.fq.gz", ["g1", "g2"], gzipped=True)
         assert read_ids_from_fastq(fq) == {"g1", "g2"}
 
-    def test_readdb_path_helper(self, tmp_path: Path):
-        fq = tmp_path / "sample.fq.gz"
-        assert _readdb_path_for(fq) == tmp_path / "sample.fq.gz.index.readdb"
-
-    def test_read_ids_from_readdb(self, tmp_path: Path):
-        rdb = _write_readdb(tmp_path / "y.fq.index.readdb", ["a", "b", "c"])
-        assert read_ids_from_readdb(rdb) == {"a", "b", "c"}
-
-    def test_with_readdb_prefers_readdb(self, tmp_path: Path):
-        fq = _write_fastq(tmp_path / "z.fq", ["from_fastq"])
-        _write_readdb(tmp_path / "z.fq.index.readdb", ["from_readdb"])
-        # The readdb is present, so the cheap path must win.
-        assert read_ids_from_fastq_with_readdb(fq) == {"from_readdb"}
-
-    def test_with_readdb_falls_back_to_fastq(self, tmp_path: Path):
-        fq = _write_fastq(tmp_path / "w.fq", ["only_fastq"])
-        # No readdb adjacent → parse the FASTQ.
-        assert read_ids_from_fastq_with_readdb(fq) == {"only_fastq"}
+    def test_ignores_poisoned_wildcard_readdb(self, tmp_path: Path):
+        """Regression (v1.0.1 / #4): a leftover f5c ``*<TAB>blow5`` readdb next
+        to the FASTQ must NOT hijack the read-id source.  Older code preferred
+        the readdb and collapsed the FASTQ side to ``{"*"}`` (count=1), silently
+        emptying the intersection.  The FASTQ must remain the sole id source."""
+        fq = _write_fastq(tmp_path / "z.fq.gz", ["read_a", "read_b"], gzipped=True)
+        # f5c single-BLOW5 readdb form: first column is a wildcard, not a read id.
+        (tmp_path / "z.fq.gz.index.readdb").write_text("*\t/data/nanopore.blow5\n")
+        assert read_ids_from_fastq(fq) == {"read_a", "read_b"}
 
 
 class TestRoundTrip:

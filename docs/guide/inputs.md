@@ -36,9 +36,11 @@ f5c index --slow5 native.blow5 native.fq.gz
 ```
 
 !!! note "f5c read database"
-    `f5c index` writes a `.readdb` mapping read IDs to signal records. When
-    present, Baleen reads read IDs from this cheap index instead of decompressing
-    the whole FASTQ — see below.
+    `f5c index` writes a `.readdb` alongside the FASTQ. Baleen's read-ID
+    intersection **ignores** it and always parses read IDs from the FASTQ
+    headers: f5c's single-BLOW5 readdb form is `*<TAB>blow5_path`, whose first
+    column is a wildcard rather than a read id (trusting it silently emptied the
+    intersection prior to v1.0.1 — see the changelog).
 
 ## Read-ID intersection
 
@@ -70,7 +72,7 @@ the read set Baleen reasons about is exactly the one `f5c` will align.
 | Source | Method |
 |--------|--------|
 | BAM | Iterate alignments, collect `query_name`. |
-| FASTQ | Prefer the f5c `.index.readdb` (read-id column) when present; otherwise parse FASTQ headers. |
+| FASTQ | Parse FASTQ headers (first token of each `@` line). Any adjacent f5c `.index.readdb` is deliberately ignored — see the v1.0.1 changelog. |
 | BLOW5 | `pyslow5.Open(path).get_read_ids()`. |
 
 The intersection runs by default. Disable it with `--no-read-intersection` if

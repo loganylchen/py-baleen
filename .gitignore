@@ -27,3 +27,6 @@ benchmarks/results.jsonl
 
 # MkDocs build output
 site/
+
+# Local assistant/session state
+.omc/

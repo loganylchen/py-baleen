@@ -66,34 +66,16 @@ def read_ids_from_bam(
 # --- FASTQ -------------------------------------------------------------------
 
 
-def _readdb_path_for(fastq: PathLike) -> Path:
-    """f5c writes the readdb adjacent to the FASTQ as ``<fastq>.index.readdb``."""
-    return Path(f"{fastq}.index.readdb")
-
-
-def read_ids_from_readdb(readdb_path: PathLike) -> set[str]:
-    """Parse f5c's ``.index.readdb`` (read_id<TAB>path per line)."""
-    readdb_path = Path(readdb_path)
-    ids: set[str] = set()
-    with readdb_path.open("rt") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            # Format is: read_id<TAB>path.  Some readdb files contain only
-            # the read_id (no path).  Splitting on first whitespace handles
-            # both cases.
-            rid = line.split("\t", 1)[0]
-            if rid:
-                ids.add(rid)
-    return ids
-
-
 def read_ids_from_fastq(fastq_path: PathLike) -> set[str]:
     """Parse a FASTQ (optionally gzipped) and return the set of read IDs.
 
-    Used as a fallback when no ``.index.readdb`` companion exists.
-    Read IDs are the first whitespace-delimited token of each header line.
+    Read IDs are the first whitespace-delimited token of each header line
+    (``@<read_id> runid=... ch=...``).  This is the sole read-id source for
+    the FASTQ side of the intersection: any ``<fastq>.index.readdb`` file
+    written by f5c is ignored.  f5c's single-BLOW5 readdb form is
+    ``*<TAB>blow5_path`` — the first column is a wildcard, not a read id — so
+    trusting it collapsed the FASTQ side to ``{"*"}`` (count=1) and silently
+    emptied the three-way intersection (fixed in v1.0.1; see #4).
     """
     fastq_path = Path(fastq_path)
     opener = gzip.open if str(fastq_path).endswith(".gz") else open
@@ -112,20 +94,6 @@ def read_ids_from_fastq(fastq_path: PathLike) -> set[str]:
                     ids.add(rid)
             line_no += 1
     return ids
-
-
-def read_ids_from_fastq_with_readdb(fastq_path: PathLike) -> set[str]:
-    """Prefer the cheap ``.index.readdb`` if present, else parse the FASTQ.
-
-    f5c always creates the readdb during indexing, so by the time the
-    pipeline reaches the intersection step the cheap path is virtually
-    always taken.  The FASTQ fallback exists for unit tests and ad-hoc
-    callers that compute intersections without running f5c first.
-    """
-    readdb = _readdb_path_for(fastq_path)
-    if readdb.exists():
-        return read_ids_from_readdb(readdb)
-    return read_ids_from_fastq(fastq_path)
 
 
 # --- BLOW5 -------------------------------------------------------------------
@@ -162,7 +130,7 @@ def compute_condition_intersection(
 ) -> set[str]:
     """Compute ``reads(BAM) ∩ reads(FASTQ) ∩ reads(BLOW5)`` for one condition."""
     bam_ids = read_ids_from_bam(bam, primary_only=primary_only, min_mapq=min_mapq)
-    fq_ids = read_ids_from_fastq_with_readdb(fastq)
+    fq_ids = read_ids_from_fastq(fastq)
     blow5_ids = read_ids_from_blow5(blow5)
 
     inter = bam_ids & fq_ids & blow5_ids
@@ -172,10 +140,27 @@ def compute_condition_intersection(
         prefix, len(bam_ids), len(fq_ids), len(blow5_ids), len(inter),
     )
     if not inter:
+        # Point at the most likely culprit: a read-id source whose count is
+        # wildly out of line with the others usually means an id-format
+        # mismatch (e.g. a non-standard FASTQ header) rather than genuinely
+        # disjoint runs.  Surface one example id per source so the format
+        # mismatch is obvious from the log alone.
+        def _example(ids: set[str]) -> str:
+            return next(iter(ids)) if ids else "<none>"
+
         logger.warning(
-            "%sread-id intersection is empty; pipeline will produce no output. "
-            "Check that BAM/FASTQ/BLOW5 come from the same basecalling run.",
+            "%sread-id intersection is empty; pipeline will produce no output.\n"
+            "  read-id sources -> bam=%d (e.g. %s), fastq=%d (e.g. %s), "
+            "blow5=%d (e.g. %s)\n"
+            "  BAM ids = query_name; FASTQ ids = first token of the '@' header; "
+            "BLOW5 ids = pyslow5 read ids.\n"
+            "  If one count is implausibly small (e.g. fastq=1), the ids in that "
+            "file are not in the expected format. Otherwise check that "
+            "BAM/FASTQ/BLOW5 come from the same basecalling run.",
             prefix,
+            len(bam_ids), _example(bam_ids),
+            len(fq_ids), _example(fq_ids),
+            len(blow5_ids), _example(blow5_ids),
         )
     else:
         # Surface the most likely failure modes — reads that the BAM
