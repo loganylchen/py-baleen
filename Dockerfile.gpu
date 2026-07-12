@@ -14,14 +14,18 @@ RUN sed -i 's|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|g; \
     wget build-essential zlib1g-dev libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install f5c v1.6 — use the CUDA build so eventalign also runs on the GPU.
-# The CUDA binary enables GPU by default (`--disable-cuda` defaults to `no`):
-# it dispatches longer reads to the GPU and the rest to CPU automatically, with
-# no extra flags from baleen's wrapper. It also falls back to CPU when no GPU is
-# visible or GPU memory is insufficient, so it is safe as the sole f5c here.
+# Install f5c v1.6 — use the CPU build (not the CUDA build) on purpose.
+# baleen already runs its own DTW on the GPU (the _cuda_dtw extension below).
+# Running f5c eventalign on the GPU as well makes the two contend for device
+# memory, and with multiple parallel contig workers the concurrent f5c CUDA
+# jobs readily OOM the card. The CPU f5c keeps eventalign off the GPU so the
+# whole device is left for cuDTW; its shared-library deps (libz, libstdc++,
+# libgcc_s, …) are a strict subset of the CUDA binary's and are already present
+# in the runtime stage, so no extra packages are needed. eventalign runs on CPU
+# but is not the pipeline bottleneck (the DTW is).
 RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v1.6/f5c-v1.6-binaries.tar.gz" \
     && tar xf f5c-v1.6-binaries.tar.gz \
-    && cp f5c-v1.6/f5c_x86_64_linux_cuda /usr/local/bin/f5c \
+    && cp f5c-v1.6/f5c_x86_64_linux /usr/local/bin/f5c \
     && chmod +x /usr/local/bin/f5c \
     && rm -rf f5c-v1.6 f5c-v1.6-binaries.tar.gz
 
