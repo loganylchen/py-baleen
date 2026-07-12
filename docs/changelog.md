@@ -4,6 +4,30 @@ This page summarises notable changes by theme; see the
 [full commit history](https://github.com/loganylchen/py-baleen/commits/main) for
 detail.
 
+## v1.0.2 — CPU f5c in the GPU image; versioned image tags
+
+Packaging/infrastructure release. Detection results are unchanged.
+
+### Changes
+
+- **The GPU image now bundles the CPU build of f5c.** Baleen runs its DTW on
+  the GPU (the cuDTW extension); running f5c eventalign on the GPU as well made
+  the two contend for device memory, and the concurrent f5c CUDA jobs from
+  parallel contig workers could OOM the card. Event alignment now runs on CPU
+  (its shared-library dependencies are a strict subset of the CUDA binary's and
+  are already present in the runtime stage), leaving the whole GPU for cuDTW.
+  Running with `--threads > 1` is again safe on a shared GPU.
+- **Release tags now publish versioned images.** Pushing a `vX.Y.Z` tag builds
+  `:X.Y.Z-gpu` / `:X.Y.Z-cpu` on GHCR and Docker Hub; previously only
+  branch/SHA/`latest` tags were published.
+
+### Notes
+
+- **RNA004 works with the stock pipeline — no code change required.** f5c 1.6
+  auto-detects the sequencing chemistry from the BLOW5 header (and falls back to
+  the `--rna` R9 model otherwise), so native-vs-IVT detection on RNA004 data
+  uses the correct k-mer model without any extra flag.
+
 ## v1.0.1 — read-ID intersection fix
 
 Patch release fixing a silent-empty-output bug in the default pipeline.

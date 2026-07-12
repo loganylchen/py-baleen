@@ -306,7 +306,7 @@ def _make_cuda_extension():
 
 setup(
     name="baleen",
-    version="1.0.1",
+    version="1.0.2",
     description="CUDA-accelerated DTW and nanopore signal analysis pipeline",
     author="Logan",
     python_requires=">=3.9",

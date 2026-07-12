@@ -31,9 +31,10 @@ BALEEN_NO_CUDA=1 pip install .
 
 ### Docker
 
-Pre-built images bundle **f5c** (CPU build in the CPU image, CUDA build in the
-GPU image so eventalign also runs on the GPU). One repository `py-baleen` with a
-tag suffix (`-cpu` / `-gpu`), published to Docker Hub and GHCR (public):
+Pre-built images bundle the **CPU build of f5c** (in both the CPU and GPU
+images; the GPU image keeps eventalign on the CPU so the whole GPU is left for
+Baleen's CUDA DTW). One repository `py-baleen` with a tag suffix (`-cpu` /
+`-gpu`), published to Docker Hub and GHCR (public):
 
 ```bash
 # Docker Hub
