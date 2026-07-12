@@ -7,15 +7,18 @@ repository** `py-baleen`; the variant is a tag **suffix** (`-cpu` / `-gpu`):
 | Dockerfile | Tag suffix | Base / f5c build |
 |------------|-----------|------------------|
 | `Dockerfile.cpu` | `-cpu` | `python:3.11-slim`, **CPU** f5c, CUDA DTW disabled (CPU `tslearn` backend). |
-| `Dockerfile.gpu` | `-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, **CUDA** f5c + GPU CUDA DTW. |
+| `Dockerfile.gpu` | `-gpu` | `nvidia/cuda:12.2.2-runtime-ubuntu22.04`, **CPU** f5c + GPU CUDA DTW. |
 
 Tags follow `<ref>-<variant>`: `latest-*` is published only from `main`;
-branch and long-SHA tags are published for every build. Both images bundle
-**f5c v1.6** and set `ENTRYPOINT ["baleen"]` with a `/data` working directory.
-The GPU image ships f5c's **CUDA build**, which uses the GPU by default
-(`--disable-cuda` defaults to `no`) — longer reads go to the GPU and the rest
-to CPU automatically, no extra flags needed — and falls back to CPU when no GPU
-is visible.
+branch and long-SHA tags are published for every build; and semantic-version
+tags (`X.Y.Z-*`, e.g. `1.0.2-gpu`) are published when a `vX.Y.Z` release tag is
+pushed. Both images bundle **f5c v1.6** and set `ENTRYPOINT ["baleen"]` with a
+`/data` working directory.
+The GPU image ships f5c's **CPU build** on purpose: Baleen already uses the GPU
+for its CUDA DTW, and running f5c eventalign on the GPU too made the two contend
+for device memory (concurrent jobs from parallel contig workers could OOM the
+card). Keeping eventalign on the CPU leaves the whole GPU for cuDTW; eventalign
+is not the pipeline bottleneck.
 
 Published to two registries:
 
