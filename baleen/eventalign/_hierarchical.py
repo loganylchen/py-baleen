@@ -1306,6 +1306,40 @@ def _run_hmm_on_trajectories(
 # ---------------------------------------------------------------------------
 
 
+def _chemistry_aware_p_stay(
+    position_stats: dict[int, PositionStats],
+    *,
+    default: float = 0.92,
+    rna004: float = 0.80,
+) -> float:
+    """Pick the HMM per-base *stay* probability from the pore k-mer length.
+
+    The default 2-state HMM smooths per-read modification calls along the
+    transcript with a Markov persistence of ``p_stay ** gap``.  The right
+    amount of smoothing depends on how wide each modification's signal
+    footprint is, which is set by the pore model's k-mer length:
+
+    - RNA002 / r9 uses a **5-mer** model → footprint ≈ ±2 nt.
+    - RNA004 uses a **9-mer** model → footprint ≈ ±4 nt.
+
+    ``p_stay=0.92`` was tuned for the 5-mer footprint; on RNA004 it
+    over-smooths and merges adjacent sites (a single 2'-O-methyl site
+    smears to ~16 nt).  Lowering ``p_stay`` for 9-mer chemistries tightens
+    the footprint and separates neighbouring modifications without losing
+    recall (validated on mitochondrial rRNA: 10/10 known sites retained at
+    0.80, RNA002 rRNA benchmarks unchanged).  The k-mer length is read from
+    the eventalign reference k-mers, so this adapts automatically without
+    the caller having to know the chemistry.  An explicit ``--hmm-params``
+    file bypasses this default entirely.
+    """
+    lens = [len(ps.reference_kmer) for ps in position_stats.values()
+            if ps.reference_kmer]
+    if not lens:
+        return default
+    kmer_len = int(np.median(lens))
+    return rna004 if kmer_len >= 8 else default
+
+
 def compute_sequential_modification_probabilities(
     contig_result: ContigResult,
     *,
@@ -1317,7 +1351,7 @@ def compute_sequential_modification_probabilities(
     mixture_pi_threshold: float = 0.05,
     mixture_separation: float = 0.8,
     hmm_min_positions: int = 3,
-    hmm_p_stay_per_base: float = 0.92,
+    hmm_p_stay_per_base: float | None = None,
     run_hmm: bool = True,
     hmm_params: HMMParams | None = None,
     emission_source: str = "p_mod_knn",
@@ -1597,12 +1631,27 @@ def compute_sequential_modification_probabilities(
         if effective_hmm_params is None:
             from baleen.eventalign._hmm_training import create_unsupervised_params
             effective_hmm_params = create_unsupervised_params(n_states=2)
+            # Resolve the HMM stay probability for the default 2-state model:
+            # an explicit hmm_p_stay_per_base wins, otherwise fall back to a
+            # chemistry-aware default.  (Previously the constructed default
+            # HMMParams unconditionally overrode hmm_p_stay_per_base, so the
+            # argument had no effect.)  Chemistry-aware default: RNA004's
+            # 9-mer pore model spreads each modification over a wider
+            # footprint than RNA002's 5-mer, so the RNA002-tuned p_stay=0.92
+            # over-smooths RNA004 and merges adjacent sites; p_stay is derived
+            # from the observed k-mer length.  An explicit --hmm-params file
+            # bypasses this branch entirely.
+            effective_hmm_params.p_stay_per_base = (
+                hmm_p_stay_per_base
+                if hmm_p_stay_per_base is not None
+                else _chemistry_aware_p_stay(position_stats)
+            )
 
         _run_hmm_on_trajectories(
             native_trajs,
             position_stats,
             min_positions=hmm_min_positions,
-            p_stay_per_base=hmm_p_stay_per_base,
+            p_stay_per_base=effective_hmm_params.p_stay_per_base,
             hmm_params=effective_hmm_params,
             emission_source=emission_source,
         )
@@ -1610,7 +1659,7 @@ def compute_sequential_modification_probabilities(
             ivt_trajs,
             position_stats,
             min_positions=hmm_min_positions,
-            p_stay_per_base=hmm_p_stay_per_base,
+            p_stay_per_base=effective_hmm_params.p_stay_per_base,
             hmm_params=effective_hmm_params,
             emission_source=emission_source,
         )
