@@ -7,6 +7,12 @@ by comparing against the CPU (tslearn) reference implementation.
 Run with: pytest tests/test_cudtw_migration.py -v
 """
 
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pytest
 
@@ -158,3 +164,46 @@ class TestMultiPosition:
         np.testing.assert_allclose(mat, mat.T, atol=1e-5)
 
 
+class TestKernelMemoryBounds:
+    """The kernels must only read inside the buffers the wrapper allocates.
+
+    An out-of-bounds read is invisible to the output and only faults when the
+    buffer happens to end on an unmapped page, so it needs the CUDA memory
+    checker rather than a value assertion.
+    """
+
+    _SCRIPT = textwrap.dedent("""
+        import numpy as np
+        from baleen._cuda_dtw import _cuda_dtw as ext
+
+        rng = np.random.default_rng(0)
+        for bucket in (127, 255, 511, 1023, 2047):
+            # Full-bucket rows: the last row ends exactly at the buffer end.
+            seqs = rng.standard_normal((3, bucket)).astype(np.float32)
+            lengths = np.full(3, bucket, np.int64)
+            ext.dtw_multi_position_pairwise(seqs, lengths, np.array([3], np.int64))
+            ext.dtw_pairwise(seqs)
+            ext.dtw_pairwise_varlen(seqs, lengths)
+            ext.dtw_distance(seqs[0], seqs[1])
+    """)
+
+    @pytest.mark.skipif(
+        shutil.which("compute-sanitizer") is None,
+        reason="compute-sanitizer (CUDA toolkit) not on PATH",
+    )
+    def test_memcheck_clean(self):
+        import baleen
+
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(baleen.__file__)))
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [pkg_parent] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        )
+        proc = subprocess.run(
+            ["compute-sanitizer", "--tool", "memcheck", "--error-exitcode", "1",
+             sys.executable, "-c", self._SCRIPT],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=900, env=env,
+        )
+        assert proc.returncode == 0, proc.stdout[-3000:]
+        assert "ERROR SUMMARY: 0 errors" in proc.stdout, proc.stdout[-3000:]
