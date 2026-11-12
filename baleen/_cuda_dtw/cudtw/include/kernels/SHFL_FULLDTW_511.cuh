@@ -199,7 +199,9 @@ void shfl_FullDTW_511( // was DTW_fast_512_shuffle_kernel_no_shared_memory
             //if (blid == 0 && iter == 0) Dist[64*(k-1)+2*thid+1] = penalty_here1;
 
             //if (counter%32 == 0 && counter > 1) new_query_value = Query[i+2*thid-1];
-            if (counter%32 == 0) new_query_value = Query[i+2*thid-1];
+            // The refill index runs up to num_features+32 for rows past the query
+            // end; those rows never reach Dist, so clamp to keep the load in bounds.
+            if (counter%32 == 0) new_query_value = Query[min(i+2*thid-1, num_features-1)];
             query_value = __shfl_up_sync(0xFFFFFFFF, query_value, 1, 32);
             if (thid == 0) query_value = new_query_value;
             new_query_value = __shfl_down_sync(0xFFFFFFFF, new_query_value, 1, 32);
