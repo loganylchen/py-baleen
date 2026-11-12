@@ -74,9 +74,15 @@ _MAX_CUDTW_LEN = 2047
 _BUCKETS = (127, 255, 511, 1023, 2047)
 
 
-def _select_bucket(n: int) -> int:
+def _select_bucket(min_len: int, max_len: int) -> int:
+    """Kernel width for a group of signals; mirrors select_bucket() in cudtw_wrapper.cu.
+
+    Signals of mixed lengths need one slot of padding beyond the longest one;
+    signals of equal length may fill the width exactly.
+    """
+    need = max_len if min_len == max_len else max_len + 1
     for b in _BUCKETS:
-        if n <= b:
+        if need <= b:
             return b
     return _BUCKETS[-1]  # caller is expected to resample before reaching here
 
@@ -85,6 +91,20 @@ def _resample_signal(sig, target_len):
     """Resample a signal to target_len using scipy."""
     from scipy.signal import resample
     return resample(sig.astype(np.float64), target_len).astype(np.float32)
+
+
+def _fit_to_kernel(signals: list) -> list:
+    """Resample over-long signals so the group fits one cuDTW++ kernel.
+
+    The widest kernel holds 2047 samples.  A group of mixed lengths must leave
+    one slot for padding (see ``_select_bucket``), so its signals are capped at
+    2046; a group of equal lengths is only capped at 2047.
+    """
+    lengths = {len(s) for s in signals}
+    limit = _MAX_CUDTW_LEN if len(lengths) == 1 else _MAX_CUDTW_LEN - 1
+    if max(lengths) <= limit:
+        return signals
+    return [_resample_signal(s, limit) if len(s) > limit else s for s in signals]
 
 
 # ---------------------------------------------------------------------------
@@ -175,16 +195,22 @@ def dtw_distance(
                 "CUDA backend requested but not available. "
                 "Install with CUDA support or use use_cuda=False for CPU."
             )
-        return _dtw_distance_cuda(seq1, seq2)
+        return _dtw_distance_gpu(seq1, seq2)
 
     if use_cuda is False:
         return _dtw_distance_cpu(seq1, seq2)
 
     # use_cuda is None: auto-select
     if CUDA_AVAILABLE:
-        return _dtw_distance_cuda(seq1, seq2)
+        return _dtw_distance_gpu(seq1, seq2)
 
     return _dtw_distance_cpu(seq1, seq2)
+
+
+def _dtw_distance_gpu(seq1: np.ndarray, seq2: np.ndarray) -> float:
+    if _CUDTW_ACTIVE:
+        seq1, seq2 = _fit_to_kernel([seq1, seq2])
+    return _dtw_distance_cuda(seq1, seq2)
 
 
 # ---------------------------------------------------------------------------
@@ -286,16 +312,9 @@ def dtw_pairwise_varlen(
                 "Install with CUDA support or use use_cuda=False."
             )
 
-        # Resample signals > 2047 when cuDTW++ is active
         if _CUDTW_ACTIVE:
-            max_raw = int(lengths.max())
-            if max_raw > _MAX_CUDTW_LEN:
-                _log.info("Resampling %d signals from max %d to %d for cuDTW++",
-                          len(prepped), max_raw, _MAX_CUDTW_LEN)
-                prepped = [_resample_signal(s, _MAX_CUDTW_LEN)
-                           if len(s) > _MAX_CUDTW_LEN else s
-                           for s in prepped]
-                lengths = np.array([len(s) for s in prepped], dtype=np.int64)
+            prepped = _fit_to_kernel(prepped)
+            lengths = np.array([len(s) for s in prepped], dtype=np.int64)
 
         max_len = int(lengths.max())
         n = len(prepped)
@@ -365,19 +384,10 @@ def dtw_multi_position_pairwise(
                 "Install with CUDA support or use use_cuda=False."
             )
 
-        # Resample signals > 2047 when cuDTW++ is active
+        # Each position is its own kernel group.
         if _CUDTW_ACTIVE:
-            any_long = any(
-                len(s) > _MAX_CUDTW_LEN for pos_sigs in prepped for s in pos_sigs
-            )
-            if any_long:
-                _log.info("Resampling signals > %d for cuDTW++", _MAX_CUDTW_LEN)
-                prepped = [
-                    [_resample_signal(s, _MAX_CUDTW_LEN)
-                     if len(s) > _MAX_CUDTW_LEN else s
-                     for s in pos_sigs]
-                    for pos_sigs in prepped
-                ]
+            prepped = [_fit_to_kernel(pos_sigs) if pos_sigs else pos_sigs
+                       for pos_sigs in prepped]
 
         global_max_len = max(
             len(s) for pos_sigs in prepped for s in pos_sigs
@@ -446,15 +456,19 @@ def estimate_gpu_memory(position_signals: list[list[np.ndarray]]) -> int:
     """Estimate GPU memory bytes for a multi-position pairwise DTW call.
 
     The cuDTW++ wrapper allocates:
-      - d_subjects: total_seqs * global_bucket * 4 bytes (doubles as query source)
+      - d_subjects: sum(n_p * bucket_p) * 4 bytes (doubles as query source)
       - d_out:      sum(n_p^2) * 4 bytes (float32 squared cost)
     No cost matrix is allocated (cuDTW++ accumulates in registers).
     """
     total_seqs = sum(len(ps) for ps in position_signals)
-    max_len = max(len(s) for ps in position_signals for s in ps)
-    bucket = _select_bucket(max_len)
+    input_floats = 0
+    for ps in position_signals:
+        if not ps:
+            continue
+        lengths = [len(s) for s in ps]
+        input_floats += len(ps) * _select_bucket(min(lengths), max(lengths))
 
-    input_bytes   = total_seqs * bucket * 4
+    input_bytes   = input_floats * 4
     output_bytes  = sum(len(ps) ** 2 for ps in position_signals) * 4
     lengths_bytes = total_seqs * 8  # host-side h_lengths array
 

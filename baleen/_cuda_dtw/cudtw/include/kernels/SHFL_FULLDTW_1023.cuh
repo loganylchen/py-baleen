@@ -371,7 +371,7 @@ void shfl_FullDTW_1023 ( // was DTW_fast_1024_shuffle_kernel_no_shared_memory
         penalty_here15 = (query_value-subject_value15) * (query_value-subject_value15) + min(penalty_here14, min(penalty_here15, penalty_temp0));
 
         penalty_temp0 = penalty_here16;
-        penalty_here16 = (query_value-subject_value16) * (query_value-subject_value16) + min(penalty_here15, min(penalty_here16, penalty_diag));
+        penalty_here16 = (query_value-subject_value16) * (query_value-subject_value16) + min(penalty_here15, min(penalty_here16, penalty_temp1));
         penalty_temp1 = penalty_here17;
         penalty_here17 = (query_value-subject_value17) * (query_value-subject_value17) + min(penalty_here16, min(penalty_here17, penalty_temp0));
         penalty_temp0 = penalty_here18;
