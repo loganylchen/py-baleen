@@ -353,7 +353,7 @@ void shfl_FullDTW_2047(
     counter++;
 
     penalty_diag = penalty_left;
-    penalty_left = __shfl_up_sync(0xFFFFFFFF, penalty_here31, 1, 32);
+    penalty_left = __shfl_up_sync(0xFFFFFFFF, penalty_here63, 1, 32);
 
     if (thid == 0) penalty_left = INFINITY;
 
@@ -549,7 +549,7 @@ void shfl_FullDTW_2047(
         penalty_here15 = (query_value-subject_value15) * (query_value-subject_value15) + min(penalty_here14, min(penalty_here15, penalty_temp0));
 
         penalty_temp0 = penalty_here16;
-        penalty_here16 = (query_value-subject_value16) * (query_value-subject_value16) + min(penalty_here15, min(penalty_here16, penalty_diag));
+        penalty_here16 = (query_value-subject_value16) * (query_value-subject_value16) + min(penalty_here15, min(penalty_here16, penalty_temp1));
         penalty_temp1 = penalty_here17;
         penalty_here17 = (query_value-subject_value17) * (query_value-subject_value17) + min(penalty_here16, min(penalty_here17, penalty_temp0));
         penalty_temp0 = penalty_here18;

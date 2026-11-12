@@ -4,6 +4,7 @@
 // enabling CUDA-stream concurrency across pairwise queries.
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -34,14 +35,37 @@ typedef uint64_t index_t;
 
 // --------------------------------------------------------------------------
 // Length bucketing
+//
+// The kernels run full DTW over a fixed width, so shorter sequences are padded.
+// Padding only leaves the distance unchanged if both sequences of a pair end
+// in padding: the path then crosses from the last real cell into a zero-cost
+// pad/pad block.  A sequence that fills the width has no padding of its own,
+// and every other sequence's padding would have to align with its real
+// samples.  So a group of mixed lengths needs one spare slot beyond its
+// longest member; a group of equal lengths may fill the width exactly.
 // --------------------------------------------------------------------------
-static int select_bucket(int len) {
-    if (len <= 127)  return 127;
-    if (len <= 255)  return 255;
-    if (len <= 511)  return 511;
-    if (len <= 1023) return 1023;
-    if (len <= 2047) return 2047;
+static int select_bucket(size_t min_len, size_t max_len) {
+    const size_t need = (min_len == max_len) ? max_len : max_len + 1;
+    if (need <= 127)  return 127;
+    if (need <= 255)  return 255;
+    if (need <= 511)  return 511;
+    if (need <= 1023) return 1023;
+    if (need <= 2047) return 2047;
     return -1;  // too long — caller must resample
+}
+
+// Pad/pad cells cost exactly 0.  Pad/real cells must never be cheaper than a
+// real alignment (zeros fail this for samples near 0), so the padding value
+// is chosen to make them impossible: for any sample of magnitude below ~1e30
+// the squared difference overflows float32 to +inf, the same value the
+// kernels use for their out-of-matrix boundary.
+static const float PAD_VALUE = 1.0e30f;
+
+// Host buffer pre-filled with PAD_VALUE; caller frees.
+static float *alloc_padded(size_t count) {
+    float *buf = (float *)malloc(count * sizeof(float));
+    if (buf) std::fill_n(buf, count, PAD_VALUE);
+    return buf;
 }
 
 // --------------------------------------------------------------------------
@@ -58,14 +82,16 @@ int opendba_dtw_cuda(
     }
 
     size_t max_len = (len1 > len2) ? len1 : len2;
-    int bucket = select_bucket((int)max_len);
+    size_t min_len = (len1 < len2) ? len1 : len2;
+    int bucket = select_bucket(min_len, max_len);
     if (bucket < 0) {
-        fprintf(stderr, "cudtw_wrapper: sequence too long (%zu), max 2047\n", max_len);
+        fprintf(stderr, "cudtw_wrapper: sequences too long (%zu, %zu); max 2047 "
+                "if equal length, else 2046\n", len1, len2);
         return -1;
     }
 
-    float *h_query   = (float *)calloc(bucket, sizeof(float));
-    float *h_subject = (float *)calloc(bucket, sizeof(float));
+    float *h_query   = alloc_padded(bucket);
+    float *h_subject = alloc_padded(bucket);
     if (!h_query || !h_subject) { free(h_query); free(h_subject); return -1; }
     memcpy(h_query,   seq1, len1 * sizeof(float));
     memcpy(h_subject, seq2, len2 * sizeof(float));
@@ -164,7 +190,7 @@ int opendba_dtw_pairwise_batch(
         return -1;
     }
 
-    int bucket = select_bucket((int)seq_length);
+    int bucket = select_bucket(seq_length, seq_length);
     if (bucket < 0) {
         fprintf(stderr, "cudtw_wrapper: seq_length %zu > 2047\n", seq_length);
         return -1;
@@ -173,7 +199,7 @@ int opendba_dtw_pairwise_batch(
     const size_t N = num_sequences;
 
     // Pad all sequences to bucket on host (single contiguous buffer)
-    float *h_padded = (float *)calloc(N * bucket, sizeof(float));
+    float *h_padded = alloc_padded(N * bucket);
     if (!h_padded) return -1;
     for (size_t i = 0; i < N; i++)
         memcpy(h_padded + i * bucket, sequences + i * seq_length,
@@ -231,20 +257,23 @@ int opendba_dtw_pairwise_varlen(
         return -1;
     }
 
-    size_t actual_max = 0;
-    for (size_t i = 0; i < num_sequences; i++)
+    size_t actual_max = 0, actual_min = seq_lengths[0];
+    for (size_t i = 0; i < num_sequences; i++) {
         if (seq_lengths[i] > actual_max) actual_max = seq_lengths[i];
+        if (seq_lengths[i] < actual_min) actual_min = seq_lengths[i];
+    }
 
-    int bucket = select_bucket((int)actual_max);
+    int bucket = select_bucket(actual_min, actual_max);
     if (bucket < 0) {
-        fprintf(stderr, "cudtw_wrapper: max_length %zu > 2047\n", actual_max);
+        fprintf(stderr, "cudtw_wrapper: lengths %zu..%zu too long; max 2047 "
+                "if all equal, else 2046\n", actual_min, actual_max);
         return -1;
     }
 
     const size_t N = num_sequences;
 
     // Repack to bucket width
-    float *h_padded = (float *)calloc(N * bucket, sizeof(float));
+    float *h_padded = alloc_padded(N * bucket);
     if (!h_padded) return -1;
     for (size_t i = 0; i < N; i++)
         memcpy(h_padded + i * bucket, sequences + i * max_length,
@@ -327,15 +356,17 @@ int opendba_dtw_multi_position_pairwise(
         pos_float_offsets[p] = total_floats;
         out_offsets[p]       = total_out;
 
-        size_t pos_max = 0;
+        size_t pos_max = 0, pos_min = (n > 0) ? all_seq_lengths[total_seqs] : 0;
         for (size_t i = 0; i < n; i++) {
             size_t l = all_seq_lengths[total_seqs + i];
             if (l > pos_max) pos_max = l;
+            if (l < pos_min) pos_min = l;
         }
-        int b = (n < 2) ? 0 : select_bucket((int)pos_max);
+        int b = (n < 2) ? 0 : select_bucket(pos_min, pos_max);
         if (b < 0) {
-            fprintf(stderr, "cudtw_wrapper: position %zu max_len %zu > 2047\n",
-                    p, pos_max);
+            fprintf(stderr, "cudtw_wrapper: position %zu lengths %zu..%zu too "
+                    "long; max 2047 if all equal, else 2046\n",
+                    p, pos_min, pos_max);
             return -1;
         }
         buckets[p]    = b;
@@ -352,7 +383,7 @@ int opendba_dtw_multi_position_pairwise(
 
     // Pack sequences per-position with per-position stride.  Skipped entirely
     // for n<2 positions (they contribute 0 floats).
-    float *h_padded = (float *)calloc(total_floats, sizeof(float));
+    float *h_padded = alloc_padded(total_floats);
     if (!h_padded) return -1;
 
     for (size_t p = 0; p < num_positions; p++) {
